@@ -2,17 +2,15 @@
 
 ## Project Structure & Module Organization
 
-`src/mastra/` contains the application runtime. Keep agents in `agents/`, callable capabilities in `tools/`, retrieval code in `rag/`, and shared vector configuration in `vector.ts`. Scripts used for one-off ingestion and manual checks live in `src/scripts/`. PostgreSQL schema lives in `database/init.sql`; seed material belongs in `data/seed/`. Do not treat vector metadata as the source of truth: canonical work and chapter records belong in the `works` and `chapters` tables.
+`backend/src/mastra/` contains the application runtime. Keep agents in `agents/`, callable capabilities in `tools/`, retrieval code in `rag/`, and shared vector configuration in `vector.ts`. Scripts used for one-off ingestion and manual checks live in `backend/src/scripts/`. PostgreSQL schema lives in `backend/database/init.sql`; seed material belongs in `backend/data/seed/`. `frontend/` contains the React knowledge-workbench UI and must not import Mastra runtime code directly. Do not treat vector metadata as the source of truth: canonical work and chapter records belong in the `works` and `chapters` tables.
 
 ## Build, Test, and Development Commands
 
-- `npm install` installs the locked Node dependencies.
-- `npm run typecheck` runs the required TypeScript static check.
-- `npm run dev` starts Mastra Studio for local agent development.
-- `npm run ingest:daodejing` imports the bundled test excerpts after database initialization.
-- `npm run ask -- "《道德经》中的无为是什么意思？"` performs the manual RAG smoke check.
+- In `backend/`, `npm install` installs the locked dependencies and `npm run typecheck` runs the required static check.
+- In `backend/`, `npm run dev` starts Mastra Studio, `npm run ingest:daodejing` imports the bundled test excerpts, and `npm run ask -- "《道德经》中的无为是什么意思？"` performs the manual RAG smoke check.
+- In `frontend/`, `npm run build` performs the production build and type check.
 
-Run `database/init.sql` against the configured PostgreSQL database before ingestion. Do not start services or run ingestion against a shared database without explicit approval.
+Run `backend/database/init.sql` against the configured PostgreSQL database before ingestion. Do not start services or run ingestion against a shared database without explicit approval.
 
 ## Coding Style & Naming Conventions
 
