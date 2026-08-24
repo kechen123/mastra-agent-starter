@@ -1,5 +1,6 @@
 import { Mastra } from '@mastra/core';
 import { taoismAgent } from './agents/taoism-agent.js';
+import { knowledgeBaseAgent } from './agents/knowledge-base-agent.js';
 import { askRoute } from './routes/ask.js';
 import {
   deleteDocumentRoute,
@@ -17,7 +18,7 @@ import {
 import { scriptureVector } from './vector.js';
 
 export const mastra = new Mastra({
-  agents: { taoismAgent },
+  agents: { taoismAgent, knowledgeBaseAgent },
   vectors: { scriptureVector },
   server: {
     apiRoutes: [

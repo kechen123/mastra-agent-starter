@@ -170,6 +170,8 @@ function findBoundary(text: string, start: number, targetEnd: number): number {
 }
 
 function findHeading(text: string, position: number): string | undefined {
+  const headingAtChunkStart = text.slice(position).match(/^#{1,6}\s+([^\n]+)/)?.[1]?.trim();
+  if (headingAtChunkStart) return headingAtChunkStart;
   const preceding = text.slice(0, position);
   const matches = [...preceding.matchAll(/^#{1,6}\s+(.+)$/gm)];
   const heading = matches.at(-1)?.[1]?.trim();

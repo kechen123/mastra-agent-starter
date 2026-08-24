@@ -1,4 +1,4 @@
-export type KnowledgeType = 'scripture' | 'commentary' | 'historical' | 'research';
+export type KnowledgeType = 'scripture' | 'commentary' | 'historical' | 'research' | 'document';
 
 export interface WorkMetadata {
   title: string;
@@ -17,4 +17,9 @@ export interface Citation extends WorkMetadata {
   chapter: string;
   content: string;
   score: number;
+  documentId?: string;
+  documentName?: string;
+  chunkIndex?: number;
+  heading?: string;
+  distance?: number;
 }
