@@ -1,7 +1,8 @@
 import { registerApiRoute } from '@mastra/core/server';
-import { DocumentIngestionError, ingestTextDocument } from '../services/document-ingestion.js';
+import { DocumentIngestionError, ingestDocument } from '../services/document-ingestion.js';
 import { deleteDocument, getDocument, listDocuments } from '../services/documents.js';
 import { getKnowledgeBase } from '../services/knowledge-bases.js';
+import { UnsupportedDocumentTypeError } from '../document-parsers/types.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -20,7 +21,7 @@ export const uploadDocumentRoute = registerApiRoute('/knowledge-bases/:id/docume
       const file = formData.get('file');
       const fileInput = validateFile(file);
       if ('message' in fileInput) return context.json(fileInput, 400);
-      const document = await ingestTextDocument({
+      const document = await ingestDocument({
         knowledgeBaseId,
         name: fileInput.name,
         type: fileInput.type,
@@ -28,6 +29,9 @@ export const uploadDocumentRoute = registerApiRoute('/knowledge-bases/:id/docume
       });
       return context.json(document, 201);
     } catch (error) {
+      if (error instanceof UnsupportedDocumentTypeError) {
+        return context.json({ message: error.message }, 400);
+      }
       if (error instanceof DocumentIngestionError) {
         return context.json({ message: '文档处理失败，可通过文档详情查看处理状态。', documentId: error.documentId }, 500);
       }
@@ -84,16 +88,16 @@ export const deleteDocumentRoute = registerApiRoute('/documents/:id', {
   },
 });
 
-function validateFile(value: FormDataEntryValue | null): { file: File; name: string; type: 'txt' | 'md' } | { message: string } {
+function validateFile(value: FormDataEntryValue | null): { file: File; name: string; type: string } | { message: string } {
   if (!value || typeof value === 'string' || typeof value.arrayBuffer !== 'function') {
     return { message: '请使用 file 字段上传文件。' };
   }
   const name = value.name.trim();
   const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
-  if (extension !== 'txt' && extension !== 'md') return { message: '仅支持 .txt 或 .md 文件。' };
+  // 格式白名单由 ParserRegistry 统一管理，此处仅做基础校验
   if (value.size === 0) return { message: '不允许上传空文件。' };
   if (value.size > MAX_FILE_SIZE) return { message: '文件不能超过 10 MB。' };
-  return { file: value, name, type: extension };
+  return { file: value, name, type: extension || 'unknown' };
 }
 
 function isUuid(value: string): boolean {

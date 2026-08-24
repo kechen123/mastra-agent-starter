@@ -7,6 +7,10 @@ import {
   updateDocumentStatus,
   type DocumentSummary,
 } from './documents.js';
+import { getParser } from '../document-parsers/parser-registry.js';
+import { normalizeText } from '../document-parsers/plain-text-parser.js';
+import { UnsupportedDocumentTypeError } from '../document-parsers/types.js';
+import { MinerUClientError, MinerUParseError } from '../document-parsers/mineru-client.js';
 
 const CHUNK_SIZE = 1_000;
 const CHUNK_OVERLAP = 150;
@@ -26,12 +30,15 @@ export class DocumentIngestionError extends Error {
   }
 }
 
-export async function ingestTextDocument(input: {
+export async function ingestDocument(input: {
   knowledgeBaseId: string;
   name: string;
-  type: 'txt' | 'md';
+  type: string;
   bytes: Uint8Array;
 }): Promise<DocumentSummary> {
+  // 先验证格式支持，不支持则直接抛出，不会创建 documents 记录
+  const parser = getParser({ filename: input.name });
+
   const document = await createDocument({
     knowledgeBaseId: input.knowledgeBaseId,
     name: input.name,
@@ -41,7 +48,12 @@ export async function ingestTextDocument(input: {
 
   try {
     await updateDocumentStatus(document.id, 'parsing');
-    const text = normalizeText(new TextDecoder('utf-8', { fatal: true }).decode(input.bytes));
+    const parsed = await parser.parse({
+      filename: input.name,
+      buffer: Buffer.from(input.bytes),
+    });
+
+    const text = normalizeText(parsed.markdown);
     if (!text) throw new Error('文件内容不能为空。');
 
     await updateDocumentStatus(document.id, 'chunking');
@@ -54,7 +66,7 @@ export async function ingestTextDocument(input: {
       throw new Error(`Embedding 返回数量不匹配：期望 ${chunks.length}，实际 ${embeddings.length}`);
     }
 
-    await replaceChunksAndComplete(document, chunks, embeddings);
+    await replaceChunksAndComplete(document, chunks, embeddings, parsed.metadata.parser, parsed.metadata.sourceFormat);
     return (await getDocument(document.id))!;
   } catch (error) {
     const errorMessage = toSafeErrorMessage(error);
@@ -68,6 +80,8 @@ async function replaceChunksAndComplete(
   document: DocumentSummary,
   chunks: TextChunk[],
   embeddings: number[][],
+  parserName: string,
+  sourceFormat: string,
 ): Promise<void> {
   const client = await getDatabasePool().connect();
   try {
@@ -76,7 +90,7 @@ async function replaceChunksAndComplete(
     for (let index = 0; index < chunks.length; index += INSERT_BATCH_SIZE) {
       const chunkBatch = chunks.slice(index, index + INSERT_BATCH_SIZE);
       const embeddingBatch = embeddings.slice(index, index + INSERT_BATCH_SIZE);
-      await insertChunkBatch(client, document, chunkBatch, embeddingBatch);
+      await insertChunkBatch(client, document, chunkBatch, embeddingBatch, parserName, sourceFormat);
     }
     await client.query(`
       UPDATE documents
@@ -97,6 +111,8 @@ async function insertChunkBatch(
   document: DocumentSummary,
   chunks: TextChunk[],
   embeddings: number[][],
+  parserName: string,
+  sourceFormat: string,
 ): Promise<void> {
   const values: unknown[] = [];
   const rows = chunks.map((chunk, index) => {
@@ -106,6 +122,8 @@ async function insertChunkBatch(
       documentType: document.type,
       startChar: chunk.startChar,
       endChar: chunk.endChar,
+      parser: parserName,
+      sourceFormat,
       ...(chunk.heading ? { heading: chunk.heading } : {}),
     };
     values.push(
@@ -122,14 +140,6 @@ async function insertChunkBatch(
     INSERT INTO document_chunks (knowledge_base_id, document_id, content, chunk_index, metadata, embedding)
     VALUES ${rows.join(', ')}
   `, values);
-}
-
-function normalizeText(text: string): string {
-  return text
-    .replace(/^\uFEFF/, '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
 }
 
 function splitText(text: string): TextChunk[] {
@@ -183,8 +193,19 @@ function toVectorLiteral(embedding: number[]): string {
 }
 
 function toSafeErrorMessage(error: unknown): string {
-  const cause = error instanceof Error && error.cause instanceof Error ? `：${error.cause.message}` : '';
-  const message = error instanceof Error ? `${error.message}${cause}` : '未知处理错误。';
+  if (error instanceof UnsupportedDocumentTypeError) {
+    return error.message;
+  }
+
+  // MinerU 相关错误使用受控固定文本，不暴露内部 cause、response body、网络细节或 stack
+  if (error instanceof MinerUClientError || error instanceof MinerUParseError) {
+    return error.message;
+  }
+
+  const message = error instanceof Error ? error.message : '未知处理错误。';
+  if (message.startsWith('Embedding ')) {
+    return '文档向量化服务暂时不可用。';
+  }
   return message
     .replace(/Bearer\s+[^\s]+/gi, 'Bearer [REDACTED]')
     .replace(/postgres(?:ql)?:\/\/[^\s@]+@/gi, 'postgresql://[REDACTED]@')

@@ -1,5 +1,5 @@
 import { Mastra } from '@mastra/core';
-import { taoismAgent } from './agents/taoism-agent.js';
+import { generalAgent } from './agents/general-agent.js';
 import { knowledgeBaseAgent } from './agents/knowledge-base-agent.js';
 import { askRoute } from './routes/ask.js';
 import {
@@ -8,6 +8,7 @@ import {
   listDocumentsRoute,
   uploadDocumentRoute,
 } from './routes/documents.js';
+import { capabilitiesRoute } from './routes/capabilities.js';
 import {
   createKnowledgeBaseRoute,
   deleteKnowledgeBaseRoute,
@@ -15,11 +16,9 @@ import {
   listKnowledgeBasesRoute,
   updateKnowledgeBaseRoute,
 } from './routes/knowledge-bases.js';
-import { scriptureVector } from './vector.js';
 
 export const mastra = new Mastra({
-  agents: { taoismAgent, knowledgeBaseAgent },
-  vectors: { scriptureVector },
+  agents: { generalAgent, knowledgeBaseAgent },
   server: {
     apiRoutes: [
       askRoute,
@@ -32,6 +31,7 @@ export const mastra = new Mastra({
       listDocumentsRoute,
       getDocumentRoute,
       deleteDocumentRoute,
+      capabilitiesRoute,
     ],
   },
 });

@@ -7,7 +7,6 @@
     "dev": "mastra dev",
     "start": "mastra start",
     "typecheck": "tsc --noEmit",
-    "ingest:daodejing": "tsx src/scripts/ingest-daodejing.ts",
     "ask": "tsx src/scripts/ask.ts"
   },
   "dependencies": {

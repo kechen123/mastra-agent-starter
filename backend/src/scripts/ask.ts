@@ -1,10 +1,25 @@
 import 'dotenv/config';
-import { answerWithCitations } from '../mastra/services/ask.js';
+import { answerGeneral, answerWithKnowledge } from '../mastra/services/ask.js';
 
-const question = process.argv.slice(2).join(' ') || '《道德经》中的无为是什么意思？';
-const result = await answerWithCitations(question);
-console.log(result.answer);
-console.log('\n引用：');
-for (const citation of result.citations) {
-  console.log(`- ${citation.title}｜${citation.chapter}｜${citation.version ?? '版本未标注'}｜${citation.source}`);
+const args = process.argv.slice(2);
+const knowledgeBaseId = args.find((arg) => arg.startsWith('--kb='))?.slice(5);
+const question = args.filter((arg) => !arg.startsWith('--kb=')).join(' ') || '请概括已检索资料的核心内容。';
+
+async function main(): Promise<void> {
+  if (knowledgeBaseId) {
+    const result = await answerWithKnowledge(question, knowledgeBaseId);
+    console.log(result.answer);
+    console.log('\n引用：');
+    for (const citation of result.citations) {
+      console.log(`- ${citation.title}｜${citation.chapter}｜${citation.source}`);
+    }
+  } else {
+    const result = await answerGeneral(question);
+    console.log(result.answer);
+  }
 }
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
