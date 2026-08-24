@@ -10,3 +10,12 @@
 .user-message { flex-direction: row-reverse; justify-content: flex-start; }
 .user-message > div { display: flex; flex-direction: column; align-items: flex-end; }
 @media (max-width: 1050px) { .app { grid-template-columns: 82px 260px minmax(0, 1fr); } }
+
+.empty-state { display: grid; place-items: center; gap: 12px; min-height: 300px; padding: 32px; color: var(--muted); text-align: center; }
+.empty-state p { max-width: 420px; margin: 0; font-size: 14px; line-height: 1.75; }
+.request-error { margin: 16px 0; padding: 10px 12px; color: #d94b4b; background: #d94b4b12; border: 1px solid #d94b4b55; border-radius: 7px; font-size: 13px; }
+.send:disabled, .composer textarea:disabled { cursor: not-allowed; opacity: .5; }
+.loading-answer { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+.loading-answer span { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: answer-loading 1s infinite ease-in-out; }
+.loading-answer span:nth-child(2) { animation-delay: .15s; }.loading-answer span:nth-child(3) { animation-delay: .3s; }
+@keyframes answer-loading { 0%, 100% { transform: translateY(0); opacity: .35; } 50% { transform: translateY(-3px); opacity: 1; } }

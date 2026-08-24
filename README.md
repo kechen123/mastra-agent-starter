@@ -26,6 +26,8 @@ npm run typecheck
 npm run dev
 ```
 
+知识问答接口注册在 Mastra 开发服务的 `/ask` 路径；Vite 开发环境会将 `/ask` 转发到 `http://localhost:4111`。
+
 前端命令位于 `frontend/`：
 
 ```bash
