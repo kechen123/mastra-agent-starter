@@ -53,10 +53,21 @@ export async function embedQuery(text: string): Promise<number[]> {
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
   const isMultimodal = embeddingUrl().endsWith('/embeddings/multimodal');
-  if (!isMultimodal) return request({ model: config.embeddingModel, input: texts, dimensions: config.embeddingDim });
-  return Promise.all(texts.map(async (text) => {
-    const vectors = await request({ model: config.embeddingModel, input: [{ type: 'text', text }] });
-    if (!vectors[0]) throw new Error('Embedding 接口没有返回向量');
-    return vectors[0];
-  }));
+  const vectors: number[][] = [];
+  const batchSize = 20;
+  for (let index = 0; index < texts.length; index += batchSize) {
+    const batch = texts.slice(index, index + batchSize);
+    const batchVectors = isMultimodal
+      ? await Promise.all(batch.map(async (text) => {
+        const response = await request({ model: config.embeddingModel, input: [{ type: 'text', text }] });
+        if (!response[0]) throw new Error('Embedding 接口没有返回向量');
+        return response[0];
+      }))
+      : await request({ model: config.embeddingModel, input: batch, dimensions: config.embeddingDim });
+    if (batchVectors.length !== batch.length) {
+      throw new Error(`Embedding 返回数量不匹配：期望 ${batch.length}，实际 ${batchVectors.length}`);
+    }
+    vectors.push(...batchVectors);
+  }
+  return vectors;
 }

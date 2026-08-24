@@ -2,6 +2,12 @@ import { Mastra } from '@mastra/core';
 import { taoismAgent } from './agents/taoism-agent.js';
 import { askRoute } from './routes/ask.js';
 import {
+  deleteDocumentRoute,
+  getDocumentRoute,
+  listDocumentsRoute,
+  uploadDocumentRoute,
+} from './routes/documents.js';
+import {
   createKnowledgeBaseRoute,
   deleteKnowledgeBaseRoute,
   getKnowledgeBaseRoute,
@@ -21,6 +27,10 @@ export const mastra = new Mastra({
       getKnowledgeBaseRoute,
       updateKnowledgeBaseRoute,
       deleteKnowledgeBaseRoute,
+      uploadDocumentRoute,
+      listDocumentsRoute,
+      getDocumentRoute,
+      deleteDocumentRoute,
     ],
   },
 });
