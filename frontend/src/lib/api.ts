@@ -12,6 +12,11 @@ export interface Citation {
   originalWork?: string;
   commentator?: string;
   source: string;
+  documentId?: string;
+  documentName?: string;
+  chunkIndex?: number;
+  heading?: string;
+  distance?: number;
 }
 
 export interface GroundedAnswer {
@@ -42,11 +47,11 @@ export interface KnowledgeDocument {
   updatedAt: string;
 }
 
-export async function askKnowledge(question: string): Promise<GroundedAnswer> {
+export async function askKnowledge(question: string, knowledgeBaseId?: string): Promise<GroundedAnswer> {
   return request<GroundedAnswer>('/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, ...(knowledgeBaseId ? { knowledgeBaseId } : {}) }),
   });
 }
 
