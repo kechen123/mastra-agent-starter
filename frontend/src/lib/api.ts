@@ -1,3 +1,32 @@
+export interface Capabilities {
+  documentFormats: string[];
+  mineruEnabled: boolean;
+  chatAgents: ChatAgentInfo[];
+  defaultChatModel: string;
+}
+
+export interface ChatAgentInfo {
+  id: string;
+  name: string;
+  requiresKnowledgeBase: boolean;
+}
+
+export async function getCapabilities(): Promise<Capabilities> {
+  try {
+    return await request<Capabilities>('/capabilities');
+  } catch {
+    return {
+      documentFormats: ['txt', 'md'],
+      mineruEnabled: false,
+      chatAgents: [
+        { id: 'general', name: '通用对话 Agent', requiresKnowledgeBase: false },
+        { id: 'knowledge-base', name: '知识库问答 Agent', requiresKnowledgeBase: true },
+      ],
+      defaultChatModel: 'deepseek/deepseek-v4-flash',
+    };
+  }
+}
+
 export interface Citation {
   chunkId: string;
   title: string;
@@ -8,7 +37,7 @@ export interface Citation {
   dynasty?: string;
   category: string;
   version?: string;
-  type: 'scripture' | 'commentary' | 'historical' | 'research';
+  type: string;
   originalWork?: string;
   commentator?: string;
   source: string;
@@ -47,11 +76,19 @@ export interface KnowledgeDocument {
   updatedAt: string;
 }
 
-export async function askKnowledge(question: string, knowledgeBaseId?: string): Promise<GroundedAnswer> {
+export async function askKnowledge(
+  question: string,
+  agentId: string,
+  knowledgeBaseId?: string,
+): Promise<GroundedAnswer> {
+  const body: Record<string, unknown> = { question, agentId };
+  if (knowledgeBaseId) {
+    body.knowledgeBaseId = knowledgeBaseId;
+  }
   return request<GroundedAnswer>('/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, ...(knowledgeBaseId ? { knowledgeBaseId } : {}) }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -91,6 +128,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function throwResponseError(response: Response): Promise<never> {
-  const data = await response.json().catch(() => null) as { message?: string } | null;
+  const data = (await response.json().catch(() => null)) as { message?: string } | null;
   throw new Error(data?.message ?? '请求失败。');
 }
