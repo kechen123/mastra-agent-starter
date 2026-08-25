@@ -16,12 +16,26 @@ import {
   listKnowledgeBasesRoute,
   updateKnowledgeBaseRoute,
 } from './routes/knowledge-bases.js';
+import { agentsRoute } from './routes/agents.js';
+import {
+  createConversationRoute,
+  deleteConversationRoute,
+  getConversationRoute,
+  listConversationsRoute,
+  updateConversationRoute,
+} from './routes/conversations.js';
 
 export const mastra = new Mastra({
   agents: { generalAgent, knowledgeBaseAgent },
   server: {
     apiRoutes: [
       askRoute,
+      agentsRoute,
+      listConversationsRoute,
+      createConversationRoute,
+      getConversationRoute,
+      updateConversationRoute,
+      deleteConversationRoute,
       listKnowledgeBasesRoute,
       createKnowledgeBaseRoute,
       getKnowledgeBaseRoute,

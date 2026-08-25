@@ -1,19 +1,19 @@
 # 玄枢（xuanshu-agent）
 
-面向个人知识库的 AI 工作台。V1 只聚焦知识库、文档管理、RAG 检索、知识问答与可追溯引用；不包含小说、创作、人物或世界观功能。
+Xuanshu Agent Starter：通用 Agent 应用基础模板。内置 Agent Registry、状态化对话持久化、知识库 RAG 检索与可追溯引用；采用无状态 Runtime 模式，支持多 Agent 切换与扩展。
 
 ## 目录
 
 ```text
-backend/   Mastra、RAG、PostgreSQL/pgvector 初始化与种子数据
-frontend/  React + Vite 知识问答工作台（Dark / Light 双主题）
-storage/   本地上传文件运行目录（后续接入，Git 忽略）
+backend/   Mastra、Agent Registry、Runtime、状态化对话 CRUD、RAG、PostgreSQL/pgvector
+frontend/  React + Vite Agent 工作台（Dark / Light 双主题）
+storage/   本地上传文件运行目录（Git 忽略）
 ```
 
 ## 当前状态
 
-- `backend/` 已完成 Mastra 通用对话、知识库 CRUD、文档上传与限定知识库向量检索。
-- `frontend/` 已完成对话工作台、知识库管理、文档上传与问答接入真实 API。
+- `backend/` 已完成 Agent Registry（general-chat / knowledge-base）、Runtime 执行层、状态化对话 CRUD、知识库管理、文档上传与 RAG 检索。
+- `frontend/` 已完成多 Agent 切换、会话历史侧边栏、草稿/持久化状态管理、知识库管理、文档上传与问答接入真实 API。
 
 ## 本地开发（默认）
 
