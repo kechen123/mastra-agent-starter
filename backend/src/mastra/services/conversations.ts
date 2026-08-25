@@ -136,18 +136,29 @@ export async function getConversationWithMessages(conversationId: string): Promi
 }
 
 export async function updateConversation(conversationId: string, input: UpdateConversationInput): Promise<ConversationDetail> {
-  if (input.agentId && !getAgentDefinition(input.agentId)) {
+  const pool = getDatabasePool();
+
+  const currentResult = await pool.query<
+    { id: string; title: string; agent_id: string; knowledge_base_id: string | null; created_at: Date; updated_at: Date }
+  >(
+    `SELECT id, title, agent_id, knowledge_base_id, created_at, updated_at FROM conversations WHERE id = $1`,
+    [conversationId],
+  );
+  const current = currentResult.rows[0];
+  if (!current) throw new Error('会话不存在。');
+
+  const finalAgentId = input.agentId ?? current.agent_id;
+  let finalKnowledgeBaseId = input.knowledgeBaseId !== undefined ? input.knowledgeBaseId : current.knowledge_base_id;
+
+  if (!getAgentDefinition(finalAgentId)) {
     throw new Error('Agent 不存在。');
   }
 
-  let knowledgeBaseId: string | null | undefined = input.knowledgeBaseId;
-  const agentId = input.agentId;
-
-  if (agentId === 'general-chat') {
-    knowledgeBaseId = null;
+  if (finalAgentId === 'general-chat') {
+    finalKnowledgeBaseId = null;
   }
-  if (agentId === 'knowledge-base' && knowledgeBaseId) {
-    if (!(await getKnowledgeBase(knowledgeBaseId))) {
+  if (finalAgentId === 'knowledge-base' && finalKnowledgeBaseId) {
+    if (!(await getKnowledgeBase(finalKnowledgeBaseId))) {
       throw new Error('知识库不存在。');
     }
   }
@@ -159,24 +170,23 @@ export async function updateConversation(conversationId: string, input: UpdateCo
     values.push(input.title);
     fields.push(`title = $${values.length}`);
   }
-  if (agentId !== undefined) {
-    values.push(agentId);
+  if (input.agentId !== undefined) {
+    values.push(finalAgentId);
     fields.push(`agent_id = $${values.length}`);
   }
-  if (knowledgeBaseId !== undefined) {
-    values.push(knowledgeBaseId);
+  if (input.knowledgeBaseId !== undefined || (finalAgentId === 'general-chat' && current.knowledge_base_id !== null)) {
+    values.push(finalKnowledgeBaseId);
     fields.push(`knowledge_base_id = $${values.length}`);
   }
 
   values.push(conversationId);
-  const result = await getDatabasePool().query<
+  const result = await pool.query<
     { id: string; title: string; agent_id: string; knowledge_base_id: string | null; created_at: Date; updated_at: Date }
   >(
     `UPDATE conversations SET ${fields.join(', ')} WHERE id = $${values.length}
      RETURNING id, title, agent_id, knowledge_base_id, created_at, updated_at`,
     values,
   );
-  if (result.rows.length === 0) throw new Error('会话不存在。');
   return toDetail(result.rows[0]!);
 }
 

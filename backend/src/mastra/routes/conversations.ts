@@ -16,8 +16,12 @@ function isUuid(value: string): boolean {
 
 function handleError(context: { json: (data: unknown, status?: number) => Response }, error: unknown): Response {
   console.error('Conversation route error:', error);
-  const message = error instanceof Error ? error.message : '服务暂时不可用，请稍后重试。';
-  return context.json({ message }, 500);
+  if (error instanceof Error) {
+    if (error.message === '会话不存在。') return context.json({ message: error.message }, 404);
+    if (error.message === 'Agent 不存在。') return context.json({ message: error.message }, 400);
+    if (error.message === '知识库不存在。') return context.json({ message: error.message }, 400);
+  }
+  return context.json({ message: '服务暂时不可用，请稍后重试。' }, 500);
 }
 
 export const listConversationsRoute = registerApiRoute('/conversations', {

@@ -65,8 +65,10 @@ export const askRoute = registerApiRoute('/ask', {
       });
     } catch (error) {
       console.error('问答请求失败：', error);
-      const message = error instanceof Error ? error.message : '问答暂时不可用，请稍后重试。';
-      return context.json({ message }, 500);
+      if (error instanceof Error && error.message === '会话不存在。') {
+        return context.json({ message: '会话不存在。' }, 404);
+      }
+      return context.json({ message: '服务暂时不可用，请稍后重试。' }, 500);
     }
   },
 });
