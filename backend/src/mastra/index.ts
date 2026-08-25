@@ -1,7 +1,5 @@
 import { Mastra } from '@mastra/core';
-import { generalAgent } from './agents/general-agent.js';
-import { knowledgeBaseAgent } from './agents/knowledge-base-agent.js';
-import { askRoute } from './routes/ask.js';
+import { askRoute, stopMessageRoute, regenerateMessageRoute } from './routes/ask.js';
 import {
   deleteDocumentRoute,
   getDocumentRoute,
@@ -17,6 +15,17 @@ import {
   updateKnowledgeBaseRoute,
 } from './routes/knowledge-bases.js';
 import { agentsRoute } from './routes/agents.js';
+import { toolsRoute } from './routes/tools.js';
+import {
+  listSkillsRoute,
+  getSkillRoute,
+  previewSkillRoute,
+  installSkillRoute,
+  updateSkillRoute,
+  removeSkillRoute,
+  bindSkillRoute,
+  unbindSkillRoute,
+} from './routes/skills.js';
 import {
   createConversationRoute,
   deleteConversationRoute,
@@ -26,11 +35,21 @@ import {
 } from './routes/conversations.js';
 
 export const mastra = new Mastra({
-  agents: { generalAgent, knowledgeBaseAgent },
   server: {
     apiRoutes: [
       askRoute,
+      stopMessageRoute,
+      regenerateMessageRoute,
       agentsRoute,
+      toolsRoute,
+      listSkillsRoute,
+      getSkillRoute,
+      previewSkillRoute,
+      installSkillRoute,
+      updateSkillRoute,
+      removeSkillRoute,
+      bindSkillRoute,
+      unbindSkillRoute,
       listConversationsRoute,
       createConversationRoute,
       getConversationRoute,

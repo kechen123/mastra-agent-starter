@@ -145,3 +145,4 @@ vite.config.ts.timestamp-*
 # 玄枢本地运行数据
 backend/.mastra/
 storage/
+backend/market-skills/

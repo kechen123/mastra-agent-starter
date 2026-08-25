@@ -53,10 +53,52 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
   content TEXT NOT NULL,
   citations JSONB NOT NULL DEFAULT '[]'::jsonb,
-  status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'streaming', 'completed', 'stopped', 'failed')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS skill_executions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  skill_id TEXT NOT NULL,
+  input JSONB NOT NULL DEFAULT '{}'::jsonb,
+  output JSONB,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'stopped')),
+  error_code TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS skill_executions_conversation_id_idx ON skill_executions(conversation_id);
+CREATE INDEX IF NOT EXISTS skill_executions_message_id_idx ON skill_executions(message_id);
+CREATE INDEX IF NOT EXISTS skill_executions_skill_id_idx ON skill_executions(skill_id);
+CREATE INDEX IF NOT EXISTS skill_executions_status_idx ON skill_executions(status);
+
+CREATE TABLE IF NOT EXISTS agent_skill_bindings (
+  agent_id TEXT NOT NULL,
+  skill_id TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (agent_id, skill_id)
+);
+
+CREATE TABLE IF NOT EXISTS skills_installed (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL CHECK (source IN ('builtin', 'marketplace', 'local')),
+  location TEXT NOT NULL,
+  compatibility TEXT NOT NULL DEFAULT 'unknown',
+  has_scripts BOOLEAN NOT NULL DEFAULT false,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  installed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS skills_installed_source_idx ON skills_installed(source);
 CREATE INDEX IF NOT EXISTS conversations_updated_at_idx ON conversations(updated_at DESC);
 CREATE INDEX IF NOT EXISTS conversations_agent_id_idx ON conversations(agent_id);
 CREATE INDEX IF NOT EXISTS messages_conversation_id_created_at_idx ON messages(conversation_id, created_at);

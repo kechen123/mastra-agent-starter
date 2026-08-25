@@ -26,7 +26,7 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   citations: Citation[];
-  status: 'completed' | 'failed';
+  status: 'pending' | 'streaming' | 'completed' | 'stopped' | 'failed';
   createdAt: string;
 }
 
@@ -37,5 +37,21 @@ export interface AgentDefinition {
   capabilities: {
     knowledgeBase: boolean;
     citations: boolean;
+    tools: boolean;
+    skills: boolean;
   };
+  toolIds: string[];
+  defaultSkillIds: string[];
+  boundSkillIds: string[];
+}
+
+export interface SkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  source: 'builtin' | 'marketplace' | 'local';
+  compatibility: 'compatible' | 'requires-runtime' | 'unsupported' | 'unknown';
+  hasScripts: boolean;
+  allowedTools?: string[];
+  metadata?: Record<string, unknown>;
 }
