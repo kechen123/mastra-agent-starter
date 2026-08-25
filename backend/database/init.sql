@@ -37,3 +37,26 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 
 CREATE INDEX IF NOT EXISTS document_chunks_knowledge_base_id_idx ON document_chunks(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS document_chunks_document_id_idx ON document_chunks(document_id);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title TEXT NOT NULL DEFAULT '新对话',
+  agent_id TEXT NOT NULL,
+  knowledge_base_id UUID NULL REFERENCES knowledge_bases(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  content TEXT NOT NULL,
+  citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS conversations_updated_at_idx ON conversations(updated_at DESC);
+CREATE INDEX IF NOT EXISTS conversations_agent_id_idx ON conversations(agent_id);
+CREATE INDEX IF NOT EXISTS messages_conversation_id_created_at_idx ON messages(conversation_id, created_at);
