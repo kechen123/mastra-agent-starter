@@ -13,11 +13,11 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/ask': 'http://localhost:4111',
-      '/agents': 'http://localhost:4111',
-      '/conversations': 'http://localhost:4111',
-      '/knowledge-bases': 'http://localhost:4111',
-      '/documents': 'http://localhost:4111',
+      '/api': {
+        target: 'http://localhost:4111',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
     },
   },
 })

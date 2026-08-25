@@ -2,6 +2,7 @@ import { getDatabasePool } from '../../database/pool.js';
 import { getAgentDefinition } from '../agents/registry.js';
 import { getKnowledgeBase } from './knowledge-bases.js';
 import type { Citation } from '../../types.js';
+import { isExecutionActive } from './execution.js';
 
 export interface ConversationSummary {
   id: string;
@@ -29,7 +30,7 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   citations: Citation[];
-  status: 'completed' | 'failed';
+  status: 'pending' | 'streaming' | 'completed' | 'stopped' | 'failed';
   createdAt: string;
 }
 
@@ -122,15 +123,29 @@ export async function getConversationWithMessages(conversationId: string): Promi
     [conversationId],
   );
 
+  const orphanedIds: string[] = [];
   const messages: Message[] = msgResult.rows.map((r) => ({
     id: r.id,
     conversationId: r.conversation_id,
     role: r.role as 'user' | 'assistant',
     content: r.content,
     citations: (r.citations as Citation[]) ?? [],
-    status: r.status as 'completed' | 'failed',
+    status: r.status as Message['status'],
     createdAt: r.created_at.toISOString(),
-  }));
+  })).map((m) => {
+    if ((m.status === 'pending' || m.status === 'streaming') && !isExecutionActive(m.id)) {
+      orphanedIds.push(m.id);
+      return { ...m, status: 'failed' as const, content: m.content || '生成已中断，请重试。' };
+    }
+    return m;
+  });
+
+  if (orphanedIds.length > 0) {
+    await pool.query(
+      `UPDATE messages SET status = 'failed', content = COALESCE(NULLIF(content, ''), '生成已中断，请重试。'), citations = '[]'::jsonb WHERE id = ANY($1)`,
+      [orphanedIds],
+    );
+  }
 
   return { conversation: toDetail(row), messages };
 }
@@ -211,7 +226,7 @@ export async function saveAssistantMessage(
   conversationId: string,
   content: string,
   citations: Citation[],
-  status: 'completed' | 'failed',
+  status: 'completed' | 'stopped' | 'failed',
 ): Promise<Message> {
   const result = await getDatabasePool().query<
     { id: string; conversation_id: string; role: string; content: string; citations: unknown; status: string; created_at: Date }
@@ -222,6 +237,66 @@ export async function saveAssistantMessage(
     [conversationId, content, JSON.stringify(citations), status],
   );
   return toMessage(result.rows[0]!);
+}
+
+export async function createAssistantPending(conversationId: string): Promise<Message> {
+  const result = await getDatabasePool().query<
+    { id: string; conversation_id: string; role: string; content: string; citations: unknown; status: string; created_at: Date }
+  >(
+    `INSERT INTO messages (conversation_id, role, content, citations, status)
+     VALUES ($1, 'assistant', '', '[]'::jsonb, 'pending')
+     RETURNING id, conversation_id, role, content, citations, status, created_at`,
+    [conversationId],
+  );
+  await touchConversation(conversationId);
+  return toMessage(result.rows[0]!);
+}
+
+export async function updateAssistantStreaming(assistantMessageId: string): Promise<void> {
+  await getDatabasePool().query(
+    `UPDATE messages SET status = 'streaming' WHERE id = $1`,
+    [assistantMessageId],
+  );
+}
+
+export async function finalizeAssistant(
+  assistantMessageId: string,
+  content: string,
+  citations: Citation[],
+  status: 'completed' | 'stopped' | 'failed',
+): Promise<Message> {
+  const result = await getDatabasePool().query<
+    { id: string; conversation_id: string; role: string; content: string; citations: unknown; status: string; created_at: Date }
+  >(
+    `UPDATE messages
+     SET content = $2, citations = $3, status = $4
+     WHERE id = $1
+     RETURNING id, conversation_id, role, content, citations, status, created_at`,
+    [assistantMessageId, content, JSON.stringify(citations), status],
+  );
+  const msg = toMessage(result.rows[0]!);
+  await touchConversation(msg.conversationId);
+  return msg;
+}
+
+export async function resetAssistantForRetry(assistantMessageId: string): Promise<void> {
+  await getDatabasePool().query(
+    `UPDATE messages SET content = '', citations = '[]'::jsonb, status = 'pending' WHERE id = $1`,
+    [assistantMessageId],
+  );
+}
+
+export async function getLastAssistantMessage(conversationId: string): Promise<Message | null> {
+  const result = await getDatabasePool().query<
+    { id: string; conversation_id: string; role: string; content: string; citations: unknown; status: string; created_at: Date }
+  >(
+    `SELECT id, conversation_id, role, content, citations, status, created_at
+     FROM messages
+     WHERE conversation_id = $1 AND role = 'assistant'
+     ORDER BY created_at DESC LIMIT 1`,
+    [conversationId],
+  );
+  return result.rows[0] ? toMessage(result.rows[0]) : null;
 }
 
 export async function touchConversation(conversationId: string): Promise<void> {
@@ -260,7 +335,7 @@ function toMessage(row: { id: string; conversation_id: string; role: string; con
     role: row.role as 'user' | 'assistant',
     content: row.content,
     citations: (row.citations as Citation[]) ?? [],
-    status: row.status as 'completed' | 'failed',
+    status: row.status as Message['status'],
     createdAt: row.created_at.toISOString(),
   };
 }
