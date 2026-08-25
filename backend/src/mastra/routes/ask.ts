@@ -1,6 +1,12 @@
 import { registerApiRoute } from '@mastra/core/server';
-import { answerGeneral, answerWithKnowledge } from '../services/ask.js';
-import { getKnowledgeBase } from '../services/knowledge-bases.js';
+import {
+  getConversationWithMessages,
+  maybeUpdateTitleFromFirstMessage,
+  saveAssistantMessage,
+  saveUserMessage,
+  touchConversation,
+} from '../services/conversations.js';
+import { executeAgent } from '../agents/runtime.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -9,44 +15,58 @@ export const askRoute = registerApiRoute('/ask', {
   requiresAuth: false,
   handler: async (context) => {
     try {
-      const body = await context.req.json<{
-        question?: unknown;
-        agentId?: unknown;
-        knowledgeBaseId?: unknown;
-      }>();
-      const question = typeof body.question === 'string' ? body.question.trim() : '';
-      const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : 'general';
-      const knowledgeBaseId = body.knowledgeBaseId;
-
-      if (question.length === 0) {
+      const body = await context.req.json<unknown>();
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return context.json({ message: '请求体必须是 JSON 对象。' }, 400);
+      }
+      const { conversationId, message } = body as Record<string, unknown>;
+      if (typeof conversationId !== 'string' || !UUID_PATTERN.test(conversationId)) {
+        return context.json({ message: 'conversationId 格式不正确。' }, 400);
+      }
+      if (typeof message !== 'string' || message.trim().length === 0) {
         return context.json({ message: '请输入问题。' }, 400);
       }
-      if (question.length > 2_000) {
+      if (message.trim().length > 2000) {
         return context.json({ message: '问题不能超过 2000 个字符。' }, 400);
       }
-      if (agentId !== 'general' && agentId !== 'knowledge-base') {
-        return context.json({ message: 'agentId 仅支持 general 或 knowledge-base。' }, 400);
-      }
 
-      if (agentId === 'general') {
-        return context.json(await answerGeneral(question));
-      }
+      const { conversation } = await getConversationWithMessages(conversationId);
 
-      // knowledge-base agent
-      if (knowledgeBaseId === undefined || knowledgeBaseId === null || knowledgeBaseId === '') {
-        return context.json({ message: '请先选择一个知识库。' }, 400);
-      }
-      if (typeof knowledgeBaseId !== 'string' || !UUID_PATTERN.test(knowledgeBaseId)) {
-        return context.json({ message: '知识库 id 格式不正确。' }, 400);
-      }
-      if (!(await getKnowledgeBase(knowledgeBaseId))) {
-        return context.json({ message: '知识库不存在。' }, 404);
-      }
+      // Save user message
+      await saveUserMessage(conversationId, message.trim());
+      await maybeUpdateTitleFromFirstMessage(conversationId, message.trim());
 
-      return context.json(await answerWithKnowledge(question, knowledgeBaseId));
+      // Execute agent based on conversation.agentId
+      const result = await executeAgent(
+        conversation.agentId,
+        message.trim(),
+        conversation.knowledgeBaseId,
+      );
+
+      // Save assistant message
+      const assistantMessage = await saveAssistantMessage(
+        conversationId,
+        result.content,
+        result.citations,
+        result.status,
+      );
+
+      // Touch conversation updated_at
+      await touchConversation(conversationId);
+
+      // Return in a shape compatible with frontend
+      return context.json({
+        id: assistantMessage.id,
+        role: assistantMessage.role,
+        content: assistantMessage.content,
+        citations: assistantMessage.citations,
+        status: assistantMessage.status,
+        createdAt: assistantMessage.createdAt,
+      });
     } catch (error) {
       console.error('问答请求失败：', error);
-      return context.json({ message: '问答暂时不可用，请稍后重试。' }, 500);
+      const message = error instanceof Error ? error.message : '问答暂时不可用，请稍后重试。';
+      return context.json({ message }, 500);
     }
   },
 });

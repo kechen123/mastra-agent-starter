@@ -11,7 +11,7 @@ export const capabilitiesRoute = registerApiRoute('/capabilities', {
       mineruEnabled: config.mineruEnabled,
       chatAgents: [
         {
-          id: 'general',
+          id: 'general-chat',
           name: '通用对话 Agent',
           requiresKnowledgeBase: false,
         },

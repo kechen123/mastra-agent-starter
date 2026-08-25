@@ -19,7 +19,7 @@ export async function getCapabilities(): Promise<Capabilities> {
       documentFormats: ['txt', 'md'],
       mineruEnabled: false,
       chatAgents: [
-        { id: 'general', name: '通用对话 Agent', requiresKnowledgeBase: false },
+        { id: 'general-chat', name: '通用对话 Agent', requiresKnowledgeBase: false },
         { id: 'knowledge-base', name: '知识库问答 Agent', requiresKnowledgeBase: true },
       ],
       defaultChatModel: 'deepseek/deepseek-v4-flash',
@@ -131,3 +131,5 @@ async function throwResponseError(response: Response): Promise<never> {
   const data = (await response.json().catch(() => null)) as { message?: string } | null;
   throw new Error(data?.message ?? '请求失败。');
 }
+
+export { request, throwResponseError };
