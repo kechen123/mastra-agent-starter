@@ -1,11 +1,19 @@
 import 'dotenv/config';
-import { streamAgent } from '../mastra/agents/runtime.js';
+import { initializeApp } from '../server/init.js';
+import { streamAgent } from '../core/agent/runtime.js';
 
 const args = process.argv.slice(2);
 const knowledgeBaseId = args.find((arg) => arg.startsWith('--kb='))?.slice(5);
 const question = args.filter((arg) => !arg.startsWith('--kb=')).join(' ') || '请概括已检索资料的核心内容。';
 
 async function main(): Promise<void> {
+  // The Core runtime depends on Agent / Tool / Skill registration side
+  // effects that, in the HTTP server path, run via top-level imports in
+  // `server/bootstrap.ts`. CLI scripts do not load that file, so we must
+  // explicitly call the idempotent initializer first — otherwise
+  // `streamAgent()` will report "Agent 不存在".
+  await initializeApp();
+
   const generator = streamAgent(
     knowledgeBaseId ? 'knowledge-base' : 'general-chat',
     question,

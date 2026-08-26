@@ -2,14 +2,20 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: xuanshu
-      POSTGRES_USER: xuanshu
-      POSTGRES_PASSWORD: xuanshu
+      POSTGRES_DB: mastra_agent_starter
+      POSTGRES_USER: mastra_agent_starter
+      POSTGRES_PASSWORD: mastra_agent_starter
     ports:
       - "5432:5432"
     volumes:
-      - xuanshu-postgres:/var/lib/postgresql/data
-      - ./database/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - mastra-agent-starter-postgres:/var/lib/postgresql/data
+      # Compose 文件位于仓库根目录，数据库基线位于 backend/database。
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mastra_agent_starter -d mastra_agent_starter"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
-  xuanshu-postgres:
+  mastra-agent-starter-postgres:

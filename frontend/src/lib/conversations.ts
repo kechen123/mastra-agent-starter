@@ -149,7 +149,7 @@ async function postSSE(
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      // Process all complete lines in buffer
+      // 处理缓冲区里所有完整行（单行可能跨多个 chunk）
       let eolIndex: number;
       while ((eolIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, eolIndex);
@@ -164,7 +164,7 @@ async function postSSE(
         }
       }
     }
-    // Process any remaining data after stream ends (may not end with blank line)
+    // 流结束时处理残留数据（可能不以空行结尾）
     if (buffer.length > 0) {
       const cleanLine = buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer;
       if (cleanLine === '') {

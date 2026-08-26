@@ -3,12 +3,12 @@
  * 不依赖测试框架。
  */
 
-import { getParser } from '../mastra/document-parsers/parser-registry.js';
-import { PlainTextParser } from '../mastra/document-parsers/plain-text-parser.js';
-import { MinerUParser } from '../mastra/document-parsers/mineru-parser.js';
-import { UnsupportedDocumentTypeError } from '../mastra/document-parsers/types.js';
-import { MinerUClient, MinerUClientError } from '../mastra/document-parsers/mineru-client.js';
-import { getDocumentParserConfig } from '../mastra/document-parsers/config.js';
+import { getParser } from '../modules/documents/parsers/registry.js';
+import { PlainTextParser } from '../modules/documents/parsers/plain-text-parser.js';
+import { MinerUParser } from '../modules/documents/parsers/mineru-parser.js';
+import { UnsupportedDocumentTypeError } from '../modules/documents/parsers/types.js';
+import { MinerUClient, MinerUClientError } from '../modules/documents/parsers/mineru-client.js';
+import { getDocumentParserConfig } from '../modules/documents/parsers/config.js';
 
 let passed = 0;
 let failed = 0;

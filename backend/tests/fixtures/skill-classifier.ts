@@ -35,7 +35,7 @@ import {
   ensureSkillRegistryLoaded,
   isSkillRegistryLoaded,
   _setSkillRegistryLoaderForTesting,
-} from '../../src/mastra/skills/registry.js';
+} from '../../src/core/skill/registry.js';
 
 let failed = 0;
 let passed = 0;

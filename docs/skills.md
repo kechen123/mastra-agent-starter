@@ -2,23 +2,26 @@
 
 ## 概述
 
-Skill 是玄枢的模块化指令单元，用于扩展 Agent 的特定能力。与 Tool 不同，Skill 主要通过**系统提示词注入**影响 Agent 行为，而非执行代码。
+Skill 是Mastra Agent Starter的模块化指令单元，用于扩展 Agent 的特定能力。与 Tool 不同，Skill 主要通过**系统提示词注入**影响 Agent 行为，而非执行代码。
 
 Skill 来源分为三类：
-- **builtin**: 系统内置，随版本发布
-- **marketplace**: 从 skills.sh 官方市场安装
-- **local**: 从 `backend/market-skills/<id>/SKILL.md` 文件系统发现
+- **builtin**: 系统内置，随版本发布（`backend/src/skills/builtin/<id>/SKILL.md`）
+- **local**: 本地自定义（`backend/src/skills/local/<id>/SKILL.md`）
+- **marketplace**: 从 skills.sh 官方市场安装（`backend/market-skills/<owner>/<repo>/<skill>/SKILL.md`）
+
+`_template` 目录会被注册器跳过，**不会污染 Skill 列表**——它是新增 Skill 的占位示例。
 
 ## Skill Registry
 
-`backend/src/mastra/skills/registry.ts` 管理技能的注册和解析：
+位于 `backend/src/core/skill/registry.ts`：
 
-- `loadBuiltinSkills()`: 加载内置技能到内存
-- `discoverLocalSkills()`: 从文件系统扫描 `market-skills/<id>/SKILL.md`
-- `loadInstalledSkills()`: 从 `skills_installed` 表加载，每次都会基于磁盘文件列表重新校验兼容性
+- `loadBuiltinSkills()`: 扫描 `backend/src/skills/builtin/<id>/SKILL.md`
+- `discoverLocalSkills()`: 扫描 `backend/src/skills/local/<id>/SKILL.md`
+- `discoverMarketplaceSkills()`: 扫描 `backend/market-skills/<owner>/<repo>/<skill>/`
+- `loadInstalledSkills()`: 从 `skills_installed` 表加载，并每次基于磁盘文件列表重新校验兼容性
 - `getSkill(id)`: 获取技能定义（builtin → installed → local 顺序）
 - `listSkills()`: 列出所有技能（内置 + 已安装 + 本地）
-- `resolveSkills(ids)`: 仅返回 `compatibility === 'compatible'` 的技能实例
+- `resolveSkillsForAgent(agentId, ids)`: 仅返回 `compatibility === 'compatible'` 且 `allowedTools ⊆ agent.toolIds` 的技能
 
 ## SkillDefinition 结构
 
@@ -30,7 +33,7 @@ interface SkillDefinition {
   source: 'builtin' | 'marketplace' | 'local';
   location: string;                // 本地路径
   compatibility: 'compatible' | 'requires-runtime' | 'unsupported' | 'unknown';
-  instructions?: string;           // SKILL.md 内容
+  instructions?: string;           // SKILL.md 正文
   files?: string[];                // 实际扫描到的文件列表
   hasScripts: boolean;             // 是否包含 scripts/ 目录或脚本文件
   allowedTools?: string[];         // 依赖的工具 ID
@@ -55,17 +58,18 @@ interface SkillDefinition {
 ### structured-summary
 
 **ID**: `structured-summary`
+**位置**: `backend/src/skills/builtin/structured-summary/SKILL.md`
 
 结构化摘要技能，引导 Agent 生成三段式摘要：
 - 核心结论
 - 关键事实
 - 注意事项
 
-由 `backend/src/mastra/skills/builtins.ts` 直接导出，无外部 SKILL.md 文件。
+`SKILL.md` 是该技能指令的唯一来源，**禁止在 TypeScript 中复制硬编码版本**。
 
 ## 技能市场 (skills.sh)
 
-`backend/src/mastra/skills/market.ts` 实现市场集成，**通过 `@mastra/server` 提供的官方 helpers 调用官方 API**：
+`backend/src/infrastructure/external-skills/market.ts` 实现市场集成，**通过 `@mastra/server` 提供的官方 helpers 调用官方 API**：
 
 - `searchMarketSkills(query)`: 调用 `searchSkillsSh()`（GET `/api/skills?query=...`）
 - `listPopularMarketSkills()`: 调用 `getPopularSkillsSh()`（GET `/api/skills/top`）
@@ -86,7 +90,7 @@ interface SkillDefinition {
 
 ## Agent-Skill 绑定
 
-`backend/src/mastra/skills/registry.ts` 提供绑定 API：
+`backend/src/core/skill/registry.ts` 提供绑定 API：
 
 - `bindSkillToAgent(agentId, skillId)`: 绑定技能到 Agent（仅允许 `compatible`，会自动拒绝 `requires-runtime`）
 - `unbindSkillFromAgent(agentId, skillId)`: 解绑
@@ -96,7 +100,7 @@ interface SkillDefinition {
 - `agent_id` + `skill_id` 联合主键
 - `enabled`: 布尔值，支持软禁用
 
-运行时，Agent 的技能集合 = 数据库中的 `boundSkillIds`（不含任何硬编码默认值）。`requires-runtime` 技能在 `resolveSkills()` 阶段就会被过滤掉。
+运行时，Agent 的技能集合 = 数据库中的 `boundSkillIds`（不含任何硬编码默认值）。`requires-runtime` 技能在 `resolveSkillsForAgent()` 阶段就会被过滤掉。
 
 ## 前端技能管理
 
@@ -110,14 +114,13 @@ interface SkillDefinition {
 
 ### 方法 1：本地 SKILL.md（推荐）
 
-1. 创建目录 `backend/market-skills/my-skill/`
+1. 创建目录 `backend/src/skills/local/my-skill/`
 2. 编写 `SKILL.md`，包含 YAML Front Matter：
 
 ```markdown
 ---
 name: 我的技能
 description: 这是一段描述
-compatibility: compatible
 allowed-tools: [calculator]
 ---
 

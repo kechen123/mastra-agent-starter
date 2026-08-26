@@ -1,8 +1,17 @@
 export interface Capabilities {
+  app?: {
+    name: string;
+    shortName: string;
+  };
   documentFormats: string[];
   mineruEnabled: boolean;
   chatAgents: ChatAgentInfo[];
   defaultChatModel: string;
+  llm?: {
+    provider: string;
+    model: string;
+    displayName: string;
+  };
 }
 
 const DEFAULT_API_BASE_URL = '/api';
@@ -17,19 +26,23 @@ export interface ChatAgentInfo {
   requiresKnowledgeBase: boolean;
 }
 
+export const DEFAULT_CAPABILITIES: Capabilities = {
+  app: { name: 'Mastra Agent Starter', shortName: 'Mastra' },
+  documentFormats: ['txt', 'md'],
+  mineruEnabled: false,
+  chatAgents: [
+    { id: 'general-chat', name: '通用对话 Agent', requiresKnowledgeBase: false },
+    { id: 'knowledge-base', name: '知识库问答 Agent', requiresKnowledgeBase: true },
+  ],
+  defaultChatModel: 'deepseek/deepseek-v4-flash',
+  llm: { provider: 'deepseek', model: 'deepseek-v4-flash', displayName: 'DeepSeek' },
+};
+
 export async function getCapabilities(): Promise<Capabilities> {
   try {
     return await request<Capabilities>('/capabilities');
   } catch {
-    return {
-      documentFormats: ['txt', 'md'],
-      mineruEnabled: false,
-      chatAgents: [
-        { id: 'general-chat', name: '通用对话 Agent', requiresKnowledgeBase: false },
-        { id: 'knowledge-base', name: '知识库问答 Agent', requiresKnowledgeBase: true },
-      ],
-      defaultChatModel: 'deepseek/deepseek-v4-flash',
-    };
+    return DEFAULT_CAPABILITIES;
   }
 }
 

@@ -9,65 +9,115 @@
 ## 项目结构
 
 ```
-xuanshu-agent/
+mastra-agent-starter/
 ├── backend/
 │   ├── database/
-│   │   └── init.sql              # 数据库 Schema（唯一来源）
+│   │   ├── init.sql                     # 首次安装的 Schema 基线（0000）
+│   │   └── migrations/                  # 后续只增不改的增量迁移
+│   ├── market-skills/                   # 通过 skills.sh 安装的本地化技能
 │   ├── src/
 │   │   ├── mastra/
-│   │   │   ├── agents/           # Agent 定义、运行时、注册表
-│   │   │   ├── routes/           # API 路由（ask, agents, tools, skills, conversations, knowledge-bases, documents）
-│   │   │   ├── services/         # 业务服务（conversations, tool-executions）
-│   │   │   ├── skills/           # Skill Registry、市场集成、内置技能
-│   │   │   ├── tools/            # Tool Registry、内置工具
-│   │   │   ├── rag/              # 知识库检索
-│   │   │   └── index.ts          # Mastra 实例入口
-│   │   ├── database/pool.ts        # PostgreSQL 连接池
-│   │   └── scripts/ask.ts          # CLI 调试脚本
+│   │   │   └── index.ts                 # 薄适配器：导出 Mastra 实例
+│   │   ├── server/
+│   │   │   ├── bootstrap.ts             # 装配所有 Agent/Tool/Skill/路由
+│   │   │   └── routes/                  # 所有 HTTP 路由（ask, agents, tools, skills, …）
+│   │   ├── core/
+│   │   │   ├── agent/                   # Agent Registry + 通用运行时
+│   │   │   ├── tool/                    # Tool Registry
+│   │   │   ├── skill/                   # Skill Registry（filesystem-driven）
+│   │   │   └── execution/               # 流式执行上下文、AbortController
+│   │   ├── agents/                      # 具体 Agent（_template + general-chat + knowledge-base）
+│   │   ├── tools/                       # 具体 Tool（_template + calculator + get-current-time）
+│   │   ├── skills/
+│   │   │   ├── builtin/structured-summary/  # 内置 SKILL.md
+│   │   │   └── _template/               # Skill 模板（占位，不注册）
+│   │   ├── modules/
+│   │   │   ├── conversations/           # 会话/消息/工具执行审计
+│   │   │   ├── knowledge/               # 知识库服务 + RAG 检索
+│   │   │   ├── documents/               # 文档解析与入库
+│   │   │   └── citations/               # 引用类型
+│   │   ├── infrastructure/
+│   │   │   ├── database/pool.ts         # PostgreSQL 连接池
+│   │   │   ├── external-skills/market.ts # skills.sh 适配器
+│   │   │   └── llm/                     # LLM Provider 边界（DeepSeek-first）
+│   │   │       ├── types.ts             # LlmProviderAdapter 契约
+│   │   │       ├── registry.ts          # Provider 解析 + resolveDefaultChatModel
+│   │   │       └── providers/deepseek.ts# 唯一已实现的 Provider Adapter
+│   │   └── scripts/                     # CLI 调试脚本
 │   └── package.json
 ├── frontend/
-│   ├── src/
-│   │   ├── App.tsx               # 主应用组件
-│   │   ├── App.css               # 样式
-│   │   ├── lib/api.ts            # 知识库/文档 API
-│   │   ├── lib/conversations.ts  # 会话/消息 API + SSE 处理
-│   │   └── types/conversation.ts # 类型定义
+│   ├── src/                             # React 19 + Vite + Tailwind 4
 │   └── package.json
 ├── docs/
-│   ├── architecture.md
-│   ├── agents.md
-│   ├── tools.md
-│   └── skills.md
-├── docker-compose.yml            # 开发环境 PostgreSQL
+│   ├── architecture.md                  # 架构总览
+│   ├── agents.md                        # Agent 系统
+│   ├── tools.md                         # Tool 系统
+│   ├── skills.md                        # Skill 系统
+│   ├── development.md                   # 本文件
+│   └── extending.md                     # 新增 Agent / Tool / Skill / Route 的步骤
+├── docker-compose.yml                   # 开发环境 PostgreSQL
 └── .gitignore
 ```
+
+### 目录职责
+
+| 目录 | 唯一职责 | 依赖 |
+|------|---------|------|
+| `core/` | 框架无关的注册中心与运行时协议，**不引用任何具体 Agent / Tool / Skill / Provider** | Mastra 类型 |
+| `agents/` | 唯一注册具体 `AgentDefinition` 的地方 | `core/agent`、`infrastructure/llm` |
+| `tools/` | 唯一注册具体 `ToolDefinition` 的地方 | `core/tool` |
+| `skills/` | 静态 SKILL.md 文件（filesystem-driven） | — |
+| `modules/` | 业务能力模块（对话、知识库、文档、引用类型） | `core/`、`infrastructure/` |
+| `infrastructure/` | 横切外部依赖（DB 连接池、skills.sh 适配器、**LLM Provider 边界**） | — |
+| `server/routes/` | 纯 HTTP 处理器，零业务状态 | `core/`、`modules/`、`agents/`、`tools/`、`infrastructure/` |
+| `mastra/index.ts` | 仅做「装配 → `new Mastra({ apiRoutes })`」 | `server/bootstrap` |
 
 ## 本地启动
 
 ### 1. 数据库
 
-```bash
-docker-compose up -d   # 启动 PostgreSQL
-cd backend
-cat database/init.sql | psql $DATABASE_URL  # 初始化 Schema
+PowerShell：
+
+```powershell
+Copy-Item backend/.env.example backend/.env
+docker compose up -d
+Set-Location backend
+npm ci
+npm run migrate
 ```
+
+Git Bash：
+
+```bash
+cp backend/.env.example backend/.env
+docker compose up -d
+cd backend
+npm ci
+npm run migrate
+```
+
+根目录的 Compose 会把 `backend/database/init.sql` 挂载为新数据卷的初始化 Schema。`npm run migrate` 负责记录该基线，并执行 `database/migrations/` 中尚未执行的增量迁移。
 
 ### 2. 环境变量
 
-在 `backend/.env` 中配置：
+在 `backend/.env` 中配置。当前 Starter **仅启用 DeepSeek**，配置入口是：
 
 ```env
-DATABASE_URL=postgresql://user:pass@localhost:5432/xuanshu
-XUANSHU_CHAT_MODEL=deepseek/deepseek-v4-flash
-OPENAI_API_KEY=sk-...
+DATABASE_URL=postgresql://user:pass@localhost:5432/mastra_agent_starter
+LLM_PROVIDER=deepseek
+LLM_MODEL=deepseek-v4-flash
+DEEPSEEK_API_KEY=sk-...
+DEPLOYMENT_PROFILE=demo
 ```
+
+历史变量 `AGENT_CHAT_MODEL` 仍可解析为 `deepseek/<model>` 形式，但会输出弃用警告；`XUANSHU_CHAT_MODEL` 仅作为警告，不参与解析。`OPENAI_API_KEY` 等其他凭据当前不被任何模块读取。
 
 ### 3. 后端
 
 ```bash
 cd backend
 npm install
-npm run dev    # 启动 Mastra 开发服务器（默认 4111）
+npm run dev
 ```
 
 ### 4. 前端
@@ -75,7 +125,7 @@ npm run dev    # 启动 Mastra 开发服务器（默认 4111）
 ```bash
 cd frontend
 npm install
-npm run dev    # 启动 Vite 开发服务器（默认 5173）
+npm run dev
 ```
 
 前端通过 Vite proxy 将 `/api/*` 转发到后端。
@@ -91,31 +141,20 @@ npm run dev    # 启动 Vite 开发服务器（默认 5173）
 
 ### 数据库变更
 
-**所有 schema 变更只维护 `backend/database/init.sql`**。禁止创建额外的 SQL 文件。
+`backend/database/init.sql` 是 `0000-initial-schema` 基线。某个环境已经执行并记录该基线后，**不得再修改它**；后续 Schema 变更必须新增 `backend/database/migrations/<序号>-<名称>.sql`。
 
-本地开发时，如需修改 schema：
-1. 编辑 `init.sql`
-2. 重新初始化数据库（开发环境允许丢弃数据）
-3. 生产环境通过迁移脚本执行（不在本仓库中管理）
+`npm run migrate` 会把已执行文件的 SHA-256 写入 `schema_migrations`。若修改已执行迁移，命令会失败，防止环境之间静默漂移。
 
-### 添加新 Agent
+### 新增 Agent / Tool / Skill / Route
 
-参见 `docs/agents.md` → 添加新 Agent。
-
-### 添加新 Tool
-
-参见 `docs/tools.md` → 添加新工具。
-
-### 添加新 Skill
-
-参见 `docs/skills.md` → 添加自定义 Skill。
+参见 `docs/extending.md`。
 
 ## 测试
 
 后端类型检查：
 ```bash
 cd backend
-npx tsc --noEmit
+npm run typecheck
 ```
 
 前端构建：
@@ -136,7 +175,7 @@ npm run lint
 
 ```bash
 cd backend
-npx tsx src/scripts/ask.ts
+npm run ask
 ```
 
 ### SSE 流调试
@@ -146,3 +185,12 @@ npx tsx src/scripts/ask.ts
 ### 日志
 
 后端使用 Mastra 内置的 Pino 日志。设置 `LOG_LEVEL=debug` 查看详细日志。
+
+### 健康检查
+
+- `GET /healthz`：进程存活。
+- `GET /readyz`：数据库、LLM 凭据、Embedding 基础配置均可用才返回 `200`；否则返回 `503` 和非敏感检查项名称。
+
+### 部署档位
+
+当前仅支持 `DEPLOYMENT_PROFILE=demo`，对应本地或受信任网络中的匿名演示。设置 `production` 会拒绝启动，避免在认证、租户隔离和限流尚未实现前发生误部署。

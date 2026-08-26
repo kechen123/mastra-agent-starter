@@ -1,5 +1,5 @@
 {
-  "name": "xuanshu-agent",
+  "name": "mastra-agent-starter",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,6 +7,8 @@
     "dev": "mastra dev",
     "start": "mastra start",
     "typecheck": "tsc --noEmit",
+    "test:contracts": "tsx tests/contracts/run.ts",
+    "migrate": "tsx src/scripts/migrate.ts",
     "ask": "tsx src/scripts/ask.ts"
   },
   "dependencies": {
