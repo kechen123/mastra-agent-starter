@@ -1,0 +1,352 @@
+import { useEffect, useRef, useState } from 'react'
+import { DEFAULT_CAPABILITIES, createKnowledgeBase, deleteDocument, deleteKnowledgeBase, getCapabilities, listDocuments, listKnowledgeBases, uploadDocument, type Capabilities, type ChatAgentInfo, type Citation, type KnowledgeBase, type KnowledgeDocument } from '../lib/api'
+import { listAgents, listConversations, createConversation, getConversation, updateConversation, deleteConversation, streamAskMessage, stopMessage, regenerateMessage, type SSEEvent } from '../lib/conversations'
+import type { ConversationSummary } from '../types/conversation'
+import type { ChatMessage, ConversationState, Module, Theme } from '../types/ui'
+import { cn } from '../lib/cn'
+import { Sidebar } from '../components/layout/Sidebar'
+import { CitationPanel } from '../features/chat/components/CitationPanel'
+import { ChatWorkspace } from '../features/chat/components/ChatWorkspace'
+import { KnowledgeBaseWorkspace } from '../features/knowledge/components/KnowledgeBaseWorkspace'
+import { SkillsWorkspace } from '../features/capabilities/components/SkillsWorkspace'
+
+function App() {
+  const [theme, setTheme] = useState<Theme>('dark'); const [activeModule, setActiveModule] = useState<Module>('对话')
+  const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [conversationState, setConversationState] = useState<ConversationState>({ type: 'draft', agentId: 'general-chat', knowledgeBaseId: null })
+  const [messages, setMessages] = useState<ChatMessage[]>([]); const [isAsking, setIsAsking] = useState(false); const [chatError, setChatError] = useState<string | null>(null); const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null)
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]); const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<string | null>(null); const [documents, setDocuments] = useState<KnowledgeDocument[]>([]); const [isKnowledgeLoading, setIsKnowledgeLoading] = useState(false); const [isUploading, setIsUploading] = useState(false); const [showCreateKnowledgeBase, setShowCreateKnowledgeBase] = useState(false); const [knowledgeError, setKnowledgeError] = useState<string | null>(null); const [capabilities, setCapabilities] = useState<Capabilities>(DEFAULT_CAPABILITIES)
+  const [question, setQuestion] = useState('')
+  const [chatAgents, setChatAgents] = useState<ChatAgentInfo[]>(DEFAULT_CAPABILITIES.chatAgents)
+
+  // 品牌字样：从 /capabilities 读取，缺失时回退到 DEFAULT_CAPABILITIES 里的中性值。
+  const appName = capabilities.app?.name ?? DEFAULT_CAPABILITIES.app!.name
+  const appShortName = capabilities.app?.shortName ?? DEFAULT_CAPABILITIES.app!.shortName
+  // avatar 用 shortName 首字符，Unicode 安全取首字符。
+  const avatarInitial = Array.from(appShortName)[0] ?? 'M'
+
+  const streamingAssistantIdRef = useRef<string | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const isSubmittingRef = useRef(false)
+
+  const currentAgentId = conversationState.type === 'draft' ? conversationState.agentId : (conversations.find((c) => c.id === conversationState.id)?.agentId ?? 'general-chat')
+  const currentKnowledgeBaseId = conversationState.type === 'draft' ? conversationState.knowledgeBaseId : (conversations.find((c) => c.id === conversationState.id)?.knowledgeBaseId ?? null)
+  const activeKnowledgeBase = currentKnowledgeBaseId ? knowledgeBases.find((kb) => kb.id === currentKnowledgeBaseId) ?? null : null
+
+  useEffect(() => { void refreshConversations() }, [])
+  useEffect(() => { if (activeModule === '知识库') void refreshKnowledgeBases() }, [activeModule])
+  useEffect(() => { void getCapabilities().then(setCapabilities).catch(() => setCapabilities(DEFAULT_CAPABILITIES)) }, [])
+  useEffect(() => {
+    void listAgents().then((agents) => {
+      setChatAgents(agents.map((a) => ({ id: a.id, name: a.name, requiresKnowledgeBase: a.capabilities.knowledgeBase })))
+    }).catch(() => {
+      setChatAgents(DEFAULT_CAPABILITIES.chatAgents)
+    })
+  }, [])
+  useEffect(() => { if (activeModule === '知识库' && selectedKnowledgeBaseId) void refreshDocuments(selectedKnowledgeBaseId) }, [activeModule, selectedKnowledgeBaseId])
+
+  async function refreshConversations() {
+    try { setConversations(await listConversations()) } catch (error) { console.error('加载会话列表失败', error) }
+  }
+  async function refreshKnowledgeBases() { setIsKnowledgeLoading(true); try { setKnowledgeBases(await listKnowledgeBases()) } catch (error) { setKnowledgeError(toErrorMessage(error)) } finally { setIsKnowledgeLoading(false) } }
+  async function refreshDocuments(id: string) { setIsKnowledgeLoading(true); try { setDocuments(await listDocuments(id)) } catch (error) { setKnowledgeError(toErrorMessage(error)) } finally { setIsKnowledgeLoading(false) } }
+  async function openConversation(id: string) {
+    if (streamingAssistantIdRef.current) {
+      await handleStop()
+    }
+    setChatError(null); setSelectedCitation(null)
+    try {
+      const { messages: loadedMessages } = await getConversation(id)
+      setConversationState({ type: 'persisted', id })
+      setMessages(loadedMessages.map((m) => m.role === 'user' ? { id: m.id, role: 'user', content: m.content, status: m.status as 'completed' | 'failed' } : { id: m.id, role: 'assistant', content: m.content, citations: m.citations, status: m.status as Extract<ChatMessage, { role: 'assistant' }>['status'] }))
+    } catch (error) { setChatError(toErrorMessage(error)) }
+  }
+  function newChat() {
+    if (streamingAssistantIdRef.current) {
+      void handleStop()
+    }
+    setConversationState({ type: 'draft', agentId: 'general-chat', knowledgeBaseId: null }); setMessages([]); setChatError(null); setSelectedCitation(null)
+  }
+  async function switchAgent(agentId: string) {
+    if (conversationState.type === 'draft') { setConversationState({ type: 'draft', agentId, knowledgeBaseId: agentId === 'general-chat' ? null : conversationState.knowledgeBaseId }); setChatError(null); return }
+    try { const updated = await updateConversation(conversationState.id, { agentId }); setConversations((prev) => prev.map((c) => (c.id === updated.id ? { ...c, agentId: updated.agentId, knowledgeBaseId: updated.knowledgeBaseId } : c))); setChatError(null) } catch (error) { setChatError(toErrorMessage(error)) }
+  }
+  async function selectKnowledgeBase(knowledgeBase: Pick<KnowledgeBase, 'id' | 'name'>) {
+    if (conversationState.type === 'draft') { setConversationState({ type: 'draft', agentId: 'knowledge-base', knowledgeBaseId: knowledgeBase.id }); setChatError(null); return }
+    try { const updated = await updateConversation(conversationState.id, { agentId: 'knowledge-base', knowledgeBaseId: knowledgeBase.id }); setConversations((prev) => prev.map((c) => (c.id === updated.id ? { ...c, agentId: updated.agentId, knowledgeBaseId: updated.knowledgeBaseId, knowledgeBaseName: knowledgeBase.name } : c))); setChatError(null) } catch (error) { setChatError(toErrorMessage(error)) }
+  }
+  async function clearKnowledgeBase() {
+    if (conversationState.type === 'draft') { setConversationState((prev) => prev.type === 'draft' ? { ...prev, knowledgeBaseId: null } : prev); return }
+    try { const updated = await updateConversation(conversationState.id, { knowledgeBaseId: null }); setConversations((prev) => prev.map((c) => (c.id === updated.id ? { ...c, knowledgeBaseId: null, knowledgeBaseName: null } : c))) } catch (error) { setChatError(toErrorMessage(error)) }
+  }
+
+  async function handleStop() {
+    const assistantId = streamingAssistantIdRef.current
+    if (!assistantId) return
+    abortControllerRef.current?.abort()
+    try {
+      await stopMessage(assistantId)
+    } catch (error) {
+      console.error('Stop failed:', error)
+    }
+  }
+
+  function handleSSEEvent(event: SSEEvent) {
+    if (event.event === 'message-start') {
+      streamingAssistantIdRef.current = event.data.id
+      setMessages((current) => {
+        const exists = current.some((m) => m.id === event.data.id && m.role === 'assistant')
+        if (exists) return current
+        return [...current, { id: event.data.id, role: 'assistant', content: '', citations: [], status: 'streaming' }]
+      })
+    } else if (event.event === 'content-delta') {
+      setMessages((current) => {
+        const idx = current.findIndex((m) => m.id === event.data.messageId && m.role === 'assistant')
+        if (idx === -1) return current
+        const updated = current.slice()
+        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
+        updated[idx] = { ...assistant, content: assistant.content + event.data.text }
+        return updated
+      })
+    } else if (event.event === 'message-complete') {
+      streamingAssistantIdRef.current = null
+      abortControllerRef.current = null
+      setMessages((current) => {
+        const idx = current.findIndex((m) => m.id === event.data.id && m.role === 'assistant')
+        if (idx === -1) return current
+        const updated = current.slice()
+        updated[idx] = {
+          id: event.data.id,
+          role: 'assistant',
+          content: event.data.content,
+          citations: event.data.citations,
+          status: event.data.status as Extract<ChatMessage, { role: 'assistant' }>['status'],
+        }
+        return updated
+      })
+      void refreshConversations()
+    } else if (event.event === 'message-error') {
+      streamingAssistantIdRef.current = null
+      abortControllerRef.current = null
+      setMessages((current) => {
+        const idx = current.findIndex((m) => m.id === event.data.id && m.role === 'assistant')
+        if (idx === -1) return current
+        const updated = current.slice()
+        updated[idx] = {
+          id: event.data.id,
+          role: 'assistant',
+          content: event.data.content || '',
+          citations: [],
+          status: event.data.status as Extract<ChatMessage, { role: 'assistant' }>['status'],
+        }
+        return updated
+      })
+      setChatError(event.data.error?.message ?? '生成失败，请重试。')
+    } else if (event.event === 'tool-call-start') {
+      setMessages((current) => {
+        const idx = current.findIndex((m) => m.role === 'assistant' && (m.status === 'streaming' || m.status === 'pending'))
+        if (idx === -1) return current
+        const updated = current.slice()
+        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
+        const tools = [...(assistant.tools ?? [])]
+        tools.push({ status: 'running', toolCallId: event.data.toolCallId, toolName: event.data.toolName })
+        updated[idx] = { ...assistant, tools }
+        return updated
+      })
+    } else if (event.event === 'tool-call-complete') {
+      setMessages((current) => {
+        const idx = current.findIndex((m) => m.role === 'assistant')
+        if (idx === -1) return current
+        const updated = current.slice()
+        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
+        const tools = (assistant.tools ?? []).map((t) => t.toolCallId === event.data.toolCallId ? { ...t, status: 'completed' as const } : t)
+        updated[idx] = { ...assistant, tools }
+        return updated
+      })
+    } else if (event.event === 'tool-call-error') {
+      setMessages((current) => {
+        const idx = current.findIndex((m) => m.role === 'assistant')
+        if (idx === -1) return current
+        const updated = current.slice()
+        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
+        const tools = (assistant.tools ?? []).map((t) => t.toolCallId === event.data.toolCallId ? { ...t, status: 'failed' as const, errorCode: event.data.errorCode } : t)
+        updated[idx] = { ...assistant, tools }
+        return updated
+      })
+    }
+  }
+
+  async function submitQuestion() {
+    const content = question.trim()
+    if (!content || isSubmittingRef.current || streamingAssistantIdRef.current) return
+    const currentAgent = chatAgents.find((a) => a.id === currentAgentId)
+    if (currentAgent?.requiresKnowledgeBase && !currentKnowledgeBaseId) { setChatError('请先选择一个知识库。'); return }
+    setChatError(null)
+    setQuestion('')
+    isSubmittingRef.current = true
+
+    let convId: string
+    if (conversationState.type === 'draft') {
+      try {
+        const created = await createConversation({ agentId: conversationState.agentId, knowledgeBaseId: conversationState.knowledgeBaseId })
+        convId = created.id
+        setConversationState({ type: 'persisted', id: convId })
+        const summary: ConversationSummary = { id: created.id, title: created.title, agentId: created.agentId, knowledgeBaseId: created.knowledgeBaseId, knowledgeBaseName: created.knowledgeBaseName, createdAt: created.createdAt, updatedAt: created.updatedAt }
+        setConversations((prev) => [summary, ...prev])
+      } catch (error) { setChatError(toErrorMessage(error)); isSubmittingRef.current = false; return; }
+    } else { convId = conversationState.id }
+
+    // 立刻把用户消息渲染到 UI，避免等待首条 SSE 事件带来的"空档"
+    const userMessageId = crypto.randomUUID()
+    setMessages((current) => [...current, { id: userMessageId, role: 'user', content, status: 'completed' }])
+    setIsAsking(true)
+
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+
+    try {
+      await streamAskMessage(convId, content, (event) => handleSSEEvent(event), abortController.signal)
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        const assistantId = streamingAssistantIdRef.current
+        if (assistantId) {
+          setMessages((current) => {
+            const idx = current.findIndex((m) => m.id === assistantId && m.role === 'assistant')
+            if (idx === -1) return current
+            const updated = current.slice()
+            const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
+            updated[idx] = { ...assistant, status: 'stopped' }
+            return updated
+          })
+        }
+      } else {
+        setChatError(toErrorMessage(error))
+      }
+    } finally {
+      setIsAsking(false)
+      isSubmittingRef.current = false
+      streamingAssistantIdRef.current = null
+      abortControllerRef.current = null
+    }
+  }
+
+  async function handleRegenerate(assistantMessageId: string) {
+    if (streamingAssistantIdRef.current || isSubmittingRef.current) return
+    isSubmittingRef.current = true
+    setChatError(null)
+
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+    setIsAsking(true)
+
+    try {
+      await regenerateMessage(assistantMessageId, (event) => handleSSEEvent(event), abortController.signal)
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        const assistantId = streamingAssistantIdRef.current
+        if (assistantId) {
+          setMessages((current) => {
+            const idx = current.findIndex((m) => m.id === assistantId && m.role === 'assistant')
+            if (idx === -1) return current
+            const updated = current.slice()
+            const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
+            updated[idx] = { ...assistant, status: 'stopped' }
+            return updated
+          })
+        }
+      } else {
+        setChatError(toErrorMessage(error))
+      }
+    } finally {
+      setIsAsking(false)
+      isSubmittingRef.current = false
+      streamingAssistantIdRef.current = null
+      abortControllerRef.current = null
+    }
+  }
+
+  async function handleDeleteConversation(id: string) {
+    const conversation = conversations.find((item) => item.id === id)
+    if (!window.confirm(`确定删除“${conversation?.title ?? '此对话'}”吗？此操作无法撤销。`)) return
+    try { await deleteConversation(id); setConversations((prev) => prev.filter((c) => c.id !== id)); if (conversationState.type === 'persisted' && conversationState.id === id) newChat() } catch (error) { setChatError(toErrorMessage(error)) }
+  }
+  function enterChatFromKnowledgeBase(knowledgeBase: Pick<KnowledgeBase, 'id' | 'name'>) { setConversationState({ type: 'draft', agentId: 'knowledge-base', knowledgeBaseId: knowledgeBase.id }); setMessages([]); setChatError(null); setSelectedCitation(null); setActiveModule('对话') }
+  async function createKnowledgeBaseFromForm(name: string, description: string) { setKnowledgeError(null); const created = await createKnowledgeBase({ name, ...(description ? { description } : {}) }); setKnowledgeBases((current) => [created, ...current]); setSelectedKnowledgeBaseId(created.id); setShowCreateKnowledgeBase(false) }
+  async function handleUpload(file: File | undefined) { if (!file || !selectedKnowledgeBaseId || isUploading) return; setIsUploading(true); setKnowledgeError(null); try { await uploadDocument(selectedKnowledgeBaseId, file); await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()]) } catch (error) { setKnowledgeError(toErrorMessage(error)) } finally { setIsUploading(false) } }
+  async function handleDeleteKnowledgeBase(id: string) {
+    const knowledgeBase = knowledgeBases.find((item) => item.id === id)
+    if (!window.confirm(`确定删除知识库“${knowledgeBase?.name ?? ''}”吗？其中的文档也会被删除。`)) return
+    setKnowledgeError(null)
+    try {
+      await deleteKnowledgeBase(id)
+      setKnowledgeBases((current) => current.filter((item) => item.id !== id))
+      setDocuments([])
+      if (selectedKnowledgeBaseId === id) setSelectedKnowledgeBaseId(null)
+      if (currentKnowledgeBaseId === id) {
+        if (conversationState.type === 'draft') setConversationState({ type: 'draft', agentId: 'knowledge-base', knowledgeBaseId: null })
+        else {
+          const updated = await updateConversation(conversationState.id, { knowledgeBaseId: null })
+          setConversations((current) => current.map((item) => item.id === updated.id ? { ...item, knowledgeBaseId: null, knowledgeBaseName: null } : item))
+        }
+      }
+    } catch (error) { setKnowledgeError(toErrorMessage(error)) }
+  }
+  async function handleDeleteDocument(id: string) { if (!selectedKnowledgeBaseId || !window.confirm('确定删除此文档吗？')) return; setKnowledgeError(null); try { await deleteDocument(id); await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()]) } catch (error) { setKnowledgeError(toErrorMessage(error)) } }
+  function selectModule(module: Module) {
+    if (module !== '对话' && streamingAssistantIdRef.current) {
+      void handleStop()
+    }
+    setActiveModule(module); setSelectedCitation(null); if (module === '知识库') setKnowledgeError(null)
+  }
+  const selectedKnowledgeBase = knowledgeBases.find((item) => item.id === selectedKnowledgeBaseId) ?? null
+  const isStreaming = !!streamingAssistantIdRef.current
+  return <main className={cn('flex h-screen overflow-hidden text-app-text bg-app-bg', theme === 'dark' && 'dark')}>
+    <Sidebar
+      appName={appName}
+      avatarInitial={avatarInitial}
+      activeModule={activeModule}
+      knowledgeBases={knowledgeBases}
+      selectedKnowledgeBaseId={selectedKnowledgeBaseId}
+      conversations={conversations}
+      currentConversationId={conversationState.type === 'persisted' ? conversationState.id : null}
+      onSelectModule={selectModule}
+      onSelectKnowledgeBase={(id) => { setSelectedKnowledgeBaseId(id); setShowCreateKnowledgeBase(false) }}
+      onNewChat={newChat}
+      onOpenConversation={openConversation}
+      onDeleteConversation={handleDeleteConversation}
+      onNewKnowledgeBase={() => { setSelectedKnowledgeBaseId(null); setShowCreateKnowledgeBase(true) }}
+      theme={theme}
+      onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+    />
+    {activeModule === '对话' && <ChatWorkspace
+      appShortName={appShortName}
+      question={question}
+      messages={messages}
+      isAsking={isAsking}
+      isStreaming={isStreaming}
+      error={chatError}
+      chatAgents={chatAgents}
+      knowledgeBases={knowledgeBases}
+      selectedAgentId={currentAgentId}
+      defaultChatModel={capabilities.defaultChatModel}
+      activeKnowledgeBase={activeKnowledgeBase}
+      onQuestionChange={setQuestion}
+      onSubmit={() => void submitQuestion()}
+      onStop={() => void handleStop()}
+      onRegenerate={handleRegenerate}
+      onSwitchAgent={switchAgent}
+      onSelectKnowledgeBase={selectKnowledgeBase}
+      onClearKnowledgeBase={clearKnowledgeBase}
+      onSelectCitation={setSelectedCitation}
+    />}
+    {activeModule === '知识库' && <KnowledgeBaseWorkspace selectedKnowledgeBase={selectedKnowledgeBase} documents={documents} isLoading={isKnowledgeLoading} isUploading={isUploading} showCreate={showCreateKnowledgeBase} error={knowledgeError} capabilities={capabilities} onCreate={createKnowledgeBaseFromForm} onBack={() => { setSelectedKnowledgeBaseId(null); setShowCreateKnowledgeBase(false) }} onEnterChat={enterChatFromKnowledgeBase} onUpload={handleUpload} onDeleteDocument={handleDeleteDocument} onDeleteKnowledgeBase={handleDeleteKnowledgeBase} />}
+    {activeModule === '能力' && <SkillsWorkspace />}
+    {selectedCitation && <CitationPanel citation={selectedCitation} onClose={() => setSelectedCitation(null)} />}
+  </main>
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : '请求失败，请稍后重试。';
+}
+
+export default App

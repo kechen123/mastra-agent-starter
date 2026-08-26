@@ -72,15 +72,24 @@ Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持
 
 ### 4. Skill Registry
 
-位于 `backend/src/core/skill/registry.ts`。
+位于 `backend/src/core/skill/registry.ts`，以 **facade** 形式存在，真实职责拆分到：
+
+- `discovery.ts` —— 文件系统扫描（builtin / local / marketplace），`readSkillMdEntries()` 显式 `continue` 跳过 `_template`
+- `parser.ts` —— SKILL.md frontmatter 解析（allowed-tools、name、description），纯函数
+- `compatibility.ts` —— `classifyFromFiles` / `analyzeCompatibility`：脚本与可执行扩展名 → `requires-runtime`；未注册工具 → `requires-runtime`；Agent 工具未授权 → `requires-runtime`
+- `bindings.ts` —— Agent ↔ Skill 绑定（双重校验：Tool 已注册 + Agent toolIds 已包含），DB CRUD
+- `registry.ts` —— facade：内存三张 Map（builtin / local / installed）+ `ensureSkillRegistryLoaded()` 幂等闸门 + `tryRegisterExecution()` / `getSkill` / `listSkills` 等公共 API
+
+关键约束：
 
 - **文件系统驱动** — 三类来源：
   - `backend/src/skills/builtin/<id>/SKILL.md` —— 随版本发布
   - `backend/src/skills/local/<id>/SKILL.md` —— 本地自定义
   - `backend/market-skills/<owner>/<repo>/<skill>/SKILL.md` —— skills.sh 安装
-- `_template` 目录会被 `readSkillMdEntries()` 跳过，**不会污染 Skill 列表**
+- `_template` 目录会被 `discovery.ts` 的 `readSkillMdEntries()` 跳过（`if (id === '_template') continue`），**不会污染 Skill 列表**
 - DB `skills_installed` 与 `agent_skill_bindings` 表驱动运行时注入与绑定
 - `compatibility === 'compatible'` 才会被采纳；`requires-runtime` 在 `resolveSkillsForAgent()` 阶段被丢弃
+- 一次 `ensureSkillRegistryLoaded()` 必须只触发一次 DB hydration；失败时回滚到加载前快照、清空 in-flight Promise、下次调用可重试（不允许把"仅 builtin/local/marketplace 的部分列表"当作完整注册表）
 
 ### 5. Agent 定义与能力绑定
 
@@ -188,23 +197,25 @@ infrastructure/llm/
 ### 问答请求流
 
 1. 用户发送 `POST /ask`，携带 `conversationId` 和 `message`
-2. `server/routes/ask.ts` 保存用户消息到数据库
+2. `server/routes/messages/ask.ts` 保存用户消息到数据库
 3. 创建 `assistant` 消息，状态为 `pending`
 4. 注册执行上下文（AbortController）
 5. 调用 `streamAgent(agentId, …)` 进入 `core/agent/runtime.ts`
 6. 运行时按 `definition.capabilities.knowledgeBase` 决定是否走 RAG/Citation 分支
 7. 动态解析 Tools 和 Skills → 调用 `definition.factory(tools, skills)` 拿到一个临时 Mastra Agent
 8. `agent.stream(prompt, { abortSignal })` 产生内部流，运行时转换为统一的 `StreamEvent`
-9. 路由把事件包装为 SSE 推送给前端：
+9. 共享驱动 `core/execution/ask-driver.ts::buildAskStreamResponse` 把事件包装为 SSE 推送给前端：
    - `message-start`: 助手消息开始生成
    - `content-delta`: 文本片段
    - `tool-call-start`: 工具调用开始（载荷 `{ toolCallId, toolName, status: 'running' }`）
    - `tool-call-complete`: 工具调用成功（载荷 `{ toolCallId, toolName, status: 'completed' }`）
-   - `tool-call-error`: 工具调用失败（载荷 `{ toolCallId, toolName, status: 'failed', errorCode }`）
-   - `message-complete`: 生成完成
+   - `tool-call-error`: 工具调用失败（载荷 `{ toolCallId, toolName, status: 'failed', errorCode: 'tool_error' }`，errorCode 恒定，不暴露原始错误）
+   - `message-complete`: 生成完成（含 status: completed 或 stopped）
    - `message-error`: 生成失败
-10. 最终持久化助手消息的最终内容、状态和引文
-11. 流退出前调用 `convergeRunningToolExecutions()` 收敛残留执行记录
+10. 终态由 `core/execution/message-finalize.ts` 统一处理（DB 行 + SSE 事件），失败回退由 `finalizeAfterStreamError` 兜底
+11. `finally` 块调用 `sweepRunningToolExecutions()` 收敛残留执行记录
+
+`/ask`、`/messages/:id/stop`、`/messages/:id/regenerate` 三条路由共享同一驱动，唯一差异是上游输入（消息 ID / 历史切片）；`stop.ts` 仅通过 `abortExecution()` 中断执行控制器，不重复实现 SSE 协议。
 
 ### 技能市场安装流
 
@@ -234,9 +245,9 @@ infrastructure/llm/
 | `/skills/:id/update` | POST | 更新已安装技能 | `server/routes/skills.ts` |
 | `/skills/:id/bind` | POST | 绑定技能到 Agent | `server/routes/skills.ts` |
 | `/skills/:id/unbind` | POST | 解绑技能从 Agent | `server/routes/skills.ts` |
-| `/ask` | POST | 流式问答（SSE） | `server/routes/ask.ts` |
-| `/messages/:id/stop` | POST | 停止生成 | `server/routes/ask.ts` |
-| `/messages/:id/regenerate` | POST | 重新生成 | `server/routes/ask.ts` |
+| `/ask` | POST | 流式问答（SSE） | `server/routes/messages/ask.ts` |
+| `/messages/:id/stop` | POST | 停止生成 | `server/routes/messages/stop.ts` |
+| `/messages/:id/regenerate` | POST | 重新生成 | `server/routes/messages/regenerate.ts` |
 | `/conversations` | GET / POST | 会话列表 / 创建 | `server/routes/conversations.ts` |
 | `/conversations/:id` | GET / PATCH / DELETE | 会话详情 / 更新 / 删除 | `server/routes/conversations.ts` |
 | `/knowledge-bases` | GET / POST | 知识库列表 / 创建 | `server/routes/knowledge-bases.ts` |
@@ -272,6 +283,18 @@ infrastructure/llm/
 
 `ToolDefinition.metadata` 中的 `readOnly` / `destructive` / `idempotent` / `openWorld` / `requiresRuntime` 字段当前是 **能力声明与 UI 展示信息**，**不是** 生产级授权系统。任何自定义 Tool 不得返回密码、Token、Cookie、Authorization Header 或其他 secret；`destructive: true` 或 `openWorld: true` 的 Tool 在引入生产业务前 **必须** 接入身份认证、租户/资源归属校验、用户确认或策略审批、以及输入输出脱敏与审计。详细约束见 `docs/tools.md` § Tool Metadata 的真实定位。
 
-### 前端组件拆分（后续建议）
+### 前端结构
 
-`frontend/src/App.tsx` 当前已承载较多跨模块逻辑（Sidebar / Chat / Knowledge / Skills）。本阶段 **不** 拆组件，避免把基座可靠性阶段扩大为 UI 重构。建议：**当 App.tsx 再次出现跨模块变更时，再按 Sidebar / Chat / Knowledge / Skills 拆分**；当前不应创建空组件目录或空组件文件。
+`frontend/src/` 按职责拆分为：
+
+- `app/App.tsx` —— 应用入口（仅承载应用级 state：主题、当前模块、会话列表、跨模块编排、SSE 事件分发与模块路由）
+- `components/layout/Sidebar.tsx` —— 左侧栏（主题切换 / 模块切换 / 会话列表）
+- `features/chat/components/ChatWorkspace.tsx` —— 对话工作区（消息流、引用、工具调用、Agent 选择、知识库选择、再生按钮）
+- `features/chat/components/CitationPanel.tsx` —— 单条引用面板
+- `features/knowledge/components/KnowledgeBaseWorkspace.tsx` —— 知识库管理（上传 / 列表 / 删除 / 状态展示）
+- `features/capabilities/components/SkillsWorkspace.tsx` —— 技能面板（本地 / 市场 / 绑定 / 工具）
+- `types/ui.ts` —— 跨模块共享类型（`Theme`、`Module`、`ChatMessage`、`ToolCallState`、`ConversationState`、`KnowledgeBaseChoice`）
+- `lib/api.ts` / `lib/conversations.ts` —— 后端 API 客户端封装
+- `types/conversation.ts` —— 会话 / 消息业务类型
+
+App.tsx 通过 props 把应用级 state 注入到各 feature 工作区；feature 之间互不直接引用、不共享组件状态。`ChatMessage` / `ToolCallState` 等跨模块类型集中在 `types/ui.ts`，避免 feature 内部相互耦合。

@@ -1,0 +1,10 @@
+import { X } from 'lucide-react';
+import type { Citation } from '../../../lib/api';
+
+/** 聊天引用详情面板；只展示 Runtime 已返回的 Citation，不自行请求数据。 */
+export function CitationPanel({ citation, onClose }: { citation: Citation; onClose: () => void }) {
+  return <aside className="flex shrink-0 basis-[380px] min-w-0 h-full overflow-hidden flex-col border-l border-app-border bg-app-surface max-[900px]:basis-[330px]">
+    <header className="flex items-center justify-between shrink-0 min-h-[68px] px-5 border-b border-app-border text-lg"><strong>引用来源</strong><button className="grid place-items-center p-2 text-app-muted bg-transparent border-0 rounded-md hover:text-app-text hover:bg-app-hover" onClick={onClose}><X size={20} /></button></header>
+    <div className="flex-1 min-h-0 overflow-y-auto"><article className="m-4 p-4 border border-app-border-strong rounded-xl text-sm leading-[1.75]"><h2 className="m-0 text-lg">{citation.documentName ?? citation.title}</h2><p className="mt-1 mb-3 text-app-muted">{citation.heading ?? citation.chapter}</p><hr className="border-0 border-t border-app-border" /><h3 className="mt-4 mb-1 text-app-muted text-[13px] font-medium">原文</h3><p className="m-0 mb-2 whitespace-pre-wrap">{citation.content}</p><h3 className="mt-4 mb-1 text-app-muted text-[13px] font-medium">元数据</h3><dl className="grid grid-cols-[60px_1fr] gap-2 mt-2">{citation.documentId ? <><dt className="text-app-muted">文档</dt><dd className="m-0 break-words">{citation.documentName}</dd><dt className="text-app-muted">片段</dt><dd className="m-0 break-words">第 {(citation.chunkIndex ?? 0) + 1} 段</dd></> : <><dt className="text-app-muted">作者</dt><dd className="m-0 break-words">{citation.author ?? '未标注'}</dd><dt className="text-app-muted">版本</dt><dd className="m-0 break-words">{citation.version ?? '未标注'}</dd></>}<dt className="text-app-muted">类型</dt><dd className="m-0 break-words">{citation.category || citation.type}</dd><dt className="text-app-muted">来源</dt><dd className="m-0 break-words">{citation.source || '未标注'}</dd></dl></article></div>
+  </aside>;
+}

@@ -197,19 +197,35 @@ record(
   `实际解析结果：${JSON.stringify(templateAllowedTools)}`,
 );
 
-// _template 目录不应作为 Skill 注册。registry.ts 的 readSkillMdEntries 已跳过它，
-// 这里通过解析 source 文件确认存在跳过逻辑（防止被无意识删除）。
-const skillRegistryPath = join(CORE_DIR, 'skill', 'registry.ts');
+// _template 目录不应作为 Skill 注册。真实的跳过逻辑位于
+// `core/skill/discovery.ts` 的 `readSkillMdEntries`（registry.ts 仅作为
+// facade 转发）。检查必须落到真实实现文件，防止"只看注释文本通过"——
+// 注释文本可能与实际行为脱节。
+const skillDiscoveryPath = join(CORE_DIR, 'skill', 'discovery.ts');
 let hasTemplateSkip = false;
+let hasTemplateSkipInFacade = false;
 try {
-  const text = readFileSync(skillRegistryPath, 'utf-8');
-  hasTemplateSkip = /_template/.test(text) && /continue|skip/i.test(text);
+  const discoveryText = readFileSync(skillDiscoveryPath, 'utf-8');
+  // 必须有：字面量 '_template' + 跳过分支（continue 或条件判断）。
+  hasTemplateSkip =
+    /['_"]_template['"]/.test(discoveryText) &&
+    /(continue|skip)/i.test(discoveryText);
+
+  // 额外：facade registry.ts 仍然以注释或代码形式提示发现逻辑在
+  // discovery.ts，避免后续重构把跳过行为重新塞回 facade 而破坏模块边界。
+  const registryText = readFileSync(join(CORE_DIR, 'skill', 'registry.ts'), 'utf-8');
+  hasTemplateSkipInFacade =
+    /discovery\.ts/.test(registryText) && /_template/.test(registryText);
 } catch (err) {
-  record('[Skill] core/skill/registry.ts 存在', false, String(err));
+  record('[Skill] core/skill/discovery.ts 存在', false, String(err));
 }
 record(
-  '[Skill] core/skill/registry.ts 必须显式跳过 _template 目录',
+  '[Skill] core/skill/discovery.ts 必须显式跳过 _template 目录（_template 字面量 + continue/skip）',
   hasTemplateSkip,
+);
+record(
+  '[Skill] core/skill/registry.ts 仅作为 facade、必须引用 discovery.ts 的 _template 跳过',
+  hasTemplateSkipInFacade,
 );
 
 // 保留 skill-classifier.ts：原 fixture 仍然负责纯静态分类 + 并发 hydration 测试。

@@ -34,7 +34,7 @@ import '../tools/index.js';
 import { initializeApp } from './init.js';
 import { preloadSkillRegistry } from '../core/skill/registry.js';
 
-import { askRoute, stopMessageRoute, regenerateMessageRoute } from './routes/ask.js';
+import { askRoute, stopMessageRoute, regenerateMessageRoute } from './routes/messages/index.js';
 import {
   deleteDocumentRoute,
   getDocumentRoute,

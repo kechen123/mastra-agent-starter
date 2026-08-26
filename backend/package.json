@@ -8,6 +8,10 @@
     "start": "mastra start",
     "typecheck": "tsc --noEmit",
     "test:contracts": "tsx tests/contracts/run.ts",
+    "test:unit": "tsx tests/unit/run.ts",
+    "test:integration": "tsx tests/integration/run.ts",
+    "test:fixtures": "tsx tests/fixtures/skill-classifier.ts",
+    "test": "npm run test:contracts && npm run test:unit && npm run test:integration && npm run test:fixtures",
     "migrate": "tsx src/scripts/migrate.ts",
     "ask": "tsx src/scripts/ask.ts"
   },
