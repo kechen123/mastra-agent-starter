@@ -3,8 +3,7 @@ import {
   listSkills,
   getSkill,
   loadInstalledSkills,
-  saveInstalledSkill,
-  removeInstalledSkill,
+  ensureSkillRegistryLoaded,
   bindSkillToAgent,
   unbindSkillFromAgent,
 } from '../skills/registry.js';
@@ -13,18 +12,40 @@ import {
   installMarketSkill,
   updateMarketSkill,
   uninstallMarketSkill,
+  searchMarketSkills,
+  listPopularMarketSkills,
+  type MarketSkillInfo,
+  type SkillPreview,
 } from '../skills/market.js';
+import { assertSafeSkillName } from '@mastra/server/handlers/skills-sh-shared';
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{3}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-function isUuid(value: string): boolean {
-  return UUID_PATTERN.test(value);
+function parseSkillTriple(input: unknown): { owner: string; repo: string; skillName: string } | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const { owner, repo, skillName } = input as Record<string, unknown>;
+  if (typeof owner !== 'string' || typeof repo !== 'string' || typeof skillName !== 'string') return null;
+  const trimmedOwner = owner.trim();
+  const trimmedRepo = repo.trim();
+  const trimmedSkill = skillName.trim();
+  if (!trimmedOwner || !trimmedRepo || !trimmedSkill) return null;
+  try {
+    return {
+      owner: assertSafeSkillName(trimmedOwner),
+      repo: assertSafeSkillName(trimmedRepo),
+      skillName: assertSafeSkillName(trimmedSkill),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export const listSkillsRoute = registerApiRoute('/skills', {
   method: 'GET',
   requiresAuth: false,
   handler: async (context) => {
+    // Hydration gate — even if the boot-time preload is still in flight or has
+    // failed and been retried, await a shared Promise so the registered view
+    // reflects the filesystem + DB index before we serialise.
+    await ensureSkillRegistryLoaded();
     const skills = listSkills();
     return context.json(
       skills.map((s) => ({
@@ -45,6 +66,7 @@ export const getSkillRoute = registerApiRoute('/skills/:id', {
   method: 'GET',
   requiresAuth: false,
   handler: async (context) => {
+    await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     const skill = getSkill(id);
     if (!skill) {
@@ -63,53 +85,81 @@ export const getSkillRoute = registerApiRoute('/skills/:id', {
   },
 });
 
-export const previewSkillRoute = registerApiRoute('/skills/preview', {
-  method: 'POST',
+export const searchMarketSkillsRoute = registerApiRoute('/skills/market/search', {
+  method: 'GET',
   requiresAuth: false,
   handler: async (context) => {
-    const body = await context.req.json<unknown>();
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return context.json({ message: '请求体必须是 JSON 对象。' }, 400);
-    }
-    const { owner, repo } = body as Record<string, unknown>;
-    if (typeof owner !== 'string' || !owner.trim()) {
-      return context.json({ message: 'owner 不能为空。' }, 400);
-    }
-    if (typeof repo !== 'string' || !repo.trim()) {
-      return context.json({ message: 'repo 不能为空。' }, 400);
-    }
+    const query = context.req.query('q') ?? '';
+    const limitRaw = context.req.query('limit');
+    const limit = limitRaw ? Math.min(Math.max(Number.parseInt(limitRaw, 10) || 20, 1), 50) : 20;
     try {
-      const preview = await previewMarketSkill(owner.trim(), repo.trim());
-      return context.json(preview);
+      const results = query.trim().length === 0
+        ? await listPopularMarketSkills({ limit })
+        : await searchMarketSkills(query.trim(), { limit });
+      return context.json({ results });
     } catch (err) {
-      const message = err instanceof Error ? err.message : '预览失败';
-      return context.json({ message }, 500);
+      const message = err instanceof Error ? err.message : '搜索失败';
+      return context.json({ message }, 502);
     }
   },
 });
 
-export const installSkillRoute = registerApiRoute('/skills/install', {
+export const listPopularMarketSkillsRoute = registerApiRoute('/skills/market/popular', {
+  method: 'GET',
+  requiresAuth: false,
+  handler: async (context) => {
+    try {
+      const results: MarketSkillInfo[] = await listPopularMarketSkills({ limit: 20 });
+      return context.json({ results });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '获取热门失败';
+      return context.json({ message }, 502);
+    }
+  },
+});
+
+export const previewSkillRoute = registerApiRoute('/skills/market/preview', {
   method: 'POST',
   requiresAuth: false,
   handler: async (context) => {
     const body = await context.req.json<unknown>();
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return context.json({ message: '请求体必须是 JSON 对象。' }, 400);
-    }
-    const { owner, repo } = body as Record<string, unknown>;
-    if (typeof owner !== 'string' || !owner.trim()) {
-      return context.json({ message: 'owner 不能为空。' }, 400);
-    }
-    if (typeof repo !== 'string' || !repo.trim()) {
-      return context.json({ message: 'repo 不能为空。' }, 400);
+    const parsed = parseSkillTriple(body);
+    if (!parsed) {
+      return context.json({ message: '需要 owner、repo、skillName 三个非空字符串字段。' }, 400);
     }
     try {
-      const installed = await installMarketSkill(owner.trim(), repo.trim());
-      await loadInstalledSkills();
+      const preview: SkillPreview | null = await previewMarketSkill(parsed.owner, parsed.repo, parsed.skillName);
+      if (!preview) {
+        return context.json({ message: '未找到对应的 Skill。' }, 404);
+      }
+      return context.json(preview);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '预览失败';
+      return context.json({ message }, 502);
+    }
+  },
+});
+
+export const installSkillRoute = registerApiRoute('/skills/market/install', {
+  method: 'POST',
+  requiresAuth: false,
+  handler: async (context) => {
+    const body = await context.req.json<unknown>();
+    const parsed = parseSkillTriple(body);
+    if (!parsed) {
+      return context.json({ message: '需要 owner、repo、skillName 三个非空字符串字段。' }, 400);
+    }
+    try {
+      // Ensure the registry reflects any prior installs before we mutate it.
+      await ensureSkillRegistryLoaded();
+      const installed: SkillPreview = await installMarketSkill(parsed.owner, parsed.repo, parsed.skillName);
+      // installMarketSkill already triggers a loadInstalledSkills refresh
+      // internally; mark the gate complete so subsequent ensure calls are O(1).
+      await ensureSkillRegistryLoaded();
       return context.json(installed);
     } catch (err) {
       const message = err instanceof Error ? err.message : '安装失败';
-      return context.json({ message }, 500);
+      return context.json({ message }, 502);
     }
   },
 });
@@ -118,10 +168,14 @@ export const updateSkillRoute = registerApiRoute('/skills/:id/update', {
   method: 'POST',
   requiresAuth: false,
   handler: async (context) => {
+    await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     try {
       const updated = await updateMarketSkill(id);
-      await loadInstalledSkills();
+      await ensureSkillRegistryLoaded();
+      if (!updated) {
+        return context.json({ message: '未找到对应的 Skill。' }, 404);
+      }
       return context.json(updated);
     } catch (err) {
       const message = err instanceof Error ? err.message : '更新失败';
@@ -134,9 +188,11 @@ export const removeSkillRoute = registerApiRoute('/skills/:id', {
   method: 'DELETE',
   requiresAuth: false,
   handler: async (context) => {
+    await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     try {
-      await removeInstalledSkill(id);
+      await uninstallMarketSkill(id);
+      await ensureSkillRegistryLoaded();
       return context.json({ message: '已卸载。' });
     } catch (err) {
       const message = err instanceof Error ? err.message : '卸载失败';
@@ -149,6 +205,7 @@ export const bindSkillRoute = registerApiRoute('/skills/:id/bind', {
   method: 'POST',
   requiresAuth: false,
   handler: async (context) => {
+    await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     const body = await context.req.json<unknown>();
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -172,6 +229,7 @@ export const unbindSkillRoute = registerApiRoute('/skills/:id/unbind', {
   method: 'POST',
   requiresAuth: false,
   handler: async (context) => {
+    await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     const body = await context.req.json<unknown>();
     if (!body || typeof body !== 'object' || Array.isArray(body)) {

@@ -59,17 +59,18 @@
 ### 3. Skill Registry
 
 位于 `backend/src/mastra/skills/registry.ts`。
-- 管理内置技能（如 `structured-summary`）和已安装的市场技能
-- 从 `skills_installed` 数据库表加载技能
-- `resolveSkills()` 仅返回 `compatibility === 'compatible'` 的技能
-- `analyzeSkillCompatibility()` 检测脚本依赖和工具依赖，分类为 `compatible | requires-runtime | unsupported | unknown`
+- 管理内置技能（如 `structured-summary`）、已安装的市场技能以及本地 SKILL.md
+- `discoverLocalSkills()` 扫描 `market-skills/<id>/SKILL.md`
+- 从 `skills_installed` 数据库表加载技能，但每次加载都会重新扫描磁盘文件并据此重新计算 `compatibility`
+- `resolveSkills()` 仅返回 `compatibility === 'compatible'` 的技能；`requires-runtime` 永远不会被注入
+- 兼容性检测基于真实文件列表（`scripts/` 目录、`.sh|.py|.js|.ts` 等可执行扩展名、`allowed-tools` 缺失）
 
 ### 4. Agent 定义与能力绑定
 
 位于 `backend/src/mastra/agents/registry.ts`。
 - `AgentDefinition` 描述每个 Agent 的能力矩阵：`knowledgeBase`, `citations`, `tools`, `skills`
-- 硬编码 `toolIds` 和 `defaultSkillIds` 作为默认配置
-- 运行时通过 `getAgentSkillBindings()` 叠加数据库中的动态绑定
+- 仅硬编码 `toolIds`；**不包含 `defaultSkillIds`**，运行时仅根据数据库绑定注入技能
+- 运行时通过 `getAgentSkillBindings()` 读取 `agent_skill_bindings` 表
 
 ### 5. 会话与消息服务
 
@@ -88,9 +89,10 @@
 ### 7. 工具执行审计
 
 位于 `backend/src/mastra/services/tool-executions.ts`。
-- 记录每次工具调用到 `skill_executions` 表
-- 状态跟踪：`running → completed | failed`
+- 记录每次工具调用到 `tool_executions` 表
+- 状态跟踪：`running → completed | failed | stopped`
 - 记录输入、输出、耗时、错误码
+- `convergeRunningToolExecutions()` 在流结束/异常/停止时把残留 `running` 记录收敛为 `stopped` / `failed`
 
 ## 数据流
 
@@ -105,20 +107,23 @@
 7. 流式返回 SSE 事件：
    - `message-start`: 助手消息开始生成
    - `content-delta`: 文本片段
-   - `tool-call-start`: 工具调用开始
-   - `tool-call-complete`: 工具调用成功
-   - `tool-call-error`: 工具调用失败
+   - `tool-call-start`: 工具调用开始（载荷 `{ toolCallId, toolName, status: 'running' }`）
+   - `tool-call-complete`: 工具调用成功（载荷 `{ toolCallId, toolName, status: 'completed' }`）
+   - `tool-call-error`: 工具调用失败（载荷 `{ toolCallId, toolName, status: 'failed', errorCode }`）
    - `message-complete`: 生成完成
    - `message-error`: 生成失败
 8. 最终持久化助手消息的最终内容、状态和引文
+9. 流退出前调用 `convergeRunningToolExecutions()` 收敛残留执行记录
 
 ### 技能市场安装流
 
-1. 用户通过 `POST /skills/preview` 预览远程 SKILL.md
-2. 通过 `POST /skills/install` 下载并保存到 `backend/market-skills/`
-3. 注册到 `skills_installed` 表
-4. 重新加载 `installedSkills` 内存缓存
-5. 兼容的技能实例化为 `createSkill()` 对象，注入 Agent 运行时
+1. 前端调用 `GET /skills/market/search?q=...` 或 `GET /skills/market/popular`
+2. 用户从结果中选择 `owner/repo/skillName`，前端调用 `POST /skills/market/preview` 预览
+3. 预览通过 `fetchSkillFiles()` 拉取真实文件列表，计算 `compatibility`
+4. 前端调用 `POST /skills/market/install`
+5. 服务端下载所有文件到 `backend/market-skills/<owner>/<repo>/<skillName>/`，注册到 `skills_installed` 表
+6. 调用 `loadInstalledSkills()` 刷新内存缓存
+7. `compatible` 技能可通过 `POST /skills/:id/bind` 绑定到 Agent
 
 ## 路由表
 
@@ -128,11 +133,13 @@
 | `/tools` | GET | 列出可用工具定义 |
 | `/skills` | GET | 列出所有技能 |
 | `/skills/:id` | GET | 获取单个技能详情 |
-| `/skills/preview` | POST | 预览远程市场技能 |
-| `/skills/install` | POST | 安装市场技能 |
+| `/skills/market/search` | GET | 搜索 skills.sh（`?q=...&limit=...`） |
+| `/skills/market/popular` | GET | skills.sh 热门技能 |
+| `/skills/market/preview` | POST | 预览市场技能（`{ owner, repo, skillName }`） |
+| `/skills/market/install` | POST | 安装市场技能（`{ owner, repo, skillName }`） |
 | `/skills/:id/update` | POST | 更新已安装技能 |
-| `/skills/:id` | DELETE | 卸载技能 |
-| `/skills/:id/bind` | POST | 绑定技能到 Agent |
+| `/skills/:id` | DELETE | 卸载技能（含清理文件、绑定、注册表刷新） |
+| `/skills/:id/bind` | POST | 绑定技能到 Agent（拒绝 `requires-runtime`） |
 | `/skills/:id/unbind` | POST | 解绑技能从 Agent |
 | `/ask` | POST | 流式问答（SSE） |
 | `/messages/:id/stop` | POST | 停止生成 |

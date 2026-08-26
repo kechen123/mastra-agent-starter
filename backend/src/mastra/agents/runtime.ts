@@ -6,7 +6,7 @@ import { getAgentDefinition } from './registry.js';
 import { getKnowledgeBase } from '../services/knowledge-bases.js';
 import type { Message } from '../services/conversations.js';
 import { resolveTools, resolveToolIds } from '../tools/registry.js';
-import { resolveSkills, getAgentSkillBindings, loadInstalledSkills } from '../skills/registry.js';
+import { resolveSkillsForAgent, getAgentSkillBindings, ensureSkillRegistryLoaded } from '../skills/registry.js';
 
 export interface StreamChunk {
   type: 'delta';
@@ -73,18 +73,25 @@ export async function* streamAgent(
   }
 
   try {
-    // Ensure installed skills are loaded
-    await loadInstalledSkills();
+    // Hydration gate — the registry must reflect filesystem + DB before we
+    // resolve which skills to inject. ensureSkillRegistryLoaded() is idempotent
+    // so this is O(1) once the first caller has loaded it.
+    await ensureSkillRegistryLoaded();
 
     // Resolve tool IDs: agent toolIds only
     const agentToolIds = definition.toolIds ?? [];
     const resolvedToolIds = resolveToolIds(agentToolIds, undefined);
     const tools = resolveTools(resolvedToolIds);
 
-    // Resolve skills: default + DB bindings
+    // Resolve skills: only database bindings drive runtime injection. The
+    // agent definition has no `defaultSkillIds` — users bind skills explicitly
+    // via POST /skills/:id/bind. resolveSkillsForAgent() will further filter
+    // to (a) compatibility === 'compatible' AND (b) skill.allowedTools ⊆
+    // agent.toolIds. Requires-runtime skills can never leak into an agent,
+    // and skills requesting tools the agent doesn't have are silently dropped
+    // for THIS agent (they remain bindable to other agents that do have them).
     const dbBindings = await getAgentSkillBindings(agentId);
-    const skillIds = Array.from(new Set([...(definition.defaultSkillIds ?? []), ...dbBindings]));
-    const resolvedSkills = resolveSkills(skillIds);
+    const resolvedSkills = resolveSkillsForAgent(agentId, dbBindings);
     const skills = resolvedSkills.map((s) => s.skill).filter((s): s is NonNullable<typeof s> => !!s);
 
     if (agentId === 'general-chat') {

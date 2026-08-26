@@ -89,14 +89,23 @@ registerTool({
 
 ## 工具执行审计
 
-所有工具调用会被记录到 `skill_executions` 表：
+所有工具调用会被记录到 `tool_executions` 表：
 
 - `conversation_id`: 所属会话
 - `message_id`: 触发调用的助手消息
-- `skill_id`: 工具 ID
+- `tool_id`: 工具 ID
 - `input`: JSONB 格式的输入参数
 - `output`: JSONB 格式的输出结果
-- `status`: `running` | `completed` | `failed`
+- `status`: `running` | `completed` | `failed` | `stopped`
+- `error_code`: 错误码（仅持久化，不直接暴露给前端）
 - `duration_ms`: 执行耗时（毫秒）
 
-前端通过 SSE 的 `tool-call-start`、`tool-call-complete`、`tool-call-error` 事件实时展示工具执行状态。
+流式事件收敛：每次流结束（done、stopped、error、exception）都会调用 `convergeRunningToolExecutions()`，把该 message 下所有仍处于 `running` 的记录收敛到 `stopped` / `failed`，避免脏数据。
+
+前端通过 SSE 的 `tool-call-start`、`tool-call-complete`、`tool-call-error` 事件实时展示工具执行状态。出于安全考虑，SSE 仅发送最小负载：
+
+```typescript
+{ toolCallId: string; toolName: string; status: 'running' | 'completed' | 'failed' }
+```
+
+`tool-call-error` 事件额外携带 `errorCode`（安全代码，例如 `tool_error`），不再把完整错误消息广播到客户端。

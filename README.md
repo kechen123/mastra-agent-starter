@@ -86,7 +86,9 @@ Conversation → AgentDefinition → Tool Registry + DB Bindings → Skill Regis
 ## 安全提示
 
 - Calculator 工具使用正则白名单 `/^[\d+\-*/().]+$/` 拒绝代码注入
-- Skill 安装时自动扫描脚本文件，标记 `requires-runtime` 以阻止自动执行
+- Skill 安装时根据 skills.sh 官方 API 返回的真实文件列表扫描脚本依赖；任何 `scripts/` 目录或 `.sh|.py|.js|.ts|...` 文件都被标记为 `requires-runtime`，**无法被 `bindSkillToAgent` 绑定**
+- skills.sh API 返回的文件名经过 `assertSafeFilePath()` 验证，拒绝任何绝对路径或 `..` 路径穿越
+- SSE 仅推送最小安全载荷（`toolCallId`/`toolName`/`status`），完整 input/output/error 仅持久化在 `tool_executions` 表中
 - 所有数据库操作使用参数化查询
 - 禁止保存密钥、Token、Header 到日志或数据库
 

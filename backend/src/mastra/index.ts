@@ -19,6 +19,8 @@ import { toolsRoute } from './routes/tools.js';
 import {
   listSkillsRoute,
   getSkillRoute,
+  searchMarketSkillsRoute,
+  listPopularMarketSkillsRoute,
   previewSkillRoute,
   installSkillRoute,
   updateSkillRoute,
@@ -33,6 +35,13 @@ import {
   listConversationsRoute,
   updateConversationRoute,
 } from './routes/conversations.js';
+import { preloadSkillRegistry } from './skills/registry.js';
+
+// Boot-time hydration: a non-blocking preload so the first GET /skills
+// doesn't wait for the DB query when the registry is already warm. This is
+// strictly an optimisation — routes call `await ensureSkillRegistryLoaded()`
+// on every read, so correctness does NOT depend on this finishing first.
+preloadSkillRegistry();
 
 export const mastra = new Mastra({
   server: {
@@ -44,6 +53,8 @@ export const mastra = new Mastra({
       toolsRoute,
       listSkillsRoute,
       getSkillRoute,
+      searchMarketSkillsRoute,
+      listPopularMarketSkillsRoute,
       previewSkillRoute,
       installSkillRoute,
       updateSkillRoute,

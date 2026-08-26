@@ -41,7 +41,6 @@ export interface AgentDefinition {
     skills: boolean;
   };
   toolIds: string[];
-  defaultSkillIds: string[];
   boundSkillIds: string[];
 }
 

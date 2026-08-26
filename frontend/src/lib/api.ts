@@ -110,6 +110,10 @@ export function createKnowledgeBase(input: { name: string; description?: string 
   });
 }
 
+export function deleteKnowledgeBase(id: string): Promise<void> {
+  return request<void>(`/knowledge-bases/${id}`, { method: 'DELETE' });
+}
+
 export function listDocuments(knowledgeBaseId: string): Promise<KnowledgeDocument[]> {
   return request(`/knowledge-bases/${knowledgeBaseId}/documents`);
 }
@@ -130,6 +134,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const baseUrl = getApiBaseUrl();
   const response = await fetch(`${baseUrl}${path}`, init);
   if (!response.ok) await throwResponseError(response);
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -174,19 +179,56 @@ export function getSkill(id: string): Promise<SkillSummary> {
   return request(`/skills/${id}`);
 }
 
-export function previewMarketSkill(owner: string, repo: string): Promise<{ name: string; description: string; instructions: string }> {
-  return request('/skills/preview', {
+export interface MarketSkillInfo {
+  id: string;
+  owner: string;
+  repo: string;
+  skillName: string;
+  name: string;
+  description: string;
+  source: string;
+  installs: number;
+  compatibility: 'compatible' | 'requires-runtime' | 'unsupported' | 'unknown';
+  hasScripts: boolean;
+  installable: boolean;
+}
+
+export interface MarketSkillPreview {
+  id: string;
+  owner: string;
+  repo: string;
+  skillName: string;
+  name: string;
+  description: string;
+  source: string;
+  skillMd: string;
+  compatibility: 'compatible' | 'requires-runtime' | 'unsupported' | 'unknown';
+  files: string[];
+  hasScripts: boolean;
+}
+
+export function searchMarketSkills(query: string, limit = 20): Promise<{ results: MarketSkillInfo[] }> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return request(`/skills/market/search?${params.toString()}`);
+}
+
+export function listPopularMarketSkills(): Promise<{ results: MarketSkillInfo[] }> {
+  return request('/skills/market/popular');
+}
+
+export function previewMarketSkill(owner: string, repo: string, skillName: string): Promise<MarketSkillPreview> {
+  return request('/skills/market/preview', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ owner, repo }),
+    body: JSON.stringify({ owner, repo, skillName }),
   });
 }
 
-export function installMarketSkill(owner: string, repo: string): Promise<SkillSummary> {
-  return request('/skills/install', {
+export function installMarketSkill(owner: string, repo: string, skillName: string): Promise<MarketSkillPreview> {
+  return request('/skills/market/install', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ owner, repo }),
+    body: JSON.stringify({ owner, repo, skillName }),
   });
 }
 
@@ -215,4 +257,3 @@ export function unbindSkillFromAgent(skillId: string, agentId: string): Promise<
 }
 
 export { request, throwResponseError };
-

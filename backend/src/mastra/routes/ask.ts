@@ -21,10 +21,11 @@ import {
 import {
   createToolExecution,
   finalizeToolExecution,
+  convergeRunningToolExecutions,
 } from '../services/tool-executions.js';
 import type { StreamEvent } from '../agents/runtime.js';
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{3}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
@@ -46,45 +47,70 @@ async function* runAgentStream(
   yield* streamAgent(agentId, message, knowledgeBaseId, history, abortSignal);
 }
 
-function handleToolEvent(
+async function handleToolEvent(
   event: Extract<StreamEvent, { type: 'tool-call-start' | 'tool-call-complete' | 'tool-call-error' }>,
   _conversationId: string,
   assistantMessageId: string,
   toolExecutionMap: Map<string, string>,
   send: SSESend,
-) {
+): Promise<void> {
   if (event.type === 'tool-call-start') {
-    // Fire and forget DB write
-    createToolExecution(_conversationId, assistantMessageId, event.toolName, event.input)
-      .then((id) => {
-        toolExecutionMap.set(event.toolCallId, id);
-      })
-      .catch((err) => console.error('Tool execution create failed:', err));
-    send('tool-call-start', {
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input,
-    });
+    try {
+      const execId = await createToolExecution(_conversationId, assistantMessageId, event.toolName, event.input);
+      toolExecutionMap.set(event.toolCallId, execId);
+    } catch (err) {
+      console.error('Tool execution create failed:', err);
+    }
+    // Minimal safe SSE payload — no input/output bodies are forwarded to the client.
+    try {
+      send('tool-call-start', {
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        status: 'running',
+      });
+    } catch {
+      // stream may be closed
+    }
   } else if (event.type === 'tool-call-complete') {
     const execId = toolExecutionMap.get(event.toolCallId);
     if (execId) {
-      finalizeToolExecution(execId, event.output, 'completed').catch((err) => console.error('Tool execution finalize failed:', err));
+      try {
+        await finalizeToolExecution(execId, event.output, 'completed');
+      } catch (err) {
+        console.error('Tool execution finalize failed:', err);
+      }
     }
-    send('tool-call-complete', {
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      output: event.output,
-    });
+    try {
+      send('tool-call-complete', {
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        status: 'completed',
+      });
+    } catch {
+      // stream may be closed
+    }
   } else if (event.type === 'tool-call-error') {
     const execId = toolExecutionMap.get(event.toolCallId);
+    // Only a safe error code is forwarded to the client; the full error
+    // message is persisted server-side but not exposed over SSE.
+    const safeErrorCode = 'tool_error';
     if (execId) {
-      finalizeToolExecution(execId, {}, 'failed', event.error).catch((err) => console.error('Tool execution finalize failed:', err));
+      try {
+        await finalizeToolExecution(execId, {}, 'failed', safeErrorCode);
+      } catch (err) {
+        console.error('Tool execution finalize failed:', err);
+      }
     }
-    send('tool-call-error', {
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      error: event.error,
-    });
+    try {
+      send('tool-call-error', {
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        status: 'failed',
+        errorCode: safeErrorCode,
+      });
+    } catch {
+      // stream may be closed
+    }
   }
 }
 
@@ -228,7 +254,7 @@ export const askRoute = registerApiRoute('/ask', {
                   // stream closed
                 }
               } else if (event.type === 'tool-call-start' || event.type === 'tool-call-complete' || event.type === 'tool-call-error') {
-                handleToolEvent(event, conversationId, assistantMessage.id, toolExecutionMap, send);
+                await handleToolEvent(event, conversationId, assistantMessage.id, toolExecutionMap, send);
               }
             }
           } catch (error) {
@@ -243,6 +269,16 @@ export const askRoute = registerApiRoute('/ask', {
               );
             } catch {
               // ignore
+            }
+            // Converge any still-running tool executions on this message
+            try {
+              await convergeRunningToolExecutions(
+                assistantMessage.id,
+                isAbort ? 'stopped' : 'failed',
+                isAbort ? 'stream_aborted' : 'stream_error',
+              );
+            } catch (err) {
+              console.error('Converge running tool executions failed:', err);
             }
             try {
               if (isAbort) {
@@ -267,6 +303,14 @@ export const askRoute = registerApiRoute('/ask', {
               // stream closed
             }
           } finally {
+            // Ensure no tool_executions row stays at status='running' even if
+            // the upstream stream ended cleanly without delivering a complete/error
+            // event for every started tool call (e.g. abrupt close).
+            try {
+              await convergeRunningToolExecutions(assistantMessage.id, 'stopped', 'stream_finalized');
+            } catch (err) {
+              console.error('Final converge running tool executions failed:', err);
+            }
             cleanupExecution(assistantMessage.id);
             controller.close();
           }
@@ -313,10 +357,13 @@ export const stopMessageRoute = registerApiRoute('/messages/:id/stop', {
       if (row.status === 'pending' || row.status === 'streaming') {
         const safeContent = row.content || partialContent || '';
         await finalizeAssistant(id, safeContent, [], 'stopped');
+        await convergeRunningToolExecutions(id, 'stopped', 'stream_aborted');
         return context.json({ message: '已停止生成。', status: 'stopped' }, 200);
       }
       return context.json({ message: '无活跃生成可停止。', status: row.status }, 200);
     }
+    // Active execution aborted — converge any running tool executions.
+    await convergeRunningToolExecutions(id, 'stopped', 'stream_aborted');
     return context.json({ message: '已停止生成。', status: 'stopped' }, 200);
   },
 });
@@ -477,7 +524,7 @@ export const regenerateMessageRoute = registerApiRoute('/messages/:assistantMess
                   // stream closed
                 }
               } else if (event.type === 'tool-call-start' || event.type === 'tool-call-complete' || event.type === 'tool-call-error') {
-                handleToolEvent(event, conversationId, assistantMessageId, toolExecutionMap, send);
+                await handleToolEvent(event, conversationId, assistantMessageId, toolExecutionMap, send);
               }
             }
           } catch (error) {
@@ -492,6 +539,15 @@ export const regenerateMessageRoute = registerApiRoute('/messages/:assistantMess
               );
             } catch {
               // ignore
+            }
+            try {
+              await convergeRunningToolExecutions(
+                assistantMessageId,
+                isAbort ? 'stopped' : 'failed',
+                isAbort ? 'stream_aborted' : 'stream_error',
+              );
+            } catch (err) {
+              console.error('Converge running tool executions failed:', err);
             }
             try {
               if (isAbort) {
@@ -516,6 +572,11 @@ export const regenerateMessageRoute = registerApiRoute('/messages/:assistantMess
               // stream closed
             }
           } finally {
+            try {
+              await convergeRunningToolExecutions(assistantMessageId, 'stopped', 'stream_finalized');
+            } catch (err) {
+              console.error('Final converge running tool executions failed:', err);
+            }
             cleanupExecution(assistantMessageId);
             controller.close();
           }

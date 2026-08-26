@@ -24,7 +24,6 @@ export const agentsRoute = registerApiRoute('/agents', {
         description: d.description,
         capabilities: d.capabilities,
         toolIds: d.toolIds ?? [],
-        defaultSkillIds: d.defaultSkillIds ?? [],
         boundSkillIds: bindingsMap.get(d.id) ?? [],
       })),
     );

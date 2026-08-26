@@ -45,19 +45,20 @@ export interface AskResult {
 export interface ToolCallStart {
   toolCallId: string;
   toolName: string;
-  input: Record<string, unknown>;
+  status: 'running';
 }
 
 export interface ToolCallComplete {
   toolCallId: string;
   toolName: string;
-  output: Record<string, unknown>;
+  status: 'completed';
 }
 
 export interface ToolCallError {
   toolCallId: string;
   toolName: string;
-  error: string;
+  status: 'failed';
+  errorCode: string;
 }
 
 export type SSEEvent =

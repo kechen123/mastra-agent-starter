@@ -57,11 +57,11 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS skill_executions (
+CREATE TABLE IF NOT EXISTS tool_executions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  skill_id TEXT NOT NULL,
+  tool_id TEXT NOT NULL,
   input JSONB NOT NULL DEFAULT '{}'::jsonb,
   output JSONB,
   status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'stopped')),
@@ -71,10 +71,10 @@ CREATE TABLE IF NOT EXISTS skill_executions (
   duration_ms INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS skill_executions_conversation_id_idx ON skill_executions(conversation_id);
-CREATE INDEX IF NOT EXISTS skill_executions_message_id_idx ON skill_executions(message_id);
-CREATE INDEX IF NOT EXISTS skill_executions_skill_id_idx ON skill_executions(skill_id);
-CREATE INDEX IF NOT EXISTS skill_executions_status_idx ON skill_executions(status);
+CREATE INDEX IF NOT EXISTS tool_executions_conversation_id_idx ON tool_executions(conversation_id);
+CREATE INDEX IF NOT EXISTS tool_executions_message_id_idx ON tool_executions(message_id);
+CREATE INDEX IF NOT EXISTS tool_executions_tool_id_idx ON tool_executions(tool_id);
+CREATE INDEX IF NOT EXISTS tool_executions_status_idx ON tool_executions(status);
 
 CREATE TABLE IF NOT EXISTS agent_skill_bindings (
   agent_id TEXT NOT NULL,
@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS skills_installed (
   compatibility TEXT NOT NULL DEFAULT 'unknown',
   has_scripts BOOLEAN NOT NULL DEFAULT false,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  allowed_tools TEXT[],
   installed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
