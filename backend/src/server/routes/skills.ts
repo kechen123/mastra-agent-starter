@@ -45,7 +45,7 @@ function parseSkillTriple(input: unknown): { owner: string; repo: string; skillN
 
 export const listSkillsRoute = registerApiRoute('/skills', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     await ensureSkillRegistryLoaded();
     const skills = listSkills();
@@ -66,7 +66,7 @@ export const listSkillsRoute = registerApiRoute('/skills', {
 
 export const getSkillRoute = registerApiRoute('/skills/:id', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
@@ -89,7 +89,7 @@ export const getSkillRoute = registerApiRoute('/skills/:id', {
 
 export const searchMarketSkillsRoute = registerApiRoute('/skills/market/search', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const query = context.req.query('q') ?? '';
     const limitRaw = context.req.query('limit');
@@ -108,7 +108,7 @@ export const searchMarketSkillsRoute = registerApiRoute('/skills/market/search',
 
 export const listPopularMarketSkillsRoute = registerApiRoute('/skills/market/popular', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     try {
       const results: MarketSkillInfo[] = await listPopularMarketSkills({ limit: 20 });
@@ -122,7 +122,7 @@ export const listPopularMarketSkillsRoute = registerApiRoute('/skills/market/pop
 
 export const previewSkillRoute = registerApiRoute('/skills/market/preview', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const body = await context.req.json<unknown>();
     const parsed = parseSkillTriple(body);
@@ -144,7 +144,7 @@ export const previewSkillRoute = registerApiRoute('/skills/market/preview', {
 
 export const installSkillRoute = registerApiRoute('/skills/market/install', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const body = await context.req.json<unknown>();
     const parsed = parseSkillTriple(body);
@@ -165,7 +165,7 @@ export const installSkillRoute = registerApiRoute('/skills/market/install', {
 
 export const updateSkillRoute = registerApiRoute('/skills/:id/update', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
@@ -185,7 +185,7 @@ export const updateSkillRoute = registerApiRoute('/skills/:id/update', {
 
 export const removeSkillRoute = registerApiRoute('/skills/:id', {
   method: 'DELETE',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
@@ -202,7 +202,7 @@ export const removeSkillRoute = registerApiRoute('/skills/:id', {
 
 export const bindSkillRoute = registerApiRoute('/skills/:id/bind', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
@@ -226,7 +226,7 @@ export const bindSkillRoute = registerApiRoute('/skills/:id/bind', {
 
 export const unbindSkillRoute = registerApiRoute('/skills/:id/unbind', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');

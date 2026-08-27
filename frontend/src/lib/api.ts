@@ -38,10 +38,36 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   llm: { provider: 'deepseek', model: 'deepseek-v4-flash', displayName: 'DeepSeek' },
 };
 
+/**
+ * HTTP 调用默认携带同源 Cookie。
+ *
+ * 后端会话认证只接受 `mastra_session` Cookie；不接收 Authorization header /
+ * API Key。所有 fetch 都必须带 `credentials: 'same-origin'`。这条规则适用于
+ * JSON 请求、SSE 长连接与 stop 请求。
+ */
+const DEFAULT_CREDENTIALS: RequestCredentials = 'same-origin';
+
+export class AuthError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'AuthError';
+    this.status = status;
+  }
+}
+
+export interface SafeUser {
+  id: string;
+  username: string;
+}
+
 export async function getCapabilities(): Promise<Capabilities> {
   try {
     return await request<Capabilities>('/capabilities');
-  } catch {
+  } catch (error) {
+    // 401 必须向上抛 UnauthenticatedError，让 App 退回登录页；其它错误
+    // （网络/5xx/解析）才回退默认能力。
+    if (error instanceof UnauthenticatedError) throw error;
     return DEFAULT_CAPABILITIES;
   }
 }
@@ -62,7 +88,6 @@ export interface Citation {
   source: string;
   documentId?: string;
   documentName?: string;
-  chunkIndex?: number;
   heading?: string;
   distance?: number;
 }
@@ -134,26 +159,112 @@ export function listDocuments(knowledgeBaseId: string): Promise<KnowledgeDocumen
 export function uploadDocument(knowledgeBaseId: string, file: File): Promise<KnowledgeDocument> {
   const formData = new FormData();
   formData.append('file', file);
-  return request(`/knowledge-bases/${knowledgeBaseId}/documents`, { method: 'POST', body: formData });
+  return request(`/knowledge-bases/${knowledgeBaseId}/documents`, {
+    method: 'POST',
+    body: formData,
+    credentials: DEFAULT_CREDENTIALS,
+  });
 }
 
 export async function deleteDocument(id: string): Promise<void> {
   const baseUrl = getApiBaseUrl();
-  const response = await fetch(`${baseUrl}/documents/${id}`, { method: 'DELETE' });
+  const response = await fetch(`${baseUrl}/documents/${id}`, {
+    method: 'DELETE',
+    credentials: DEFAULT_CREDENTIALS,
+  });
   if (!response.ok) await throwResponseError(response);
+}
+
+/**
+ * 登录：成功由后端写 HttpOnly Cookie；失败抛 AuthError 或普通 Error。
+ * 不会写入密码 / session token 到任何前端持久化 / 日志。
+ */
+export async function login(input: { username: string; password: string }): Promise<SafeUser> {
+  const baseUrl = getApiBaseUrl();
+  const response = await fetch(`${baseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: input.username, password: input.password }),
+    credentials: DEFAULT_CREDENTIALS,
+  });
+  if (!response.ok) {
+    await throwResponseError(response);
+  }
+  const data = (await response.json().catch(() => null)) as { user?: SafeUser } | null;
+  if (!data?.user?.id || !data.user.username) {
+    throw new Error('登录响应缺少用户信息。');
+  }
+  return data.user;
+}
+
+export async function logout(): Promise<void> {
+  const baseUrl = getApiBaseUrl();
+  const response = await fetch(`${baseUrl}/auth/logout`, {
+    method: 'POST',
+    credentials: DEFAULT_CREDENTIALS,
+  });
+  if (!response.ok && response.status !== 401) {
+    await throwResponseError(response);
+  }
+}
+
+export class UnauthenticatedError extends Error {
+  readonly status = 401;
+  constructor(message = '未登录或会话已失效。') {
+    super(message);
+    this.name = 'UnauthenticatedError';
+  }
+}
+
+/**
+ * 读取当前登录用户：成功返回 SafeUser；后端返回 401 时抛 UnauthenticatedError；
+ * 其它错误透传。绝不在前端持久化任何 session token。
+ */
+export async function getCurrentUser(): Promise<SafeUser> {
+  const baseUrl = getApiBaseUrl();
+  const response = await fetch(`${baseUrl}/auth/me`, {
+    method: 'GET',
+    credentials: DEFAULT_CREDENTIALS,
+  });
+  if (response.status === 401) {
+    throw new UnauthenticatedError();
+  }
+  if (!response.ok) {
+    await throwResponseError(response);
+  }
+  const data = (await response.json().catch(() => null)) as { user?: SafeUser } | null;
+  if (!data?.user?.id || !data.user.username) {
+    throw new Error('认证响应缺少用户信息。');
+  }
+  return data.user;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const baseUrl = getApiBaseUrl();
-  const response = await fetch(`${baseUrl}${path}`, init);
+  const headers = new Headers(init?.headers ?? {});
+  if (!headers.has('Content-Type') && init?.body && typeof init.body === 'string') {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    credentials: DEFAULT_CREDENTIALS,
+    headers,
+  });
+  if (response.status === 401) {
+    throw new UnauthenticatedError();
+  }
   if (!response.ok) await throwResponseError(response);
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
 async function throwResponseError(response: Response): Promise<never> {
-  const data = (await response.json().catch(() => null)) as { message?: string } | null;
-  throw new Error(data?.message ?? '请求失败。');
+  const data = (await response.json().catch(() => null)) as { message?: string; error?: string } | null;
+  const message = data?.message ?? data?.error ?? '请求失败。';
+  if (response.status === 401) {
+    throw new UnauthenticatedError(message);
+  }
+  throw new Error(message);
 }
 
 export interface ToolDefinition {

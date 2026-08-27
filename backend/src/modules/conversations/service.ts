@@ -247,6 +247,59 @@ export async function resetAssistantForRetry(assistantMessageId: string): Promis
   );
 }
 
+/**
+ * 把一条仍处于 pending/streaming 的助手消息收敛为 failed，避免 setup 阶段
+ * 失败后该消息永久悬挂。仅对尚未进入终态的行生效——已被并发 finalize 的行
+ * 不会被改写。返回被收敛的行数（0 或 1）。
+ */
+export async function convergeAssistantToFailed(messageId: string): Promise<number> {
+  const result = await getDatabasePool().query(
+    `UPDATE messages
+     SET status = 'failed',
+         content = COALESCE(NULLIF(content, ''), '生成已中断，请重试。'),
+         citations = '[]'::jsonb
+     WHERE id = $1 AND status IN ('pending', 'streaming')`,
+    [messageId],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * 读取一条消息的当前快照（content / citations / status），供 regenerate
+ * 失败路径做原子回退。
+ */
+export async function getMessageSnapshot(messageId: string): Promise<{ content: string; citations: Citation[]; status: string } | null> {
+  const r = await getDatabasePool().query<{ content: string; citations: unknown; status: string }>(
+    `SELECT content, citations, status FROM messages WHERE id = $1`,
+    [messageId],
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  return {
+    content: row.content,
+    citations: (row.citations as Citation[]) ?? [],
+    status: row.status,
+  };
+}
+
+/**
+ * 将一条消息按快照恢复。仅当该消息当前仍处于 pending/streaming 时才写入——
+ * 已被并发 finalize 的行保持原状，避免覆盖已完成/已停止/已失败的事实。
+ */
+export async function restoreAssistantFromSnapshot(
+  messageId: string,
+  snapshot: { content: string; citations: Citation[]; status: string },
+): Promise<void> {
+  const recoverable = ['pending', 'streaming'];
+  if (!recoverable.includes(snapshot.status)) return;
+  await getDatabasePool().query(
+    `UPDATE messages
+       SET content = $2, citations = $3, status = $4
+     WHERE id = $1 AND status IN ('pending', 'streaming')`,
+    [messageId, snapshot.content, JSON.stringify(snapshot.citations), snapshot.status],
+  );
+}
+
 export async function getLastAssistantMessage(conversationId: string): Promise<Message | null> {
   const result = await getDatabasePool().query<
     { id: string; conversation_id: string; role: string; content: string; citations: unknown; status: string; created_at: Date }

@@ -4,7 +4,7 @@ import { getDatabasePool } from '../../infrastructure/database/pool.js';
 
 export const agentsRoute = registerApiRoute('/agents', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const defs = listAgentDefinitions();
     const pool = getDatabasePool();

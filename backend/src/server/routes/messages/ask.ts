@@ -4,21 +4,40 @@
  * 请求体：{ conversationId: string; message: string }
  * 响应：SSE 流，事件名 + 载荷与 regenerate 路由完全一致
  * （详见 `core/execution/ask-driver.ts`）。
+ *
+ * 会话级执行互斥（reserve-before-read）：
+ *  1. 完成请求体校验后，**立即**对 `conversationId` 调用
+ *     `tryReserveConversationExecution` 原子预占；冲突直接返回 409，
+ *     不写用户消息、不创建助手消息。
+ *  2. reserve 成功后，**所有**决定性状态读取（`getConversationWithMessages`）
+ *     必须在锁内完成。锁外读取的历史可能在另一并发请求写入后失效，
+ *     进而导致 user/assistant 顺序错乱。
+ *  3. setup 阶段（历史读取、保存用户消息、创建助手消息、bind、streaming 切换）
+ *     任意一步失败，本路由负责释放会话锁；助手消息若已创建，再用
+ *     `convergeAssistantToFailed` 收敛为 failed。
+ *  4. SSE Response 构造成功后，执行权交给 `buildAskStreamResponse` 的
+ *     `finally` 块，由它释放内存执行记录。
  */
 import { registerApiRoute } from '@mastra/core/server';
 import {
+  convergeAssistantToFailed,
+  createAssistantPending,
   getConversationWithMessages,
   maybeUpdateTitleFromFirstMessage,
   saveUserMessage,
-  createAssistantPending,
   updateAssistantStreaming,
 } from '../../../modules/conversations/service.js';
-import { buildAskStreamResponse, tryRegisterExecution } from '../../../core/execution/ask-driver.js';
+import { buildAskStreamResponse } from '../../../core/execution/ask-driver.js';
+import {
+  bindAssistantMessageToExecution,
+  cleanupConversationExecution,
+  tryReserveConversationExecution,
+} from '../../../core/execution/controller.js';
 import { isUuid } from '../../../core/execution/sse.js';
 
 export const askRoute = registerApiRoute('/ask', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     try {
       const body = await context.req.json<unknown>();
@@ -36,32 +55,48 @@ export const askRoute = registerApiRoute('/ask', {
         return context.json({ message: '问题不能超过 2000 个字符。' }, 400);
       }
 
-      const { conversation, messages: history } = await getConversationWithMessages(conversationId);
-
-      // 保存用户消息
-      await saveUserMessage(conversationId, message.trim());
-      await maybeUpdateTitleFromFirstMessage(conversationId, message.trim());
-
-      // 创建占位的助手消息（pending → streaming → 终态）
-      const assistantMessage = await createAssistantPending(conversationId);
-
-      const registered = tryRegisterExecution(assistantMessage.id);
-      if ('conflict' in registered) {
-        return context.json({ message: registered.conflict.message }, 409);
+      // 关键：必须在任何 DB 状态读取之前原子预占会话执行权。
+      // 同会话的另一 ask / regenerate 若已活跃，立即返回 409。
+      const reserved = tryReserveConversationExecution(conversationId);
+      if ('conflict' in reserved) {
+        return context.json({ message: reserved.conflict.message }, 409);
       }
-      const abortController = registered.controller;
 
-      await updateAssistantStreaming(assistantMessage.id);
+      let assistantMessageId: string | null = null;
+      try {
+        // 锁内读取：history 一定是本次会话锁持有期间的快照，
+        // 不会被另一并发请求交错写入。
+        const { conversation, messages: history } = await getConversationWithMessages(conversationId);
 
-      return buildAskStreamResponse({
-        assistantMessageId: assistantMessage.id,
-        conversationId,
-        agentId: conversation.agentId,
-        message: message.trim(),
-        knowledgeBaseId: conversation.knowledgeBaseId,
-        history,
-        abortSignal: abortController.signal,
-      }, { logTag: 'ask' });
+        await saveUserMessage(conversationId, message.trim());
+        await maybeUpdateTitleFromFirstMessage(conversationId, message.trim());
+
+        const assistantMessage = await createAssistantPending(conversationId);
+        assistantMessageId = assistantMessage.id;
+
+        bindAssistantMessageToExecution(conversationId, assistantMessage.id);
+
+        await updateAssistantStreaming(assistantMessage.id);
+
+        return buildAskStreamResponse({
+          assistantMessageId: assistantMessage.id,
+          conversationId,
+          agentId: conversation.agentId,
+          message: message.trim(),
+          knowledgeBaseId: conversation.knowledgeBaseId,
+          history,
+          abortSignal: reserved.controller.signal,
+        }, { logTag: 'ask' });
+      } catch (setupError) {
+        // setup 阶段失败：释放会话锁；若助手消息已创建，把它收敛为 failed。
+        cleanupConversationExecution(conversationId);
+        if (assistantMessageId) {
+          await convergeAssistantToFailed(assistantMessageId).catch((err) => {
+            console.error('setup 失败后收敛助手消息失败：', err);
+          });
+        }
+        throw setupError;
+      }
     } catch (error) {
       console.error('问答请求失败：', error);
       if (error instanceof Error && error.message === '会话不存在。') {

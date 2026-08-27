@@ -30,16 +30,18 @@ export interface Message {
   createdAt: string;
 }
 
+export interface AgentCapabilities {
+  knowledgeBase: boolean;
+  citations: boolean;
+  tools: boolean;
+  skills: boolean;
+}
+
 export interface AgentDefinition {
   id: string;
   name: string;
   description?: string;
-  capabilities: {
-    knowledgeBase: boolean;
-    citations: boolean;
-    tools: boolean;
-    skills: boolean;
-  };
+  capabilities: AgentCapabilities;
   toolIds: string[];
   boundSkillIds: string[];
 }

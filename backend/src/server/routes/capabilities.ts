@@ -23,7 +23,7 @@ import {
  */
 export const capabilitiesRoute = registerApiRoute('/capabilities', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const parserConfig = getDocumentParserConfig();
     const defs = listAgentDefinitions();

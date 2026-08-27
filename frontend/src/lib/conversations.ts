@@ -89,10 +89,16 @@ export function regenerateMessage(
 
 export async function stopMessage(assistantMessageId: string): Promise<void> {
   const baseUrl = getApiBaseUrl();
-  const response = await fetch(`${baseUrl}/messages/${assistantMessageId}/stop`, { method: 'POST' });
+  const response = await fetch(`${baseUrl}/messages/${assistantMessageId}/stop`, {
+    method: 'POST',
+    credentials: 'same-origin',
+  });
+  if (response.status === 401) {
+    throw new (await import('./api')).UnauthenticatedError();
+  }
   if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { message?: string } | null;
-    throw new Error(data?.message ?? '停止失败。');
+    const data = (await response.json().catch(() => null)) as { message?: string; error?: string } | null;
+    throw new Error(data?.message ?? data?.error ?? '停止失败。');
   }
 }
 
@@ -108,10 +114,15 @@ async function postSSE(
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify(body),
     signal,
+    credentials: 'same-origin',
   });
+  if (response.status === 401) {
+    const { UnauthenticatedError } = await import('./api');
+    throw new UnauthenticatedError();
+  }
   if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { message?: string } | null;
-    throw new Error(data?.message ?? '请求失败。');
+    const data = (await response.json().catch(() => null)) as { message?: string; error?: string } | null;
+    throw new Error(data?.message ?? data?.error ?? '请求失败。');
   }
   if (!response.body) throw new Error('响应体为空。');
 

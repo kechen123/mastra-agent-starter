@@ -3,7 +3,7 @@ import { listToolDefinitions } from '../../core/tool/registry.js';
 
 export const toolsRoute = registerApiRoute('/tools', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const defs = listToolDefinitions();
     return context.json(

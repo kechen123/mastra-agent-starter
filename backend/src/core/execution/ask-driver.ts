@@ -8,8 +8,8 @@
  */
 import { streamAgent, type StreamEvent } from '../agent/runtime.js';
 import {
+  appendPartialContent,
   cleanupExecution,
-  updatePartialContent,
   type ExecutionConflictError,
 } from './controller.js';
 import {
@@ -25,7 +25,6 @@ import {
   finalizeMessage,
   sweepRunningToolExecutions,
 } from './message-finalize.js';
-import { registerExecution } from './controller.js';
 import type { Citation } from '../../modules/citations/types.js';
 import type { Message } from '../../modules/conversations/types.js';
 
@@ -95,7 +94,7 @@ export function buildAskStreamResponse(
           if (event.type === 'delta') {
             state.fullText += event.text;
             fullTextRef.current = state.fullText;
-            updatePartialContent(input.assistantMessageId, event.text);
+            appendPartialContent(input.assistantMessageId, event.text);
             try {
               sse.send('content-delta', { messageId: input.assistantMessageId, text: event.text });
             } catch {
@@ -165,17 +164,10 @@ export function buildAskStreamResponse(
 }
 
 /**
- * 注册执行并把冲突错误原样抛出，方便调用方映射为 409 响应。
+ * 旧接口兼容：路由层优先使用 controller.ts 的
+ * `tryReserveConversationExecution` + `bindAssistantMessageToExecution` 取得
+ * 会话级互斥；本文件不再二次封装。
  */
-export function tryRegisterExecution(assistantMessageId: string): { controller: AbortController } | { conflict: ExecutionConflictError } {
-  try {
-    return { controller: registerExecution(assistantMessageId) };
-  } catch (err) {
-    if (err instanceof Error && err.name === 'ExecutionConflictError') {
-      return { conflict: err as ExecutionConflictError };
-    }
-    throw err;
-  }
-}
+export { tryRegisterExecution } from './controller.js';
 
 export type { Citation };

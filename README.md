@@ -10,6 +10,7 @@ Mastra Agent Starter 是一个基于 [Mastra](https://mastra.ai/) 框架的智�
 - Tool 注册表与执行审计（每次 Tool 调用持久化到 `tool_executions`）
 - Skill 注册表（内置 / 本地 / skills.sh 市场）与 Skill → Agent 绑定
 - 会话持久化、历史管理
+- 本地账号密码登录（Phase 1，所有已登录账号共享数据）
 
 ## 功能特性
 
@@ -72,6 +73,11 @@ docker compose up -d
 Set-Location backend
 npm ci
 npm run migrate
+
+# 4. 创建第一个本地登录账号（密码通过交互式终端输入，不走命令行参数）
+npm run users:create -- --username alice
+
+# 5. 启动后端
 npm run dev
 ```
 
@@ -88,6 +94,11 @@ docker compose up -d
 cd backend
 npm ci
 npm run migrate
+
+# 4. 创建第一个本地登录账号
+npm run users:create -- --username alice
+
+# 5. 启动后端
 npm run dev
 ```
 
@@ -99,7 +110,7 @@ npm ci
 npm run dev
 ```
 
-访问 http://localhost:5173 打开工作台。
+访问 http://localhost:5173，使用刚才创建的用户名 / 密码登录。
 
 ### 验证
 
@@ -174,6 +185,16 @@ Conversation → AgentDefinition → Tool Registry + DB Bindings → Skill Regis
 | 生命周期 | 运行中即时调用 | 随 Agent 初始化加载 |
 | 审计 | 完整记录（输入/输出/耗时） | 无独立审计 |
 | 安全边界 | 白名单校验、正则过滤 | 兼容性检测、脚本扫描 |
+
+## 用户与登录
+
+- 第一期仅实现本地账号密码登录；公开注册与密码找回**未实现**。
+- 账号通过 `cd backend && npm run users:create -- --username <username>` 创建，密码通过交互式终端两次输入。
+- 浏览器自动携带 HttpOnly Cookie（`mastra_session`）；前端 JavaScript 不可读、不可写。
+- 同一账号允许多设备同时登录；退出只吊销当前会话，其它设备不受影响。
+- 所有已登录账号共享当前全部业务数据（不实现角色、租户、资源级权限）。
+- 不引入第三方认证依赖；密码哈希使用 Node 内置 `crypto.scrypt`，会话 token 仅存 SHA-256。
+- `DEPLOYMENT_PROFILE=production` 仍拒绝启动：限流、租户隔离、Tool 风险治理等生产条件尚未完成。
 
 ## 安全提示
 

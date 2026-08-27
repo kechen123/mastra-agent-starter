@@ -39,11 +39,17 @@ mastra-agent-starter/
 │   │   ├── infrastructure/
 │   │   │   ├── database/pool.ts         # PostgreSQL 连接池
 │   │   │   ├── external-skills/market.ts # skills.sh 适配器
+│   │   │   ├── auth/                     # Phase 1 本地认证：password / session / request / username / local-auth-provider
 │   │   │   └── llm/                     # LLM Provider 边界（DeepSeek-first）
 │   │   │       ├── types.ts             # LlmProviderAdapter 契约
 │   │   │       ├── registry.ts          # Provider 解析 + resolveDefaultChatModel
 │   │   │       └── providers/deepseek.ts# 唯一已实现的 Provider Adapter
-│   │   └── scripts/                     # CLI 调试脚本
+│   │   ├── modules/
+│   │   │   └── auth/service.ts          # Phase 1 login / logout / resolveCurrentUser
+│   │   ├── server/
+│   │   │   └── routes/
+│   │   │       └── auth.ts              # POST /auth/login, GET /auth/me, POST /auth/logout
+│   │   └── scripts/                     # CLI 调试脚本（含 users-create）
 │   └── package.json
 ├── frontend/
 │   ├── src/                             # React 19 + Vite + Tailwind 4
@@ -108,11 +114,27 @@ LLM_PROVIDER=deepseek
 LLM_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=sk-...
 DEPLOYMENT_PROFILE=demo
+
+# Phase 1 本地认证
+AUTH_SESSION_TTL_DAYS=7
+AUTH_COOKIE_SECURE=false
+AUTH_ALLOWED_ORIGIN=http://localhost:5173
 ```
 
 历史变量 `AGENT_CHAT_MODEL` 仍可解析为 `deepseek/<model>` 形式，但会输出弃用警告；`XUANSHU_CHAT_MODEL` 仅作为警告，不参与解析。`OPENAI_API_KEY` 等其他凭据当前不被任何模块读取。
 
-### 3. 后端
+### 3. 创建本地账号
+
+后端首次启动前需要至少一个本地账号：
+
+```bash
+cd backend
+npm run users:create -- --username alice
+```
+
+脚本会通过交互式终端两次输入密码（不会写入命令行历史 / 进程列表）。用户名会先 `normalizeUsername`（trim + lowercase、字符集 `[a-z0-9._-]`、长度 3-64），重复时直接报错。
+
+### 4. 后端
 
 ```bash
 cd backend
@@ -120,7 +142,7 @@ npm install
 npm run dev
 ```
 
-### 4. 前端
+### 5. 前端
 
 ```bash
 cd frontend
@@ -193,4 +215,13 @@ npm run ask
 
 ### 部署档位
 
-当前仅支持 `DEPLOYMENT_PROFILE=demo`，对应本地或受信任网络中的匿名演示。设置 `production` 会拒绝启动，避免在认证、租户隔离和限流尚未实现前发生误部署。
+当前仅支持 `DEPLOYMENT_PROFILE=demo`，对应本地或受信任网络中的演示。设置 `production` 会拒绝启动，避免在认证、租户隔离和限流尚未完成前发生误部署。
+
+### 本地登录调试
+
+- 启动前端后浏览器打开 `http://localhost:5173`，未登录时会展示登录界面。
+- 登录成功后侧边栏会显示当前用户名首字母 + 用户名，附 Logout 入口；Logout 仅吊销当前 Cookie，其它设备不受影响。
+- 在浏览器开发者工具的 Application → Cookies 中可看到 `mastra_session`（HttpOnly、SameSite=Strict）。
+- 后端日志里看不到原始 token（只存 SHA-256）。
+- 失败信息统一为"用户名或密码错误。"——用户名不存在、密码错误、用户禁用均返回同一文案，避免账号枚举。
+- 业务接口（`/ask`、会话/知识库/技能/Agent 等）必须携带有效 Cookie，否则返回 401；前端会捕获 `UnauthenticatedError` 并退回登录界面。

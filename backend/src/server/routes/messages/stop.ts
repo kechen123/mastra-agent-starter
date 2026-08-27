@@ -18,7 +18,7 @@ import { isUuid } from '../../../core/execution/sse.js';
 
 export const stopMessageRoute = registerApiRoute('/messages/:id/stop', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!id || !isUuid(id)) {

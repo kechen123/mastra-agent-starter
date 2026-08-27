@@ -3,6 +3,7 @@ import { ArrowDown, ChevronDown, Library, RefreshCw, RotateCcw, Send, Sparkles, 
 import type { ChatAgentInfo, Citation, KnowledgeBase } from '../../../lib/api';
 import { cn } from '../../../lib/cn';
 import type { ChatMessage, ToolCallState } from '../../../types/ui';
+import { Markdown } from './Markdown';
 
 // 聊天气泡区滚动条：保留薄滚动条与拇指描边效果。
 const chatContentScrollbarStyle = {
@@ -121,13 +122,13 @@ export function ChatWorkspace({
       <div className="flex items-center gap-3">
         <div className="relative flex items-center gap-1.5" ref={agentPickerRef}>
           <span className="text-app-muted text-xs">智能体</span>
-          <button className="relative flex items-center justify-between gap-4 min-w-[138px] min-h-[30px] py-1.5 px-2 text-xs text-app-text bg-app-surface border border-app-border-strong rounded-md cursor-pointer hover:bg-app-hover hover:border-app-text" type="button" onClick={() => setIsAgentPickerOpen((open) => !open)} aria-haspopup="listbox" aria-expanded={isAgentPickerOpen}>
+          <button className="relative flex items-center justify-between gap-4 min-w-[138px] min-h-[30px] py-1.5 px-2 text-xs text-app-text bg-app-surface border border-app-border-strong rounded-md cursor-pointer hover:bg-app-hover hover:border-app-text focus-visible:outline-none focus-visible:border-focus-border" type="button" onClick={() => setIsAgentPickerOpen((open) => !open)} aria-haspopup="listbox" aria-expanded={isAgentPickerOpen}>
             {currentAgent?.name ?? '选择智能体'}
             <ChevronDown size={15} className="static shrink-0 pointer-events-none" />
           </button>
           {isAgentPickerOpen && <div className="absolute z-10 top-[calc(100%+5px)] right-0 grid min-w-[184px] p-1 bg-app-surface border border-app-border-strong rounded-md shadow-2xl" role="listbox" aria-label="选择智能体">
             {chatAgents.map((agent) => (
-              <button key={agent.id} className={cn('flex items-center justify-between gap-2.5 py-1.5 px-2 text-xs text-app-text bg-transparent border-0 rounded text-left hover:bg-app-surface-muted', agent.id === selectedAgentId && 'bg-app-surface-muted font-semibold')} type="button" role="option" aria-selected={agent.id === selectedAgentId} onClick={() => { onSwitchAgent(agent.id); setIsAgentPickerOpen(false) }}>
+              <button key={agent.id} className={cn('flex items-center justify-between gap-2.5 py-1.5 px-2 text-xs text-app-text bg-transparent border-0 rounded text-left hover:bg-app-surface-muted focus-visible:outline-none focus-visible:bg-app-surface-muted', agent.id === selectedAgentId && 'bg-app-surface-muted font-semibold')} type="button" role="option" aria-selected={agent.id === selectedAgentId} onClick={() => { onSwitchAgent(agent.id); setIsAgentPickerOpen(false) }}>
                 <span>{agent.name}</span>
                 {agent.requiresKnowledgeBase && <small className="text-app-muted text-[10px]">需知识库</small>}
               </button>
@@ -150,16 +151,18 @@ export function ChatWorkspace({
             </div>
           )}
           {messages.map((message, index) => message.role === 'user' ? (
-            <div className="flex gap-3.5 flex-row-reverse" key={message.id}>
-              <div className="flex flex-col items-end">
-                <p className="m-0 py-3 px-3.5 bg-app-surface-muted rounded-md text-[15px]">{message.content}</p>
+            <div className="flex gap-3.5 flex-row-reverse mt-6" key={message.id}>
+              <div className="flex flex-col items-end max-w-[68%]">
+                <p className="m-0 py-2 px-3 max-w-full break-words whitespace-pre-wrap bg-app-surface-muted border border-app-divider rounded-md text-[14px] leading-[1.6]">
+                  {message.content}
+                </p>
               </div>
             </div>
           ) : <AssistantMessage key={message.id} message={message} isLast={index === lastAssistantIndex} onSelectCitation={onSelectCitation} onRegenerate={onRegenerate} />)}
           {isAsking && !isStreaming && (
-            <div className="flex gap-3.5 mt-7">
+            <div className="flex gap-3.5 mt-6">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 text-[15px] leading-[1.9] text-app-muted">
+                <div className="flex items-center gap-2 text-[14px] leading-[1.65] text-app-muted">
                   <span className="w-1.5 h-1.5 rounded-full bg-currentColor" style={{ animation: 'app-loading-dot 1s infinite ease-in-out' }} />
                   <span className="w-1.5 h-1.5 rounded-full bg-currentColor" style={{ animation: 'app-loading-dot 1s infinite ease-in-out', animationDelay: '0.15s' }} />
                   <span className="w-1.5 h-1.5 rounded-full bg-currentColor" style={{ animation: 'app-loading-dot 1s infinite ease-in-out', animationDelay: '0.3s' }} />
@@ -179,11 +182,11 @@ export function ChatWorkspace({
       )}
     </div>
     <div className="shrink-0 px-6 pb-3.5 bg-app-bg">
-      <div className="w-full max-w-[805px] mx-auto p-2.5 border border-app-border-strong rounded-xl bg-app-surface">
+      <div className="app-composer w-full max-w-[805px] mx-auto p-2.5 border border-app-border-strong rounded-xl bg-app-surface transition-colors duration-150">
         {isKnowledgeAgent && activeKnowledgeBase && (
           <div className="flex items-center gap-1.5 w-fit mt-0 mx-2 mb-0.5 px-2 py-1.5 bg-app-surface-muted border border-app-border rounded text-xs">
             <Library size={15} /><span>当前知识库：<strong>{activeKnowledgeBase.name}</strong></span>
-            <button className="grid place-items-center p-0 text-app-muted bg-transparent border-0" onClick={onClearKnowledgeBase} aria-label="退出当前知识库"><X size={15} /></button>
+            <button className="grid place-items-center p-0 text-app-muted bg-transparent border-0 focus-visible:outline-none focus-visible:text-app-text" onClick={onClearKnowledgeBase} aria-label="退出当前知识库"><X size={15} /></button>
           </div>
         )}
         {isKnowledgeAgent && !activeKnowledgeBase && (
@@ -192,7 +195,7 @@ export function ChatWorkspace({
           </div>
         )}
         <textarea
-          className="block w-full min-h-14 p-2 resize-none outline-0 text-app-text bg-transparent border-0 text-sm placeholder:text-app-muted disabled:cursor-not-allowed disabled:opacity-50"
+          className="block w-full min-h-14 p-2 resize-none outline-0 border-0 text-app-text bg-transparent text-sm placeholder:text-app-muted disabled:cursor-not-allowed disabled:opacity-50"
           value={question}
           onChange={(event) => onQuestionChange(event.target.value)}
           onCompositionStart={() => { isComposingRef.current = true }}
@@ -204,11 +207,11 @@ export function ChatWorkspace({
         />
         <div className="flex items-center justify-between gap-2.5">
           <div className="relative" ref={knowledgeBasePickerRef}>
-            <button className="py-1.5 px-2 text-[13px] text-app-muted bg-app-surface border border-app-border rounded" type="button" onClick={() => setIsKnowledgeBasePickerOpen((open) => !open)} aria-haspopup="listbox" aria-expanded={isKnowledgeBasePickerOpen}>选择知识库</button>
+            <button className="py-1.5 px-2 text-[13px] text-app-muted bg-app-surface border border-app-border rounded focus-visible:outline-none focus-visible:border-focus-border" type="button" onClick={() => setIsKnowledgeBasePickerOpen((open) => !open)} aria-haspopup="listbox" aria-expanded={isKnowledgeBasePickerOpen}>选择知识库</button>
             {isKnowledgeBasePickerOpen && (
               <div className="absolute z-10 bottom-[calc(100%+7px)] left-0 grid min-w-[220px] max-w-[280px] p-1.5 bg-app-surface border border-app-border-strong rounded-lg shadow-2xl" role="listbox" aria-label="选择知识库">
                 {knowledgeBases.length === 0 ? <p className="m-1.5 px-2 text-app-muted text-xs leading-snug">暂无知识库，请先在知识库页创建。</p> : knowledgeBases.map((knowledgeBase) => (
-                  <button type="button" role="option" aria-selected={knowledgeBase.id === activeKnowledgeBase?.id} className={cn('flex items-center gap-2 w-full py-2 px-2 text-app-text bg-transparent border-0 rounded text-left hover:bg-app-surface-muted', knowledgeBase.id === activeKnowledgeBase?.id && 'bg-app-surface-muted')} key={knowledgeBase.id} onClick={() => { onSelectKnowledgeBase(knowledgeBase); setIsKnowledgeBasePickerOpen(false) }}>
+                  <button type="button" role="option" aria-selected={knowledgeBase.id === activeKnowledgeBase?.id} className={cn('flex items-center gap-2 w-full py-2 px-2 text-app-text bg-transparent border-0 rounded text-left hover:bg-app-surface-muted focus-visible:outline-none focus-visible:bg-app-surface-muted', knowledgeBase.id === activeKnowledgeBase?.id && 'bg-app-surface-muted')} key={knowledgeBase.id} onClick={() => { onSelectKnowledgeBase(knowledgeBase); setIsKnowledgeBasePickerOpen(false) }}>
                     <Library size={14} /><span>{knowledgeBase.name}</span>
                   </button>
                 ))}
@@ -216,7 +219,7 @@ export function ChatWorkspace({
             )}
           </div>
           <div>
-            <button className={cn('grid place-items-center w-[34px] h-[34px] text-app-surface bg-app-text border-0 rounded-md disabled:cursor-not-allowed disabled:opacity-50 hover:opacity-90', isStreaming && 'bg-app-danger hover:bg-red-600')} onClick={isStreaming ? onStop : onSubmit} disabled={!isStreaming && !canSend} aria-label={isStreaming ? '停止生成' : '发送问题'}>
+            <button className={cn('grid place-items-center w-[34px] h-[34px] text-app-surface bg-app-text border border-app-text rounded-md disabled:cursor-not-allowed disabled:opacity-50 hover:opacity-90 focus-visible:outline-none focus-visible:opacity-90', isStreaming && 'bg-app-danger border-app-danger hover:bg-red-600')} onClick={isStreaming ? onStop : onSubmit} disabled={!isStreaming && !canSend} aria-label={isStreaming ? '停止生成' : '发送问题'}>
               {isStreaming ? <X size={18} /> : <Send size={18} />}
             </button>
           </div>
@@ -241,16 +244,28 @@ function AssistantMessage({ message, isLast, onSelectCitation, onRegenerate }: A
   const showRegenerate = message.status === 'completed' && isLast;
   const showActions = message.status !== 'pending' && message.status !== 'streaming';
   return (
-    <div className="flex gap-3.5 mt-7">
-      <div className="min-w-0">
-        <div className="text-[15px] leading-[1.9]">
-          {message.content ? message.content.split(/\n{2,}/).map((paragraph, i) => <p key={i} className="m-0 mb-4">{paragraph}</p>) : (message.status === 'pending' || message.status === 'streaming') ? null : <p className="m-0 mb-4 text-app-muted">（无内容）</p>}
-          {isFailed && <span className="inline-flex items-center gap-1 mt-1.5 px-2 py-1 rounded text-xs text-app-danger bg-app-danger/10 border border-app-danger/20">生成失败</span>}
-          {isStopped && <span className="inline-flex items-center gap-1 mt-1.5 px-2 py-1 rounded text-xs text-app-warning bg-app-warning/10 border border-app-warning/20">已停止</span>}
+    <div className="flex gap-3.5 mt-6">
+      <div className="min-w-0 max-w-[760px]">
+        <div className="text-[15px]">
+          {message.content ? (
+            <Markdown text={message.content} />
+          ) : message.status === 'pending' || message.status === 'streaming' ? null : (
+            <p className="m-0 text-app-muted">（无内容）</p>
+          )}
+          {isFailed && (
+            <span className="inline-flex items-center gap-1 mt-2 px-2 py-1 rounded text-xs text-app-danger bg-app-danger/10 border border-app-danger/20">
+              生成失败
+            </span>
+          )}
+          {isStopped && (
+            <span className="inline-flex items-center gap-1 mt-2 px-2 py-1 rounded text-xs text-app-warning bg-app-warning/10 border border-app-warning/20">
+              已停止
+            </span>
+          )}
         </div>
         {message.tools && message.tools.length > 0 && (
-          <div className="mt-3 py-2.5 px-3 bg-app-surface-muted border border-app-border rounded-md">
-            <div className="mb-1.5 text-app-muted text-xs font-semibold">工具调用</div>
+          <div className="mt-3.5 py-2.5 px-3 bg-app-surface-muted border border-app-border rounded-md">
+            <div className="mb-1.5 text-app-muted text-xs font-semibold uppercase tracking-[0.06em]">工具调用</div>
             {message.tools.map((t: ToolCallState) => (
               <div key={t.toolCallId} className="flex items-center gap-2 py-1 text-[13px]">
                 <span className="shrink-0 text-[14px]">{t.status === 'running' ? '⏳' : t.status === 'completed' ? '✅' : '❌'}</span>
@@ -264,10 +279,10 @@ function AssistantMessage({ message, isLast, onSelectCitation, onRegenerate }: A
         )}
         {message.citations.length > 0 && message.status === 'completed' && (
           <>
-            <div className="mt-4 text-app-muted text-[13px]">引用来源（{message.citations.length}）</div>
+            <div className="mt-5 text-app-muted text-[12px] uppercase tracking-[0.06em]">引用来源（{message.citations.length}）</div>
             <div className="flex flex-wrap gap-2 mt-2">
               {message.citations.map((citation, index) => (
-                <button onClick={() => onSelectCitation(citation)} className="flex items-center gap-1.5 py-1.5 px-2.5 text-[13px] text-app-text bg-transparent border border-app-border-strong rounded-md hover:border-app-text hover:bg-app-surface-muted" key={citation.chunkId}>
+                <button onClick={() => onSelectCitation(citation)} className="flex items-center gap-1.5 py-1.5 px-2.5 text-[13px] text-app-text bg-transparent border border-app-border-strong rounded-md hover:border-app-text hover:bg-app-surface-muted focus-visible:outline-none focus-visible:border-focus-border focus-visible:bg-app-surface-muted" key={citation.chunkId}>
                   <span className="grid place-items-center w-4 h-4 border border-app-muted rounded-full text-[10px]">{index + 1}</span>
                   {citation.title} {citation.chapter}
                 </button>
@@ -276,9 +291,9 @@ function AssistantMessage({ message, isLast, onSelectCitation, onRegenerate }: A
           </>
         )}
         {showActions && (
-          <div className="flex flex-wrap gap-2.5 mt-4">
-            {showRetry && <button className="inline-flex items-center gap-1 mt-0 py-1 px-2.5 text-xs text-app-text bg-app-surface-muted border border-app-border rounded hover:bg-app-hover" onClick={() => onRegenerate(message.id)}><RotateCcw size={14} />重试</button>}
-            {showRegenerate && <button className="inline-flex items-center gap-1 mt-0 py-1 px-2.5 text-xs text-app-text bg-app-surface-muted border border-app-border rounded hover:bg-app-hover" onClick={() => onRegenerate(message.id)}><RefreshCw size={14} />重新生成</button>}
+          <div className="flex flex-wrap gap-2 mt-4">
+            {showRetry && <button className="inline-flex items-center gap-1 py-1 px-2.5 text-xs text-app-text bg-app-surface-muted border border-app-border rounded hover:bg-app-hover focus-visible:outline-none focus-visible:border-focus-border focus-visible:bg-app-hover" onClick={() => onRegenerate(message.id)}><RotateCcw size={14} />重试</button>}
+            {showRegenerate && <button className="inline-flex items-center gap-1 py-1 px-2.5 text-xs text-app-text bg-app-surface-muted border border-app-border rounded hover:bg-app-hover focus-visible:outline-none focus-visible:border-focus-border focus-visible:bg-app-hover" onClick={() => onRegenerate(message.id)}><RefreshCw size={14} />重新生成</button>}
           </div>
         )}
       </div>

@@ -26,7 +26,7 @@ function handleError(context: { json: (data: unknown, status?: number) => Respon
 
 export const listConversationsRoute = registerApiRoute('/conversations', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     try {
       return context.json(await listConversations());
@@ -38,7 +38,7 @@ export const listConversationsRoute = registerApiRoute('/conversations', {
 
 export const createConversationRoute = registerApiRoute('/conversations', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     try {
       const body = await context.req.json<unknown>();
@@ -67,7 +67,7 @@ export const createConversationRoute = registerApiRoute('/conversations', {
 
 export const getConversationRoute = registerApiRoute('/conversations/:id', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: 'id 格式不正确。' }, 400);
@@ -84,7 +84,7 @@ export const getConversationRoute = registerApiRoute('/conversations/:id', {
 
 export const updateConversationRoute = registerApiRoute('/conversations/:id', {
   method: 'PATCH',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: 'id 格式不正确。' }, 400);
@@ -121,7 +121,7 @@ export const updateConversationRoute = registerApiRoute('/conversations/:id', {
 
 export const deleteConversationRoute = registerApiRoute('/conversations/:id', {
   method: 'DELETE',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: 'id 格式不正确。' }, 400);

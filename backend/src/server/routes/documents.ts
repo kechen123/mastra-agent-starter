@@ -9,7 +9,7 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 export const uploadDocumentRoute = registerApiRoute('/knowledge-bases/:id/documents', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const knowledgeBaseId = context.req.param('id');
     if (!isUuid(knowledgeBaseId)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
@@ -42,7 +42,7 @@ export const uploadDocumentRoute = registerApiRoute('/knowledge-bases/:id/docume
 
 export const listDocumentsRoute = registerApiRoute('/knowledge-bases/:id/documents', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const knowledgeBaseId = context.req.param('id');
     if (!isUuid(knowledgeBaseId)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
@@ -59,7 +59,7 @@ export const listDocumentsRoute = registerApiRoute('/knowledge-bases/:id/documen
 
 export const getDocumentRoute = registerApiRoute('/documents/:id', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '文档 id 格式不正确。' }, 400);
@@ -74,7 +74,7 @@ export const getDocumentRoute = registerApiRoute('/documents/:id', {
 
 export const deleteDocumentRoute = registerApiRoute('/documents/:id', {
   method: 'DELETE',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '文档 id 格式不正确。' }, 400);

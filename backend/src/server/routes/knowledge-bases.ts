@@ -13,13 +13,13 @@ const MAX_DESCRIPTION_LENGTH = 2_000;
 
 export const listKnowledgeBasesRoute = registerApiRoute('/knowledge-bases', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => context.json(await listKnowledgeBases()),
 });
 
 export const createKnowledgeBaseRoute = registerApiRoute('/knowledge-bases', {
   method: 'POST',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     try {
       const input = validateCreateInput(await context.req.json<unknown>());
@@ -33,7 +33,7 @@ export const createKnowledgeBaseRoute = registerApiRoute('/knowledge-bases', {
 
 export const getKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id', {
   method: 'GET',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
@@ -50,7 +50,7 @@ export const getKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id', {
 
 export const updateKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id', {
   method: 'PATCH',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
@@ -69,7 +69,7 @@ export const updateKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id',
 
 export const deleteKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id', {
   method: 'DELETE',
-  requiresAuth: false,
+  requiresAuth: true,
   handler: async (context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '知识库 id 格式不正确。' }, 400);

@@ -192,19 +192,50 @@ infrastructure/llm/
 - 历史变量 `AGENT_CHAT_MODEL=deepseek/<model>` 仍可解析为对应模型并输出弃用警告；其他 Provider 前缀被拒绝；
 - `XUANSHU_CHAT_MODEL` 仅输出弃用警告，不参与解析。
 
+### 13. 单进程会话执行互斥
+
+`backend/src/core/execution/controller.ts` 用内存 Map 维护"同一会话同一时刻
+只能有一个生成任务"，避免同会话的 `/ask` 与 `/regenerate` 并发导致用户消息与
+助手消息顺序错乱、setup 失败留下 active 记录、pending/streaming 消息永久悬挂
+等问题。
+
+控制器内部维护两张索引并由统一方法维护：
+
+- `conversationId → ActiveExecution`（包括 AbortController、partial content、
+  当前绑定的 assistantMessageId）
+- `assistantMessageId → conversationId`（给 `stop` / SSE `finally` 用）
+
+`tryReserveConversationExecution` 是单次 Map 写操作原子预占，避免 check-then-set
+竞态；冲突时返回 `ExecutionConflictError`，路由层映射为 409。
+
+**重要边界（多实例部署必读）：**
+
+- 该互斥 **仅在单个 Node.js 进程内** 生效。重启进程必然清空 Map。
+- **多实例生产部署不能依赖此 Map**——同会话的请求可能路由到不同实例。需要
+  数据库执行租约（`SELECT ... FOR UPDATE` / advisory lock）、分布式锁（如
+  Redis / etcd）或 `messages.conversation_id + status` 的部分唯一约束。本项目
+  暂不提供跨进程互斥实现。
+- 不替代业务层校验（如"只能重新生成最后一条助手消息"）。
+- SSE 正常 / 停止 / 异常终态均由 `buildAskStreamResponse` 的 `finally` 块
+  释放；setup 阶段失败由路由层主动释放会话锁并收敛 pending/streaming 消息
+  为 failed。
+
 ## 数据流
 
 ### 问答请求流
 
 1. 用户发送 `POST /ask`，携带 `conversationId` 和 `message`
-2. `server/routes/messages/ask.ts` 保存用户消息到数据库
-3. 创建 `assistant` 消息，状态为 `pending`
-4. 注册执行上下文（AbortController）
-5. 调用 `streamAgent(agentId, …)` 进入 `core/agent/runtime.ts`
-6. 运行时按 `definition.capabilities.knowledgeBase` 决定是否走 RAG/Citation 分支
-7. 动态解析 Tools 和 Skills → 调用 `definition.factory(tools, skills)` 拿到一个临时 Mastra Agent
-8. `agent.stream(prompt, { abortSignal })` 产生内部流，运行时转换为统一的 `StreamEvent`
-9. 共享驱动 `core/execution/ask-driver.ts::buildAskStreamResponse` 把事件包装为 SSE 推送给前端：
+2. `server/routes/messages/ask.ts` **先**对 `conversationId` 调用
+   `tryReserveConversationExecution` 原子预占；冲突直接 409，不写任何消息
+3. 保存用户消息到数据库
+4. 创建 `assistant` 消息，状态为 `pending`
+5. `bindAssistantMessageToExecution` 把助手消息 ID 绑定到已预占的会话执行
+6. 注册执行上下文（AbortController）
+7. 调用 `streamAgent(agentId, …)` 进入 `core/agent/runtime.ts`
+8. 运行时按 `definition.capabilities.knowledgeBase` 决定是否走 RAG/Citation 分支
+9. 动态解析 Tools 和 Skills → 调用 `definition.factory(tools, skills)` 拿到一个临时 Mastra Agent
+10. `agent.stream(prompt, { abortSignal })` 产生内部流，运行时转换为统一的 `StreamEvent`
+11. 共享驱动 `core/execution/ask-driver.ts::buildAskStreamResponse` 把事件包装为 SSE 推送给前端：
    - `message-start`: 助手消息开始生成
    - `content-delta`: 文本片段
    - `tool-call-start`: 工具调用开始（载荷 `{ toolCallId, toolName, status: 'running' }`）
@@ -212,8 +243,9 @@ infrastructure/llm/
    - `tool-call-error`: 工具调用失败（载荷 `{ toolCallId, toolName, status: 'failed', errorCode: 'tool_error' }`，errorCode 恒定，不暴露原始错误）
    - `message-complete`: 生成完成（含 status: completed 或 stopped）
    - `message-error`: 生成失败
-10. 终态由 `core/execution/message-finalize.ts` 统一处理（DB 行 + SSE 事件），失败回退由 `finalizeAfterStreamError` 兜底
-11. `finally` 块调用 `sweepRunningToolExecutions()` 收敛残留执行记录
+12. 终态由 `core/execution/message-finalize.ts` 统一处理（DB 行 + SSE 事件），失败回退由 `finalizeAfterStreamError` 兜底
+13. `finally` 块调用 `sweepRunningToolExecutions()` 收敛残留执行记录，再调用
+    `cleanupExecution()` 释放双索引执行记录
 
 `/ask`、`/messages/:id/stop`、`/messages/:id/regenerate` 三条路由共享同一驱动，唯一差异是上游输入（消息 ID / 历史切片）；`stop.ts` 仅通过 `abortExecution()` 中断执行控制器，不重复实现 SSE 协议。
 
@@ -236,6 +268,9 @@ infrastructure/llm/
 | `/capabilities` | GET | 获取系统能力配置 | `server/routes/capabilities.ts` |
 | `/healthz` | GET | 后端进程存活检查 | `server/routes/health.ts` |
 | `/readyz` | GET | 数据库、LLM、Embedding 就绪检查 | `server/routes/health.ts` |
+| `/auth/login` | POST | 用户名 / 密码登录（公开） | `server/routes/auth.ts` |
+| `/auth/me` | GET | 当前已登录用户 | `server/routes/auth.ts` |
+| `/auth/logout` | POST | 吊销当前会话 | `server/routes/auth.ts` |
 | `/skills` | GET | 列出所有技能 | `server/routes/skills.ts` |
 | `/skills/:id` | GET / DELETE | 获取 / 卸载技能 | `server/routes/skills.ts` |
 | `/skills/market/search` | GET | 搜索 skills.sh | `server/routes/skills.ts` |
@@ -264,6 +299,29 @@ infrastructure/llm/
 - **Skill 兼容性检测**: 自动扫描技能目录中的脚本文件，标记 `requires-runtime` 以防止不安全的自动执行
 - **SSE 最小载荷**: 工具调用仅推送 `{ toolCallId, toolName, status }`，完整 input/output/error 仅持久化在 `tool_executions` 表中
 
+### Phase 1 本地认证（2026-08-26 落地）
+
+| 组件 | 实现 | 说明 |
+|------|------|------|
+| 密码哈希 | Node `crypto.scrypt`，参数 `N=2^14, r=8, p=1`，16 字节盐、64 字节密钥 | 格式 `scrypt$N=...,r=...,p=...$<saltB64Url>$<hashB64Url>`；比较走 `timingSafeEqual` |
+| 会话 token | 32 字节随机 `randomBytes` → base64url，仅存 SHA-256 | 原始 token 只出现在 HttpOnly Cookie 中 |
+| Cookie | `mastra_session`，`HttpOnly; Path=/; SameSite=Strict; Max-Age=AUTH_SESSION_TTL_DAYS*86400` | `Secure` 由 `AUTH_COOKIE_SECURE` 控制（生产建议开） |
+| CSRF | Origin 白名单（`AUTH_ALLOWED_ORIGIN`，精确匹配） | 仅作用于 `POST / PATCH / PUT / DELETE`；`/auth/login` 路由层单独校验，authorizeUser 放行 |
+| 用户名 | `normalizeUsername()`：trim + lowercase + 长度 3-64 + 字符集 `[a-z0-9._-]` | `username_normalized` UNIQUE 用于登录查表 |
+| 数据库表 | `app_users(id, username, username_normalized UNIQUE, password_hash, disabled_at, created_at, updated_at)` + `auth_sessions(id, user_id, token_hash UNIQUE, expires_at, revoked_at, last_seen_at, created_at)` | `username_normalized` 与 `token_hash` 的 UNIQUE 约束已自带索引，**不**再加同名索引；仅 `auth_sessions(user_id)` 加二级索引；不维护"活跃 token"专用部分索引；`last_seen_at` Phase 1 不写入（避免 SSE / 高频 GET 写放大），列保留仅为后续阶段预留 |
+| 多设备 | 每次登录独立创建记录，`POST /auth/logout` 仅吊销当前 Cookie 对应 session | 其它设备的会话不受影响 |
+| 注销路由 | `POST /auth/logout` 是 `requiresAuth: false` | 注销必须能清掉任何状态下的 Cookie（过期/已吊销/篡改）；鉴权中间件失败时 Set-Cookie 无法送达；路由层用 `isOriginAllowed` 兜底 |
+| 失败信息 | 缺用户、密码错误、用户名格式非法、用户禁用 均统一返回"用户名或密码错误。" | 用户名枚举与密码错误在同一文案 |
+| 路由保护 | `GET /healthz`、`GET /readyz`、`POST /auth/login`、`POST /auth/logout` 公开；其余业务路由显式 `requiresAuth: true` | `POST /auth/logout` 必须公开（详见上方"注销路由"行），静态契约扫描的 allowlist 同步包含四项；防止被改回 false |
+
+环境变量：
+
+- `AUTH_SESSION_TTL_DAYS`（默认 7）
+- `AUTH_COOKIE_SECURE`（默认 `false`，生产环境务必 `true`）
+- `AUTH_ALLOWED_ORIGIN`（精确匹配，默认 `http://localhost:5173`）
+
+新建账号：`cd backend && npm run users:create -- --username <username>`（密码通过交互式终端两次输入，不走命令行参数）。
+
 ## 当前安全边界（必读）
 
 当前版本定位为 **单租户、本地开发或受信任网络中的匿名演示 Starter**。
@@ -272,12 +330,10 @@ infrastructure/llm/
 
 明确边界：
 
-- **不** 适用于公网直接部署——所有路由都是匿名访问，没有任何身份校验或速率限制。
+- **不** 适用于公网直接部署——速率限制、租户隔离、Tool 风险治理都未实现。
 - **不** 适用于多用户、多租户、私有知识库隔离场景——`conversations`、`knowledge_bases`、`documents`、`tool_executions`、`agent_skill_bindings` 都没有 owner/tenant 归属列。
 - **不** 实现审批流——`ToolDefinition.metadata` 中的 `destructive` / `openWorld` 字段仅作为能力声明与 UI 展示，**不是** 运行时授权策略。
-- **不** 实现登录系统——`requiresAuth: false` 不应被批量改为 `true`，在没有真实身份提供方时那会造成伪安全或系统不可用。
-
-未来接入认证时，**必须** 先建立请求身份上下文，再为上述五张表增加 owner/tenant 归属列；本阶段不创建这些列、不写迁移脚本。
+- **Phase 1 认证范围**——本地用户名 / 密码登录已落地，但仅保证"可登录、可吊销当前会话"，未实现密码找回 / 多因素 / 风控锁定 / 公开注册；多账号共享数据。
 
 ### Tool Metadata 的真实定位
 

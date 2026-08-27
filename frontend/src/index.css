@@ -19,6 +19,8 @@
   --color-app-muted: #777773;
   --color-app-border: #e5e5e1;
   --color-app-border-strong: #d8d8d3;
+  --color-app-divider: #efeeec;
+  --color-app-row-hover: #f7f7f5;
   --color-app-danger: #d94b4b;
   --color-app-info: #2563eb;
   --color-app-warning: #d97706;
@@ -26,17 +28,34 @@
   --color-app-skill-builtin: #2563eb;
   --color-app-skill-marketplace: #7c3aed;
   --color-app-skill-local: #059669;
+
+  /**
+   * Focus 体系（两个 token）：
+   * - --color-focus-ring：用于无边框元素的 1px outline；默认低对比，避免突兀白框。
+   * - --color-focus-border：用于替换已有 border 颜色的元素（input / container），
+   *   避免与 outline 叠加成双层边框。
+   */
+  --color-focus-ring: rgba(23, 23, 23, 0.55);
+  --color-focus-border: #171717;
+
+  --font-mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 .dark {
-  --color-app-bg: #080a0c;
-  --color-app-surface: #0d1013;
-  --color-app-surface-muted: #171b20;
-  --color-app-hover: #20252b;
-  --color-app-text: #f0f2f4;
-  --color-app-muted: #9299a3;
-  --color-app-border: #242a31;
-  --color-app-border-strong: #323941;
+  --color-app-bg: #08090b;
+  --color-app-surface: #0f1216;
+  --color-app-surface-muted: #161a1f;
+  --color-app-hover: #1d232a;
+  --color-app-text: #e7eaee;
+  --color-app-muted: #8a929c;
+  --color-app-border: #1f262d;
+  --color-app-border-strong: #2c343d;
+  --color-app-divider: #1a2026;
+  --color-app-row-hover: #141a20;
+
+  /* Dark theme：低对比的中性灰，绝不接近纯白。 */
+  --color-focus-ring: rgba(180, 192, 204, 0.32);
+  --color-focus-border: #6b7280;
 }
 
 * { box-sizing: border-box; }
@@ -51,10 +70,69 @@ html, body, #root {
 
 body {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
+
 
 button, textarea { font: inherit; }
 button { cursor: pointer; }
+
+/**
+ * 全局可访问性：所有可交互元素使用统一的 focus ring（默认兜底）。
+ *
+ * 设计约束：
+ * - 1px 实线 outline，0 offset，避免与已有 border 叠加成双层边框。
+ * - 使用 --color-focus-ring（低对比度），Dark theme 不接近纯白。
+ * - outline 不带 border-radius，避免与 element 自身的圆角冲突。
+ * - 默认不重置 outline；需要更克制时由组件层用 focus-visible:outline-none 关闭，
+ *   并用容器 border 增强代替。
+ */
+/**
+ * 全局 focus ring：仅作用于无 border 的可交互元素。
+ * input / textarea / select 自带 border，focus 时不另加 outline，避免双层边框。
+ * 想在子元素聚焦时增强外层容器边框（如 Composer），用 :focus-within 处理。
+ */
+:where(button, a, [tabindex]):focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: 0;
+}
+
+/**
+ * Composer / 表单容器：聚焦时不改变容器 border。子元素同样无 outline。
+ * 用户要求：输入框获取焦点时，外层与内层都不显示边框。
+ */
+
+/**
+ * Workbench 通用滚动条样式：保留薄滚动条 + 拇指描边 + 透明轨道。
+ * 用于 Agent rail / 详情区 / 表格行容器。
+ */
+.app-scroll {
+  scrollbar-color: var(--color-app-border-strong) transparent;
+  scrollbar-width: thin;
+}
+.app-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.app-scroll::-webkit-scrollbar-track { background: transparent; }
+.app-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-app-border-strong);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+.app-scroll::-webkit-scrollbar-thumb:hover { background-color: var(--color-app-muted); background-clip: content-box; }
+
+/**
+ * 等宽数字与 ID：用于表格 / 计数 / 路径。
+ */
+.app-tnum { font-variant-numeric: tabular-nums; }
+.app-mono { font-family: var(--font-mono); font-feature-settings: "calt" 0, "liga" 0; }
+
+/**
+ * 选中行背景：用于 Agent rail 选中态。
+ */
+.app-row-active { background: var(--color-app-surface-muted); }
+.app-row-hover:hover { background: var(--color-app-row-hover); }
 
 /**
  * 全局 keyframes：保留「加载中三圆点」动画。其它局部动画内联到组件 className。

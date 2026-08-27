@@ -619,6 +619,213 @@ try {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 6. 单进程会话执行互斥：reserve 必须在所有决定性状态读取之前。
+//
+// 设计动机：
+//   若先 `getConversationWithMessages(conversationId)` 再 `tryReserve…`，
+//   两个并发请求都可能读出相同的旧 history，导致 user/assistant 顺序错乱。
+//   本契约以"源码中调用位置先后顺序"作为静态保证，注释不算数。
+//
+// 检查必须落到真实 route 源码，不接受仅靠注释或 JSDoc 声明。
+// ─────────────────────────────────────────────────────────────────────────
+
+function stripCommentsForSourceScan(text: string): string {
+  // 去掉块注释与行注释，避免注释里出现 "reserve before read" 这类文字造成误判。
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
+function firstCallIndex(text: string, callee: string): number {
+  // 形如 `tryReserveConversationExecution(` 或 `getConversationWithMessages(` 的调用点。
+  const pattern = new RegExp(`\\b${callee}\\s*\\(`, 'g');
+  const m = pattern.exec(text);
+  return m ? m.index : -1;
+}
+
+const ASK_ROUTE_PATH = join(BACKEND_SRC, 'server', 'routes', 'messages', 'ask.ts');
+const REGENERATE_ROUTE_PATH = join(BACKEND_SRC, 'server', 'routes', 'messages', 'regenerate.ts');
+
+function assertReserveBeforeReads(
+  label: string,
+  routePath: string,
+  reads: string[],
+): void {
+  let raw = '';
+  let stripped = '';
+  try {
+    raw = readFileSync(routePath, 'utf-8');
+    stripped = stripCommentsForSourceScan(raw);
+  } catch (err) {
+    record(`[ExecLock] ${label}：可读取源码`, false, String(err));
+    return;
+  }
+
+  const reserveIdx = firstCallIndex(stripped, 'tryReserveConversationExecution');
+  record(
+    `[ExecLock] ${label}：源码中存在 tryReserveConversationExecution(...) 调用`,
+    reserveIdx >= 0,
+    `route=${relative(resolve(BACKEND_SRC, '..'), routePath).split(sep).join('/')}`,
+  );
+  if (reserveIdx < 0) return;
+
+  for (const read of reads) {
+    const readIdx = firstCallIndex(stripped, read);
+    if (readIdx < 0) {
+      // 该路由没有调用到对应函数，跳过——避免假阳性。
+      continue;
+    }
+    record(
+      `[ExecLock] ${label}：tryReserveConversationExecution 必须早于 ${read}(...)`,
+      reserveIdx < readIdx,
+      `reserveIdx=${reserveIdx}, ${read}Idx=${readIdx}`,
+    );
+  }
+}
+
+assertReserveBeforeReads(
+  'ask.ts',
+  ASK_ROUTE_PATH,
+  ['getConversationWithMessages', 'saveUserMessage', 'createAssistantPending', 'updateAssistantStreaming'],
+);
+
+assertReserveBeforeReads(
+  'regenerate.ts',
+  REGENERATE_ROUTE_PATH,
+  [
+    'getConversationWithMessages',
+    'getLastAssistantMessage',
+    'getMessageSnapshot',
+    'resetAssistantForRetry',
+    'updateAssistantStreaming',
+  ],
+);
+
+// ─────────────────────────────────────────────────────────────────────────
+// 7. Phase 1 认证路由契约：除 healthz / readyz / /auth/login 外，
+//    业务路由必须 requiresAuth: true。
+//    实现层用静态文本扫描，避免误判 Mastra 抽象层默认值。
+// ─────────────────────────────────────────────────────────────────────────
+
+const ROUTES_DIR = join(BACKEND_SRC, 'server', 'routes');
+
+interface RouteAuth {
+  path: string;
+  method: string;
+  hasExplicitRequiresAuth: boolean;
+  requiresAuthValue: 'true' | 'false' | 'unspecified';
+}
+
+const ROUTE_AUTH_ALLOWLIST: Array<{ method: string; path: string }> = [
+  { method: 'GET', path: '/healthz' },
+  { method: 'GET', path: '/readyz' },
+  { method: 'POST', path: '/auth/login' },
+  // /auth/logout 必须是公开的：注销必须能清掉任何状态下的 Cookie
+  // （过期/已吊销/篡改），所以不能套 requiresAuth:true；路由层用 Origin 校验兜底。
+  { method: 'POST', path: '/auth/logout' },
+];
+
+function routeKey(method: string, path: string): string {
+  return `${method.toUpperCase()} ${path}`;
+}
+
+function scanRouteAuth(): RouteAuth[] {
+  const results: RouteAuth[] = [];
+  const files: string[] = [];
+  function walk(dir: string) {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) walk(full);
+      else if (st.isFile() && /\.(ts)$/.test(entry)) files.push(full);
+    }
+  }
+  walk(ROUTES_DIR);
+  for (const file of files) {
+    const text = readFileSync(file, 'utf-8');
+    const routeRegex =
+      /registerApiRoute\(\s*(['"])([^'"]+)\1\s*,\s*\{([\s\S]*?)\}\s*\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = routeRegex.exec(text)) !== null) {
+      const path = m[2] ?? '';
+      const body = m[3] ?? '';
+      const methodMatch = body.match(/method\s*:\s*(['"])([^'"]+)\1/);
+      const method = methodMatch ? (methodMatch[2] ?? '').toUpperCase() : '';
+      const requiresMatch = body.match(/requiresAuth\s*:\s*(true|false)/);
+      const value = requiresMatch ? ((requiresMatch[1] as 'true' | 'false')) : 'unspecified';
+      results.push({
+        path,
+        method,
+        hasExplicitRequiresAuth: requiresMatch !== null,
+        requiresAuthValue: value,
+      });
+    }
+  }
+  return results;
+}
+
+const allRoutes = scanRouteAuth();
+
+record(
+  '[Auth] 至少存在 1 个 registerApiRoute 调用',
+  allRoutes.length > 0,
+  `共扫描到 ${allRoutes.length} 条路由`,
+);
+
+for (const route of allRoutes) {
+  const key = routeKey(route.method, route.path);
+  const inAllow = ROUTE_AUTH_ALLOWLIST.some((r) => r.method === route.method && r.path === route.path);
+  if (inAllow) {
+    record(
+      `[Auth] 公开路由 ${key} 应保持 requiresAuth: false 或不写`,
+      route.requiresAuthValue !== 'true',
+      `实际 requiresAuth: ${route.requiresAuthValue}`,
+    );
+    continue;
+  }
+  record(
+    `[Auth] 业务路由 ${key} 必须显式 requiresAuth: true`,
+    route.hasExplicitRequiresAuth && route.requiresAuthValue === 'true',
+    `实际 requiresAuth: ${route.requiresAuthValue}`,
+  );
+}
+
+// /auth/login 必须是 POST（防御性确认）
+record(
+  '[Auth] /auth/login 必须是 POST',
+  allRoutes.some((r) => r.method === 'POST' && r.path === '/auth/login'),
+);
+
+// /auth/me 必须 GET + 受保护
+{
+  const me = allRoutes.find((r) => r.path === '/auth/me');
+  record(
+    '[Auth] /auth/me 存在且必须是 GET',
+    Boolean(me && me.method === 'GET'),
+  );
+  record(
+    '[Auth] /auth/me 必须 requiresAuth: true',
+    Boolean(me && me.hasExplicitRequiresAuth && me.requiresAuthValue === 'true'),
+  );
+}
+
+// /auth/logout 必须 POST + 公开（requiresAuth:false 或未写）。
+// 理由：注销必须能清掉任何状态下的 Cookie（过期/已吊销/篡改）；路由层
+// 用 Origin 校验兜底，详见 routes/auth.ts。
+{
+  const lo = allRoutes.find((r) => r.path === '/auth/logout');
+  record(
+    '[Auth] /auth/logout 存在且必须是 POST',
+    Boolean(lo && lo.method === 'POST'),
+  );
+  record(
+    '[Auth] /auth/logout 必须是公开（false 或不写），以便清掉无效 Cookie',
+    Boolean(lo && lo.requiresAuthValue !== 'true'),
+    `实际 requiresAuth: ${lo?.requiresAuthValue ?? 'unspecified'}`,
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // 输出
 // ─────────────────────────────────────────────────────────────────────────
 

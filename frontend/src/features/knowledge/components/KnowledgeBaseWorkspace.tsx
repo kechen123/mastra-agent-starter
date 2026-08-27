@@ -95,9 +95,9 @@ export function KnowledgeBaseWorkspace({
         </div>
         {selectedKnowledgeBase && (
           <div className="flex gap-2">
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-text bg-transparent border border-app-border-strong" onClick={onBack}>返回列表</button>
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text" onClick={() => onEnterChat(selectedKnowledgeBase)}><Bot size={17} />进入问答</button>
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-danger bg-transparent border border-app-danger/50" onClick={() => onDeleteKnowledgeBase(selectedKnowledgeBase.id)}><Trash2 size={16} />删除</button>
+            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-text bg-transparent border border-app-border-strong focus-visible:outline-none focus-visible:border-focus-border" onClick={onBack}>返回列表</button>
+            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text focus-visible:outline-none focus-visible:opacity-90" onClick={() => onEnterChat(selectedKnowledgeBase)}><Bot size={17} />进入问答</button>
+            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-danger bg-transparent border border-app-danger/50 focus-visible:outline-none focus-visible:border-focus-border" onClick={() => onDeleteKnowledgeBase(selectedKnowledgeBase.id)}><Trash2 size={16} />删除</button>
           </div>
         )}
       </header>
@@ -108,7 +108,7 @@ export function KnowledgeBaseWorkspace({
             <form className="grid grid-cols-[1fr_1.5fr_auto] gap-2.5 mb-5" onSubmit={(event) => void submitCreate(event)}>
               <input className="min-w-0 py-2.5 px-2.5 text-app-text bg-app-surface border border-app-border-strong rounded-md outline-0" value={name} onChange={(event) => setName(event.target.value)} placeholder="知识库名称" maxLength={120} autoFocus />
               <input className="min-w-0 py-2.5 px-2.5 text-app-text bg-app-surface border border-app-border-strong rounded-md outline-0" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述（可选）" maxLength={2000} />
-              <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text disabled:cursor-not-allowed disabled:opacity-55" type="submit">创建</button>
+              <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text disabled:cursor-not-allowed disabled:opacity-55 focus-visible:outline-none focus-visible:opacity-90" type="submit">创建</button>
             </form>
           )}
           <div className="grid place-items-center gap-2 py-9 px-6 text-app-muted border border-dashed border-app-border-strong rounded-xl text-center">
@@ -126,7 +126,7 @@ export function KnowledgeBaseWorkspace({
               <p className="mt-2 text-app-muted text-sm">{uploadHint}</p>
             </div>
             <input ref={inputRef} type="file" accept={acceptAttr} hidden onChange={(event) => onUpload(event.target.files?.[0])} />
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text disabled:cursor-not-allowed disabled:opacity-55" onClick={() => inputRef.current?.click()} disabled={isUploading}><Upload size={17} />{isUploading ? '正在入库…' : '上传文档'}</button>
+            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text disabled:cursor-not-allowed disabled:opacity-55 focus-visible:outline-none focus-visible:opacity-90" onClick={() => inputRef.current?.click()} disabled={isUploading}><Upload size={17} />{isUploading ? '正在入库…' : '上传文档'}</button>
           </div>
           <div className="grid gap-2.5">
             {isLoading ? <p className="py-7 px-7 text-app-muted border border-dashed border-app-border-strong rounded-xl text-center">正在加载文档…</p>
@@ -144,7 +144,7 @@ export function KnowledgeBaseWorkspace({
                     <small className="text-app-muted text-xs">{formatBytes(document.size)} · {document.chunkCount} 个片段 · {formatStatus(document.status)}</small>
                     {document.errorMessage && <small className="text-app-danger">{document.errorMessage}</small>}
                   </div>
-                  <button className="grid place-items-center ml-auto p-2 text-app-muted bg-transparent border-0 rounded-md hover:text-app-text hover:bg-app-hover" onClick={() => onDeleteDocument(document.id)} aria-label={`删除 ${document.name}`}><Trash2 size={17} /></button>
+                  <button className="grid place-items-center ml-auto p-2 text-app-muted bg-transparent border-0 rounded-md hover:text-app-text hover:bg-app-hover focus-visible:outline-none focus-visible:text-app-text focus-visible:bg-app-hover" onClick={() => onDeleteDocument(document.id)} aria-label={`删除 ${document.name}`}><Trash2 size={17} /></button>
                 </article>
               ))}
           </div>

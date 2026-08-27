@@ -13,7 +13,8 @@
     "test:fixtures": "tsx tests/fixtures/skill-classifier.ts",
     "test": "npm run test:contracts && npm run test:unit && npm run test:integration && npm run test:fixtures",
     "migrate": "tsx src/scripts/migrate.ts",
-    "ask": "tsx src/scripts/ask.ts"
+    "ask": "tsx src/scripts/ask.ts",
+    "users:create": "tsx src/scripts/users-create.ts"
   },
   "dependencies": {
     "@mastra/core": "1.61.0",

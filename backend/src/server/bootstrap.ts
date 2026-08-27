@@ -71,6 +71,7 @@ import {
   listConversationsRoute,
   updateConversationRoute,
 } from './routes/conversations.js';
+import { loginRoute, meRoute, logoutRoute } from './routes/auth.js';
 
 preloadSkillRegistry();
 initializeApp().catch((err) => {
@@ -80,6 +81,9 @@ initializeApp().catch((err) => {
 export const apiRoutes = [
   healthRoute,
   readinessRoute,
+  loginRoute,
+  meRoute,
+  logoutRoute,
   askRoute,
   stopMessageRoute,
   regenerateMessageRoute,
