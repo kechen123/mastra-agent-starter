@@ -57,7 +57,7 @@ export function AgentToolsTab({ agent, tools }: AgentToolsTabProps) {
   return (
     <div className="grid gap-5">
       <SectionHeader
-        label="Tools"
+        label="已绑定工具"
         count={resolved.length}
         trailing={
           <input
@@ -66,7 +66,7 @@ export function AgentToolsTab({ agent, tools }: AgentToolsTabProps) {
             onChange={(event) => setQuery(event.target.value)}
             placeholder="筛选已绑定工具…"
             aria-label="筛选已绑定工具"
-            className="h-[26px] w-[180px] py-0.5 px-2 text-[12px] text-app-text bg-app-bg border border-app-border-strong rounded-[3px] outline-0 placeholder:text-app-muted"
+            className="h-9 w-[220px] px-3 text-[13px] text-app-text bg-app-surface border-0 rounded-lg outline-none placeholder:text-app-muted"
           />
         }
       />
@@ -78,20 +78,20 @@ export function AgentToolsTab({ agent, tools }: AgentToolsTabProps) {
           description="Tool 由后端 AgentDefinition.toolIds 配置，前端无法新增。"
         />
       ) : filtered.length === 0 ? (
-        <p className="m-0 text-[12px] text-app-muted">没有匹配的工具。</p>
+        <p className="m-0 text-[13px] text-app-muted">没有匹配的工具。</p>
       ) : (
         <ul className="m-0 p-0 list-none grid">
           {filtered.map((tool) => (
             <li
               key={tool.id}
-              className="grid grid-cols-[180px_1fr_auto] items-start gap-3 py-2.5 border-b border-app-divider last:border-b-0"
+              className="grid grid-cols-1 md:grid-cols-[180px_1fr_auto] items-start gap-3 md:gap-4 py-4 border-b border-app-divider last:border-b-0"
             >
               <div className="grid gap-0.5 min-w-0">
-                <span className="text-[13px] font-medium text-app-text truncate">{tool.displayName}</span>
-                <span className="app-mono text-[11.5px] text-app-muted truncate">{tool.id}</span>
+                <span className="text-[14px] font-medium text-app-text truncate">{tool.displayName}</span>
+                <span className="app-mono text-[12px] text-app-muted truncate">{tool.id}</span>
               </div>
-              <p className="m-0 text-[12.5px] text-app-muted leading-[1.55]">{tool.description}</p>
-              <div className="flex flex-wrap items-center gap-1 justify-end max-w-[260px]">
+              <p className="m-0 text-[13.5px] text-app-muted leading-6">{tool.description}</p>
+              <div className="flex flex-wrap items-center gap-1 md:justify-end md:max-w-[260px]">
                 {(Object.keys(tool.metadata) as Array<keyof ToolDefinition['metadata']>)
                   .filter((key) => tool.metadata[key])
                   .map((key) => (

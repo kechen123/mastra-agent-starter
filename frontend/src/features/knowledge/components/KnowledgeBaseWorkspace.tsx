@@ -86,67 +86,144 @@ export function KnowledgeBaseWorkspace({
   const acceptAttr = capabilities.documentFormats.map((f) => ACCEPT_MAP[f]).filter(Boolean).join(',');
   const uploadHint = supportedLabels.length > 0 ? `支持 ${supportedLabels.join('、')}，单文件不超过 10 MB。` : '暂不支持文件上传。';
 
-  return <section className="flex-1 min-w-0 min-h-0 overflow-y-auto py-8 px-7 bg-app-bg">
-    <div className="w-full max-w-[920px] mx-auto">
-      <header className="flex items-start justify-between gap-4 mb-7">
+  return <section className="flex-1 min-w-0 min-h-0 overflow-y-auto py-8 max-[760px]:pt-16 px-5 sm:px-8 bg-app-bg app-scroll">
+    <div className="w-full max-w-[860px] mx-auto">
+      <header className="flex flex-wrap items-start justify-between gap-5 mb-8">
         <div>
-          <h1 className="m-0 text-2xl">{selectedKnowledgeBase ? selectedKnowledgeBase.name : '知识库'}</h1>
-          <p className="mt-2 text-app-muted text-sm">{selectedKnowledgeBase ? `${selectedKnowledgeBase.documentCount} 个文档 · ${selectedKnowledgeBase.chunkCount ?? 0} 个片段` : '从左侧选择或新建一个知识库。'}</p>
+          <h1 className="m-0 text-[24px] leading-tight font-semibold tracking-[-0.03em] text-app-text">
+            {selectedKnowledgeBase ? selectedKnowledgeBase.name : '知识库'}
+          </h1>
+          <p className="mt-2 text-app-muted text-[14px] leading-6">
+            {selectedKnowledgeBase
+              ? `${selectedKnowledgeBase.documentCount} 个文档 · ${selectedKnowledgeBase.chunkCount ?? 0} 个片段`
+              : '从左侧选择或新建一个知识库。'}
+          </p>
         </div>
         {selectedKnowledgeBase && (
-          <div className="flex gap-2">
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-text bg-transparent border border-app-border-strong focus-visible:outline-none focus-visible:border-focus-border" onClick={onBack}>返回列表</button>
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text focus-visible:outline-none focus-visible:opacity-90" onClick={() => onEnterChat(selectedKnowledgeBase)}><Bot size={17} />进入问答</button>
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-danger bg-transparent border border-app-danger/50 focus-visible:outline-none focus-visible:border-focus-border" onClick={() => onDeleteKnowledgeBase(selectedKnowledgeBase.id)}><Trash2 size={16} />删除</button>
+          <div className="flex flex-wrap items-center gap-2 ml-auto">
+            <button
+              className="inline-flex items-center justify-center min-h-9 px-3 rounded-lg text-[13px] text-app-muted bg-transparent border-0 transition-colors duration-150 hover:text-app-text hover:bg-app-hover focus-visible:bg-app-hover"
+              onClick={onBack}
+            >
+              返回列表
+            </button>
+            <button
+              className="inline-flex items-center justify-center gap-2 min-h-9 px-3.5 rounded-lg text-[13px] font-medium text-app-bg bg-app-text border-0 transition-[transform,opacity] duration-150 active:scale-[0.98] hover:opacity-90"
+              onClick={() => onEnterChat(selectedKnowledgeBase)}
+            >
+              <Bot size={15} />进入问答
+            </button>
+            <button
+              className="inline-flex items-center justify-center gap-2 min-h-9 px-3 rounded-lg text-[13px] text-app-muted bg-transparent border-0 transition-colors duration-150 hover:text-app-danger hover:bg-app-danger/10 focus-visible:text-app-danger focus-visible:bg-app-danger/10"
+              onClick={() => onDeleteKnowledgeBase(selectedKnowledgeBase.id)}
+            >
+              <Trash2 size={15} />
+              删除
+            </button>
           </div>
         )}
       </header>
-      {error && <p className="my-4 py-2.5 px-3 text-app-danger bg-app-danger/[0.07] border border-app-danger/33 rounded-md text-[13px]">{error}</p>}
+      {error && (
+        <p className="my-4 py-2.5 px-3 text-app-danger bg-app-danger/[0.07] border border-app-danger/33 rounded-md text-[13px]">
+          {error}
+        </p>
+      )}
       {!selectedKnowledgeBase && (
         <>
           {showCreate && (
-            <form className="grid grid-cols-[1fr_1.5fr_auto] gap-2.5 mb-5" onSubmit={(event) => void submitCreate(event)}>
-              <input className="min-w-0 py-2.5 px-2.5 text-app-text bg-app-surface border border-app-border-strong rounded-md outline-0" value={name} onChange={(event) => setName(event.target.value)} placeholder="知识库名称" maxLength={120} autoFocus />
-              <input className="min-w-0 py-2.5 px-2.5 text-app-text bg-app-surface border border-app-border-strong rounded-md outline-0" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述（可选）" maxLength={2000} />
-              <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text disabled:cursor-not-allowed disabled:opacity-55 focus-visible:outline-none focus-visible:opacity-90" type="submit">创建</button>
+            <form
+              className="grid grid-cols-1 md:grid-cols-[1fr_1.5fr_auto] gap-3 mb-6 p-4 rounded-2xl bg-app-surface"
+              onSubmit={(event) => void submitCreate(event)}
+            >
+              <input
+                className="min-w-0 h-11 px-3.5 text-[14px] text-app-text bg-app-bg border border-app-border rounded-xl outline-none focus-visible:border-app-border-strong"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="知识库名称"
+                maxLength={120}
+                autoFocus
+              />
+              <input
+                className="min-w-0 h-11 px-3.5 text-[14px] text-app-text bg-app-bg border border-app-border rounded-xl outline-none focus-visible:border-app-border-strong"
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder="描述（可选）"
+                maxLength={2000}
+              />
+              <button
+                className="inline-flex items-center justify-center gap-2 min-h-11 px-4 rounded-xl text-[14px] font-medium text-app-bg bg-app-text border-0 transition-[transform,opacity] duration-150 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 hover:opacity-90"
+                type="submit"
+              >
+                创建
+              </button>
             </form>
           )}
-          <div className="grid place-items-center gap-2 py-9 px-6 text-app-muted border border-dashed border-app-border-strong rounded-xl text-center">
-            <Library size={24} />
-            <strong className="text-app-text">还没有知识库</strong>
-            <p className="max-w-md m-0 leading-relaxed">创建知识库后，可以上传 TXT 或 Markdown，并让知识库问答基于资料回答。</p>
+          <div className="grid place-items-center gap-2.5 py-16 px-6 text-app-muted bg-app-surface-muted rounded-2xl text-center">
+            <span className="grid place-items-center w-10 h-10 rounded-full bg-app-bg"><Library size={19} /></span>
+            <strong className="text-app-text text-[15px]">还没有知识库</strong>
+            <p className="max-w-md m-0 text-[14px] leading-6">创建知识库后，可以上传资料，并让回答基于可追溯的原文内容。</p>
           </div>
         </>
       )}
       {selectedKnowledgeBase && (
         <>
-          <div className="flex items-center justify-between p-4 mb-4 text-app-text bg-app-surface border border-app-border rounded-xl">
-            <div>
-              <strong>上传文本资料</strong>
-              <p className="mt-2 text-app-muted text-sm">{uploadHint}</p>
+          <div className="flex flex-wrap items-center justify-between gap-4 p-4 mb-4 text-app-text bg-app-surface rounded-2xl">
+            <div className="min-w-0">
+              <strong className="text-[14px] font-medium">添加资料</strong>
+              <p className="mt-1 text-app-muted text-[13px] leading-5">{uploadHint}</p>
             </div>
-            <input ref={inputRef} type="file" accept={acceptAttr} hidden onChange={(event) => onUpload(event.target.files?.[0])} />
-            <button className="inline-flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm text-app-surface bg-app-text border border-app-text disabled:cursor-not-allowed disabled:opacity-55 focus-visible:outline-none focus-visible:opacity-90" onClick={() => inputRef.current?.click()} disabled={isUploading}><Upload size={17} />{isUploading ? '正在入库…' : '上传文档'}</button>
+            <input
+              ref={inputRef}
+              type="file"
+              accept={acceptAttr}
+              hidden
+              onChange={(event) => onUpload(event.target.files?.[0])}
+            />
+            <button
+              className="inline-flex items-center justify-center gap-2 min-h-9 px-3.5 rounded-lg text-[13px] font-medium text-app-bg bg-app-text border-0 transition-[transform,opacity] duration-150 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 hover:opacity-90"
+              onClick={() => inputRef.current?.click()}
+              disabled={isUploading}
+            >
+              <Upload size={15} />{isUploading ? '正在入库…' : '上传文档'}
+            </button>
           </div>
-          <div className="grid gap-2.5">
-            {isLoading ? <p className="py-7 px-7 text-app-muted border border-dashed border-app-border-strong rounded-xl text-center">正在加载文档…</p>
-              : documents.length === 0 ? (
-                <div className="grid place-items-center gap-2 py-9 px-6 text-app-muted border border-dashed border-app-border-strong rounded-xl text-center">
-                  <FileText size={24} />
-                  <strong className="text-app-text">还没有文档</strong>
-                  <p className="max-w-md m-0 leading-relaxed">支持 TXT、Markdown；上传后会显示处理状态。</p>
-                </div>
-              ) : documents.map((document) => (
-                <article className="flex items-center gap-3.5 p-4 text-app-text bg-app-surface border border-app-border rounded-xl" key={document.id}>
-                  <FileText size={21} />
-                  <div className="grid gap-1 min-w-0">
-                    <strong className="truncate">{document.name}</strong>
-                    <small className="text-app-muted text-xs">{formatBytes(document.size)} · {document.chunkCount} 个片段 · {formatStatus(document.status)}</small>
-                    {document.errorMessage && <small className="text-app-danger">{document.errorMessage}</small>}
+          <div className="grid gap-2">
+            {isLoading ? (
+              <p className="py-10 px-7 text-app-muted bg-app-surface-muted rounded-2xl text-center text-[14px]">
+                正在加载文档…
+              </p>
+            ) : documents.length === 0 ? (
+              <div className="grid place-items-center gap-2.5 py-16 px-6 text-app-muted bg-app-surface-muted rounded-2xl text-center">
+                <span className="grid place-items-center w-10 h-10 rounded-full bg-app-bg"><FileText size={19} /></span>
+                <strong className="text-app-text text-[15px]">还没有文档</strong>
+                <p className="max-w-md m-0 text-[14px] leading-6">上传资料后，这里会展示解析进度、片段数量和处理结果。</p>
+              </div>
+            ) : (
+              documents.map((document) => (
+                <article
+                  className="group flex items-center gap-3.5 min-h-16 p-3.5 text-app-text bg-app-surface rounded-xl transition-colors duration-150 hover:bg-app-surface-muted"
+                  key={document.id}
+                >
+                  <span className="grid place-items-center w-9 h-9 shrink-0 rounded-lg bg-app-surface-muted group-hover:bg-app-bg"><FileText size={17} className="text-app-muted" /></span>
+                  <div className="grid gap-0.5 min-w-0">
+                    <strong className="truncate text-[14px] font-medium">{document.name}</strong>
+                    <small className="text-app-muted text-[12.5px]">
+                      {formatBytes(document.size)} · {document.chunkCount} 个片段 · {formatStatus(document.status)}
+                    </small>
+                    {document.errorMessage && (
+                      <small className="text-app-danger text-[12.5px]">{document.errorMessage}</small>
+                    )}
                   </div>
-                  <button className="grid place-items-center ml-auto p-2 text-app-muted bg-transparent border-0 rounded-md hover:text-app-text hover:bg-app-hover focus-visible:outline-none focus-visible:text-app-text focus-visible:bg-app-hover" onClick={() => onDeleteDocument(document.id)} aria-label={`删除 ${document.name}`}><Trash2 size={17} /></button>
+                  <button
+                    className="grid place-items-center ml-auto w-9 h-9 text-app-muted bg-transparent border-0 rounded-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100 hover:text-app-danger hover:bg-app-danger/10 focus-visible:opacity-100 focus-visible:text-app-danger focus-visible:bg-app-danger/10"
+                    onClick={() => onDeleteDocument(document.id)}
+                    aria-label={`删除 ${document.name}`}
+                  >
+                    <Trash2 size={15} />
+                  </button>
                 </article>
-              ))}
+              ))
+            )}
           </div>
         </>
       )}

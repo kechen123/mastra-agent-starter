@@ -12,30 +12,30 @@ export function AgentInstructionsTab({ agentId }: { agentId: string }) {
   return (
     <div className="grid gap-5 max-w-[760px]">
       <header className="grid gap-1.5">
-        <h3 className="m-0 text-[13px] font-semibold text-app-text">系统提示（Instructions）</h3>
-        <p className="m-0 text-[12.5px] text-app-muted leading-[1.6]">
+        <h3 className="m-0 text-[16px] font-semibold text-app-text">系统提示</h3>
+        <p className="m-0 text-[14px] text-app-muted leading-6">
           Instructions 是 Agent 的核心提示词，定义身份、语气与行为边界。
         </p>
       </header>
 
-      <div className="grid gap-2 py-3 px-3.5 border border-dashed border-app-border-strong rounded-md bg-app-surface">
+      <div className="grid gap-3 py-4 px-4 rounded-xl bg-app-surface">
         <div className="flex items-center gap-1.5">
-          <FileText size={14} strokeWidth={2} className="text-app-muted" />
-          <span className="text-[12.5px] font-medium text-app-text">当前实现</span>
+          <FileText size={16} strokeWidth={1.9} className="text-app-muted" />
+          <span className="text-[14px] font-medium text-app-text">当前实现</span>
         </div>
-        <p className="m-0 text-[12.5px] text-app-muted leading-[1.6]">
+        <p className="m-0 text-[13.5px] text-app-muted leading-6">
           当前后端 <code className="app-mono px-1 py-0.5 bg-app-surface-muted rounded-[3px]">GET /agents</code>{' '}
           只暴露 <code className="app-mono px-1 py-0.5 bg-app-surface-muted rounded-[3px]">id / name / description / toolIds / capabilities / boundSkillIds</code>，
           不返回 <code className="app-mono px-1 py-0.5 bg-app-surface-muted rounded-[3px]">instructions</code>。
           因此前端无法展示完整提示词原文。
         </p>
-        <p className="m-0 text-[12.5px] text-app-muted leading-[1.6]">
+        <p className="m-0 text-[13.5px] text-app-muted leading-6">
           源码位置：
           <code className="app-mono block mt-1 px-2 py-1.5 bg-app-surface-muted rounded-[3px] break-all">
             backend/src/agents/{agentId}/instructions.ts
           </code>
         </p>
-        <p className="m-0 text-[12.5px] text-app-muted leading-[1.6]">
+        <p className="m-0 text-[13.5px] text-app-muted leading-6">
           修改后需重启后端进程，新指令才会生效。
         </p>
       </div>

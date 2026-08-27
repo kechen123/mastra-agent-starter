@@ -25,20 +25,21 @@ import type { ChatMessage, ConversationState, Module, Theme } from '../types/ui'
 import { cn } from '../lib/cn'
 import { Sidebar } from '../components/layout/Sidebar'
 import { CitationPanel } from '../features/chat/components/CitationPanel'
-import { ChatWorkspace } from '../features/chat/components/ChatWorkspace'
+import { AssistantChatWorkspace } from '../features/chat/components/AssistantChatWorkspace'
 import { KnowledgeBaseWorkspace } from '../features/knowledge/components/KnowledgeBaseWorkspace'
 import { SkillsWorkspace } from '../features/capabilities/components/SkillsWorkspace'
 import { LoginScreen } from '../features/auth/components/LoginScreen'
+import { Menu } from 'lucide-react'
 
 type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated'
 
 function App() {
   const [theme, setTheme] = useState<Theme>('dark'); const [activeModule, setActiveModule] = useState<Module>('对话')
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [conversationState, setConversationState] = useState<ConversationState>({ type: 'draft', agentId: 'general-chat', knowledgeBaseId: null })
   const [messages, setMessages] = useState<ChatMessage[]>([]); const [isAsking, setIsAsking] = useState(false); const [chatError, setChatError] = useState<string | null>(null); const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]); const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<string | null>(null); const [documents, setDocuments] = useState<KnowledgeDocument[]>([]); const [isKnowledgeLoading, setIsKnowledgeLoading] = useState(false); const [isUploading, setIsUploading] = useState(false); const [showCreateKnowledgeBase, setShowCreateKnowledgeBase] = useState(false); const [knowledgeError, setKnowledgeError] = useState<string | null>(null); const [capabilities, setCapabilities] = useState<Capabilities>(DEFAULT_CAPABILITIES)
-  const [question, setQuestion] = useState('')
   const [chatAgents, setChatAgents] = useState<ChatAgentInfo[]>(DEFAULT_CAPABILITIES.chatAgents)
 
   // 认证状态机：见设计文档 § 前端。未认证仅渲染 <LoginScreen />，业务
@@ -290,13 +291,12 @@ function App() {
     }
   }
 
-  async function submitQuestion() {
-    const content = question.trim()
-    if (!content || isSubmittingRef.current || streamingAssistantIdRef.current) return
+  async function submitQuestion(content: string) {
+    const trimmed = content.trim()
+    if (!trimmed || isSubmittingRef.current || streamingAssistantIdRef.current) return
     const currentAgent = chatAgents.find((a) => a.id === currentAgentId)
     if (currentAgent?.requiresKnowledgeBase && !currentKnowledgeBaseId) { setChatError('请先选择一个知识库。'); return }
     setChatError(null)
-    setQuestion('')
     isSubmittingRef.current = true
 
     let convId: string
@@ -312,14 +312,14 @@ function App() {
 
     // 立刻把用户消息渲染到 UI，避免等待首条 SSE 事件带来的"空档"
     const userMessageId = crypto.randomUUID()
-    setMessages((current) => [...current, { id: userMessageId, role: 'user', content, status: 'completed' }])
+    setMessages((current) => [...current, { id: userMessageId, role: 'user', content: trimmed, status: 'completed' }])
     setIsAsking(true)
 
     const abortController = new AbortController()
     abortControllerRef.current = abortController
 
     try {
-      await streamAskMessage(convId, content, (event) => handleSSEEvent(event), abortController.signal)
+      await streamAskMessage(convId, trimmed, (event) => handleSSEEvent(event), abortController.signal)
     } catch (error) {
       if ((error as Error).name === 'AbortError') {
         const assistantId = streamingAssistantIdRef.current
@@ -389,6 +389,14 @@ function App() {
     try { await deleteConversation(id); setConversations((prev) => prev.filter((c) => c.id !== id)); if (conversationState.type === 'persisted' && conversationState.id === id) newChat() } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }; setChatError(toErrorMessage(error)) }
   }
   function enterChatFromKnowledgeBase(knowledgeBase: Pick<KnowledgeBase, 'id' | 'name'>) { setConversationState({ type: 'draft', agentId: 'knowledge-base', knowledgeBaseId: knowledgeBase.id }); setMessages([]); setChatError(null); setSelectedCitation(null); setActiveModule('对话') }
+  function startChatWithAgent(agentId: string) {
+    if (streamingAssistantIdRef.current) void handleStop()
+    setConversationState({ type: 'draft', agentId, knowledgeBaseId: null })
+    setMessages([])
+    setChatError(null)
+    setSelectedCitation(null)
+    setActiveModule('对话')
+  }
   async function createKnowledgeBaseFromForm(name: string, description: string) { setKnowledgeError(null); const created = await createKnowledgeBase({ name, ...(description ? { description } : {}) }); setKnowledgeBases((current) => [created, ...current]); setSelectedKnowledgeBaseId(created.id); setShowCreateKnowledgeBase(false) }
   async function handleUpload(file: File | undefined) { if (!file || !selectedKnowledgeBaseId || isUploading) return; setIsUploading(true); setKnowledgeError(null); try { await uploadDocument(selectedKnowledgeBaseId, file); await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()]) } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); setIsUploading(false); return }; setKnowledgeError(toErrorMessage(error)); } finally { setIsUploading(false) } }
   async function handleDeleteKnowledgeBase(id: string) {
@@ -451,23 +459,41 @@ function App() {
   // 闸门：根据 authStatus 决定显示登录页 / 检查中 / 工作台。
   if (authStatus === 'checking') {
     return (
-      <main className="flex h-screen w-full items-center justify-center bg-app-bg text-app-muted">
+      <main className={cn('flex h-screen w-full items-center justify-center bg-app-bg text-app-muted', theme === 'dark' && 'dark')}>
         <p>加载中…</p>
       </main>
     )
   }
   if (authStatus === 'unauthenticated' || !currentUser) {
     return (
-      <LoginScreen
-        onLogin={handleLogin}
-        errorMessage={loginError}
-        busy={loginBusy}
-        appName={appName}
-      />
+      <main className={cn('h-screen w-full bg-app-bg', theme === 'dark' && 'dark')}>
+        <LoginScreen
+          onLogin={handleLogin}
+          errorMessage={loginError}
+          busy={loginBusy}
+          appName={appName}
+        />
+      </main>
     )
   }
 
   return <main className={cn('flex h-screen overflow-hidden text-app-text bg-app-bg', theme === 'dark' && 'dark')}>
+    <button
+      type="button"
+      className="fixed z-30 top-2.5 left-2.5 hidden max-[760px]:grid place-items-center w-10 h-10 rounded-lg border-0 bg-app-bg text-app-text shadow-sm hover:bg-app-hover"
+      onClick={() => setIsSidebarOpen(true)}
+      aria-label="打开侧边栏"
+    >
+      <Menu size={20} />
+    </button>
+    {isSidebarOpen && (
+      <button
+        type="button"
+        className="fixed inset-0 z-40 hidden max-[760px]:block border-0 bg-black/45"
+        onClick={() => setIsSidebarOpen(false)}
+        aria-label="关闭侧边栏遮罩"
+      />
+    )}
     <Sidebar
       appName={appName}
       avatarInitial={avatarInitial}
@@ -476,20 +502,21 @@ function App() {
       selectedKnowledgeBaseId={selectedKnowledgeBaseId}
       conversations={conversations}
       currentConversationId={conversationState.type === 'persisted' ? conversationState.id : null}
-      onSelectModule={selectModule}
-      onSelectKnowledgeBase={(id) => { setSelectedKnowledgeBaseId(id); setShowCreateKnowledgeBase(false) }}
-      onNewChat={newChat}
-      onOpenConversation={openConversation}
+      onSelectModule={(module) => { selectModule(module); setIsSidebarOpen(false) }}
+      onSelectKnowledgeBase={(id) => { setSelectedKnowledgeBaseId(id); setShowCreateKnowledgeBase(false); setIsSidebarOpen(false) }}
+      onNewChat={() => { newChat(); setIsSidebarOpen(false) }}
+      onOpenConversation={(id) => { void openConversation(id); setIsSidebarOpen(false) }}
       onDeleteConversation={handleDeleteConversation}
       onNewKnowledgeBase={() => { setSelectedKnowledgeBaseId(null); setShowCreateKnowledgeBase(true) }}
       theme={theme}
       onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
       currentUser={currentUser}
       onLogout={() => void handleLogout()}
+      mobileOpen={isSidebarOpen}
+      onCloseMobile={() => setIsSidebarOpen(false)}
     />
-    {activeModule === '对话' && <ChatWorkspace
+    {activeModule === '对话' && <AssistantChatWorkspace
       appShortName={appShortName}
-      question={question}
       messages={messages}
       isAsking={isAsking}
       isStreaming={isStreaming}
@@ -499,8 +526,7 @@ function App() {
       selectedAgentId={currentAgentId}
       defaultChatModel={capabilities.defaultChatModel}
       activeKnowledgeBase={activeKnowledgeBase}
-      onQuestionChange={setQuestion}
-      onSubmit={() => void submitQuestion()}
+      onSubmit={(text) => void submitQuestion(text)}
       onStop={() => void handleStop()}
       onRegenerate={handleRegenerate}
       onSwitchAgent={switchAgent}
@@ -509,7 +535,7 @@ function App() {
       onSelectCitation={setSelectedCitation}
     />}
     {activeModule === '知识库' && <KnowledgeBaseWorkspace selectedKnowledgeBase={selectedKnowledgeBase} documents={documents} isLoading={isKnowledgeLoading} isUploading={isUploading} showCreate={showCreateKnowledgeBase} error={knowledgeError} capabilities={capabilities} onCreate={createKnowledgeBaseFromForm} onBack={() => { setSelectedKnowledgeBaseId(null); setShowCreateKnowledgeBase(false) }} onEnterChat={enterChatFromKnowledgeBase} onUpload={handleUpload} onDeleteDocument={handleDeleteDocument} onDeleteKnowledgeBase={handleDeleteKnowledgeBase} />}
-    {activeModule === '能力' && <SkillsWorkspace onStartChat={(agentId) => { void switchAgent(agentId); setActiveModule('对话'); newChat() }} />}
+    {activeModule === '能力' && <SkillsWorkspace onStartChat={startChatWithAgent} />}
     {selectedCitation && <CitationPanel citation={selectedCitation} onClose={() => setSelectedCitation(null)} />}
   </main>
 }

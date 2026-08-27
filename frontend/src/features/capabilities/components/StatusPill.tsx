@@ -33,7 +33,7 @@ export function StatusPill(props: {
     <span
       title={title}
       className={cn(
-        'inline-flex items-center gap-1 px-1.5 h-[20px] text-[10.5px] leading-none font-medium border rounded-[3px] app-tnum',
+        'inline-flex items-center gap-1 px-2 h-[22px] text-[11px] leading-none font-medium border rounded-full app-tnum',
         uppercase && 'uppercase tracking-[0.04em]',
         TONE_CLASS[tone],
         className,

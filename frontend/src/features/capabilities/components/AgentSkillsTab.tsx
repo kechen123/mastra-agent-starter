@@ -65,7 +65,7 @@ export function AgentSkillsTab({ agent, skills }: AgentSkillsTabProps) {
   return (
     <div className="grid gap-5">
       <SectionHeader
-        label="Skills"
+        label="已绑定技能"
         count={resolved.length}
         trailing={
           <input
@@ -74,7 +74,7 @@ export function AgentSkillsTab({ agent, skills }: AgentSkillsTabProps) {
             onChange={(event) => setQuery(event.target.value)}
             placeholder="筛选已绑定技能…"
             aria-label="筛选已绑定技能"
-            className="h-[26px] w-[180px] py-0.5 px-2 text-[12px] text-app-text bg-app-bg border border-app-border-strong rounded-[3px] outline-0 placeholder:text-app-muted"
+            className="h-9 w-[220px] px-3 text-[13px] text-app-text bg-app-surface border-0 rounded-lg outline-none placeholder:text-app-muted"
           />
         }
       />
@@ -86,17 +86,17 @@ export function AgentSkillsTab({ agent, skills }: AgentSkillsTabProps) {
           description="Skill 由后端 agent_skill_bindings 表维护，可通过 bind/unbind API 调整。"
         />
       ) : filtered.length === 0 ? (
-        <p className="m-0 text-[12px] text-app-muted">没有匹配的技能。</p>
+        <p className="m-0 text-[13px] text-app-muted">没有匹配的技能。</p>
       ) : (
         <ul className="m-0 p-0 list-none grid">
           {filtered.map((skill) => (
             <li
               key={skill.id}
-              className="grid grid-cols-[200px_1fr] gap-3 py-3 border-b border-app-divider last:border-b-0"
+              className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-3 md:gap-4 py-4 border-b border-app-divider last:border-b-0"
             >
               <div className="grid gap-1 min-w-0">
-                <span className="text-[13px] font-medium text-app-text truncate">{skill.name}</span>
-                <span className="app-mono text-[11.5px] text-app-muted truncate">{skill.id}</span>
+                <span className="text-[14px] font-medium text-app-text truncate">{skill.name}</span>
+                <span className="app-mono text-[12px] text-app-muted truncate">{skill.id}</span>
                 <div className="flex flex-wrap items-center gap-1 mt-0.5">
                   <StatusPill tone={SOURCE_TONE[skill.source]}>{SOURCE_LABEL[skill.source]}</StatusPill>
                   <StatusPill tone={COMPAT_TONE[skill.compatibility]} uppercase>
@@ -106,14 +106,14 @@ export function AgentSkillsTab({ agent, skills }: AgentSkillsTabProps) {
                 </div>
               </div>
               <div className="grid gap-1.5 min-w-0">
-                <p className="m-0 text-[12.5px] text-app-muted leading-[1.55]">{skill.description}</p>
+                <p className="m-0 text-[13.5px] text-app-muted leading-6">{skill.description}</p>
                 {skill.allowedTools && skill.allowedTools.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] uppercase tracking-[0.04em] text-app-muted">tools</span>
+                    <span className="text-[12px] text-app-muted">工具</span>
                     {skill.allowedTools.map((toolId) => (
                       <span
                         key={toolId}
-                        className="app-mono inline-flex items-center px-1.5 h-[20px] text-[10.5px] text-app-text bg-app-surface-muted border border-app-divider rounded-[3px]"
+                        className="app-mono inline-flex items-center px-2 h-[22px] text-[11px] text-app-text bg-app-surface-muted rounded-full"
                       >
                         {toolId}
                       </span>

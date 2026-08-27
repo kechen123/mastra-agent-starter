@@ -16,11 +16,11 @@ export function SectionHeader(props: {
 }) {
   const { label, count, trailing, className } = props;
   return (
-    <div className={cn('flex items-center justify-between gap-3 pb-2 border-b border-app-divider', className)}>
+    <div className={cn('flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-app-divider', className)}>
       <div className="flex items-baseline gap-2 min-w-0">
-        <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-app-muted">{label}</span>
+        <span className="text-[14px] font-medium text-app-text">{label}</span>
         {typeof count === 'number' && (
-          <span className="text-[11px] app-tnum text-app-muted">{count}</span>
+          <span className="text-[12px] app-tnum text-app-muted">{count}</span>
         )}
       </div>
       {trailing && <div className="flex items-center gap-1.5 shrink-0">{trailing}</div>}

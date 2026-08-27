@@ -20,13 +20,13 @@ export function EmptyState(props: {
   return (
     <div
       className={cn(
-        'grid place-items-center gap-2.5 py-9 px-6 border border-dashed border-app-border-strong rounded-md text-app-muted text-center',
+        'grid place-items-center gap-2.5 py-12 px-6 bg-app-surface-muted rounded-2xl text-app-muted text-center',
         className,
       )}
     >
-      <Icon size={20} strokeWidth={1.5} />
-      <strong className="text-[13px] font-semibold text-app-text">{title}</strong>
-      {description && <p className="m-0 max-w-md text-[12.5px] leading-[1.6]">{description}</p>}
+      <span className="grid place-items-center w-10 h-10 rounded-full bg-app-bg"><Icon size={19} strokeWidth={1.7} /></span>
+      <strong className="text-[15px] font-semibold text-app-text">{title}</strong>
+      {description && <p className="m-0 max-w-md text-[14px] leading-6">{description}</p>}
       {action && <div className="mt-1">{action}</div>}
     </div>
   );

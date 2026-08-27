@@ -67,26 +67,26 @@ export function AgentDetail({
   const resolvedSkillCount = agent.boundSkillIds.filter((id) => skills.some((s) => s.id === id)).length;
 
   const tabs: Array<{ id: TabId; label: string; count?: number }> = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'tools', label: 'Tools', count: resolvedToolCount },
-    { id: 'skills', label: 'Skills', count: resolvedSkillCount },
-    { id: 'instructions', label: 'Instructions' },
-    { id: 'marketplace', label: 'Marketplace', count: skills.length },
+    { id: 'overview', label: '概览' },
+    { id: 'tools', label: '工具', count: resolvedToolCount },
+    { id: 'skills', label: '技能', count: resolvedSkillCount },
+    { id: 'instructions', label: '系统提示' },
+    { id: 'marketplace', label: '技能市场', count: skills.length },
   ];
 
   return (
     <section className="flex-1 min-w-0 min-h-0 grid grid-rows-[auto_auto_1fr] bg-app-bg" aria-label={`Agent 详情：${agent.name}`}>
-      <header className="sticky top-0 z-10 grid gap-1.5 px-6 pt-4 pb-3 border-b border-app-divider bg-app-surface">
-        <div className="flex items-start justify-between gap-4">
+      <header className="sticky top-0 z-10 grid gap-1.5 px-6 max-[760px]:pl-14 sm:px-8 pt-5 pb-4 bg-app-bg/95 backdrop-blur-xl">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="grid gap-1 min-w-0">
             <div className="flex items-baseline gap-2 min-w-0">
-              <h2 className="m-0 text-[16px] font-semibold tracking-[-0.01em] text-app-text truncate">
+              <h2 className="m-0 text-[20px] font-semibold tracking-[-0.025em] text-app-text truncate">
                 {agent.name}
               </h2>
-              <span className="app-mono text-[11.5px] text-app-muted shrink-0">{agent.id}</span>
+              <span className="app-mono text-[12px] text-app-muted shrink-0">{agent.id}</span>
             </div>
             {agent.description && (
-              <p className="m-0 text-[12.5px] text-app-muted leading-[1.55] max-w-[640px]">
+              <p className="m-0 text-[13.5px] text-app-muted leading-6 max-w-[680px]">
                 {agent.description}
               </p>
             )}
@@ -95,10 +95,10 @@ export function AgentDetail({
             type="button"
             onClick={() => onStartChat(agent.id)}
             className={cn(
-              'inline-flex items-center gap-1.5 h-[30px] px-3 text-[12.5px] font-medium',
-              'text-app-surface bg-app-text border border-app-text rounded-[3px] cursor-pointer',
-              'transition-opacity hover:opacity-90',
-              'focus-visible:outline-none focus-visible:opacity-90 focus-visible:border-focus-border',
+              'inline-flex items-center gap-2 h-9 px-3.5 text-[13px] font-medium',
+              'text-app-bg bg-app-text border-0 rounded-lg cursor-pointer',
+              'transition-[transform,opacity] duration-150 active:scale-[0.98] hover:opacity-90',
+              'focus-visible:outline-none focus-visible:opacity-90 focus-visible:border-focus-border max-[720px]:w-full max-[720px]:justify-center',
             )}
             title={`在对话页使用 ${agent.name}`}
           >
@@ -108,15 +108,15 @@ export function AgentDetail({
         </div>
       </header>
 
-      <TabBar tabs={tabs} active={tab} onChange={setUserTab} className="px-2" />
+      <TabBar tabs={tabs} active={tab} onChange={setUserTab} className="px-6 sm:px-8" />
 
       <div
         id={`tab-panel-${tab}`}
         role="tabpanel"
         aria-label={tabs.find((t) => t.id === tab)?.label}
-        className="overflow-y-auto app-scroll px-7 py-5"
+        className="overflow-y-auto app-scroll px-6 sm:px-8 py-6"
       >
-        <div className="max-w-[920px]">
+        <div className="w-full max-w-[860px] mx-auto">
           {tab === 'overview' && (
             <AgentOverviewTab
               agent={agent}

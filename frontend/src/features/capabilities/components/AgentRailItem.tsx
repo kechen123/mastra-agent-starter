@@ -27,22 +27,22 @@ export function AgentRailItem(props: {
       aria-selected={selected}
       onClick={() => onSelect(agent.id)}
       className={cn(
-        'group relative flex flex-col gap-1 w-full py-2 pl-3.5 pr-2.5 text-left cursor-pointer',
-        'border-b border-app-divider bg-transparent border-x-0 border-t-0',
+        'group relative flex flex-col gap-1.5 w-auto mx-2 mb-1 py-2.5 px-3 text-left cursor-pointer rounded-lg',
+        'border-0 bg-transparent',
         'transition-colors duration-150',
         'focus-visible:outline-none focus-visible:bg-app-row-hover',
-        selected ? 'bg-app-row-active' : 'hover:bg-app-row-hover',
+        selected ? 'bg-app-hover' : 'hover:bg-app-row-hover',
       )}
     >
       <span
         aria-hidden="true"
         className={cn(
-          'absolute left-0 top-0 bottom-0 w-[2px] transition-opacity',
+          'absolute left-0 top-2 bottom-2 w-[2px] rounded-full transition-opacity',
           selected ? 'bg-app-text opacity-100' : 'opacity-0',
         )}
       />
       <span className="flex items-center gap-1.5 min-w-0">
-        <span className="truncate text-[13px] font-medium text-app-text">{agent.name}</span>
+        <span className="truncate text-[14px] font-medium text-app-text">{agent.name}</span>
         {agent.capabilities.knowledgeBase && (
           <span
             title="需要绑定知识库"
@@ -53,7 +53,7 @@ export function AgentRailItem(props: {
           </span>
         )}
       </span>
-      <span className="flex items-center gap-2.5 text-[11px] text-app-muted app-tnum">
+      <span className="flex items-center gap-2.5 text-[12px] text-app-muted app-tnum">
         <span className="app-mono truncate">{agent.id}</span>
         <span className="ml-auto flex items-center gap-2 shrink-0">
           <span className="inline-flex items-center gap-1">

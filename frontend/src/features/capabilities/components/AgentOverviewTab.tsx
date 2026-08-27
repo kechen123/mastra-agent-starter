@@ -26,8 +26,8 @@ export function AgentOverviewTab({ agent, defaultChatModel, tools, skills }: Age
   return (
     <div className="grid gap-7">
       <section>
-        <SectionHeader label="Meta" />
-        <dl className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-2 mt-3 text-[12.5px]">
+        <SectionHeader label="基本信息" />
+        <dl className="grid grid-cols-[112px_1fr] gap-x-4 gap-y-3 mt-4 text-[14px]">
           <dt className="text-app-muted">名称</dt>
           <dd className="m-0 text-app-text">{agent.name}</dd>
           <dt className="text-app-muted">ID</dt>
@@ -35,7 +35,7 @@ export function AgentOverviewTab({ agent, defaultChatModel, tools, skills }: Age
           <dt className="text-app-muted">模型</dt>
           <dd className="m-0">
             <span className="app-mono text-app-text">{defaultChatModel}</span>
-            <span className="ml-2 text-[11.5px] text-app-muted">默认聊天模型</span>
+            <span className="ml-2 text-[12px] text-app-muted">默认聊天模型</span>
           </dd>
           <dt className="text-app-muted">描述</dt>
           <dd className="m-0 text-app-text leading-[1.6]">
@@ -45,15 +45,15 @@ export function AgentOverviewTab({ agent, defaultChatModel, tools, skills }: Age
       </section>
 
       <section>
-        <SectionHeader label="Capabilities" />
-        <div className="mt-3 border border-app-divider rounded-md">
+        <SectionHeader label="能力支持" />
+        <div className="mt-4 overflow-hidden bg-app-surface rounded-xl">
           <CapabilityMatrix capabilities={agent.capabilities} />
         </div>
       </section>
 
       <section>
-        <SectionHeader label="Stats" />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 mt-3">
+        <SectionHeader label="绑定情况" />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
           <StatTile icon={Wrench} label="已绑定工具" value={resolvedTools.length} tone="info" />
           <StatTile icon={Layers} label="已绑定技能" value={resolvedSkills.length} tone="success" />
           <StatTile
@@ -82,9 +82,9 @@ function StatTile(props: {
 }) {
   const { icon: Icon, label, value, tone } = props;
   return (
-    <div className="grid grid-cols-[24px_1fr_auto] items-center gap-2 px-3 py-2.5 border border-app-divider rounded-md bg-app-surface">
-      <Icon size={14} strokeWidth={2} className="text-app-muted" aria-hidden="true" />
-      <span className="text-[11.5px] text-app-muted uppercase tracking-[0.04em]">{label}</span>
+    <div className="grid grid-cols-[24px_1fr_auto] items-center gap-2 px-3.5 py-3.5 rounded-xl bg-app-surface">
+      <Icon size={16} strokeWidth={1.9} className="text-app-muted" aria-hidden="true" />
+      <span className="text-[12.5px] text-app-muted">{label}</span>
       <StatusPill tone={tone} className="justify-self-end">
         {value}
       </StatusPill>

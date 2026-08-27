@@ -11,16 +11,17 @@
  * 散落硬编码颜色值。深色主题通过 `.dark` 类覆盖同名 token。
  */
 @theme {
-  --color-app-bg: #fbfbfa;
+  --color-app-bg: #ffffff;
   --color-app-surface: #fff;
-  --color-app-surface-muted: #f5f5f3;
-  --color-app-hover: #f0f0ee;
-  --color-app-text: #171717;
-  --color-app-muted: #777773;
-  --color-app-border: #e5e5e1;
-  --color-app-border-strong: #d8d8d3;
-  --color-app-divider: #efeeec;
-  --color-app-row-hover: #f7f7f5;
+  --color-app-sidebar: #f9f9f9;
+  --color-app-surface-muted: #f4f4f4;
+  --color-app-hover: #ececec;
+  --color-app-text: #1f1f1f;
+  --color-app-muted: #6f6f6f;
+  --color-app-border: #e5e5e5;
+  --color-app-border-strong: #d8d8d8;
+  --color-app-divider: #ececec;
+  --color-app-row-hover: #f0f0f0;
   --color-app-danger: #d94b4b;
   --color-app-info: #2563eb;
   --color-app-warning: #d97706;
@@ -42,23 +43,58 @@
 }
 
 .dark {
-  --color-app-bg: #08090b;
-  --color-app-surface: #0f1216;
-  --color-app-surface-muted: #161a1f;
-  --color-app-hover: #1d232a;
-  --color-app-text: #e7eaee;
-  --color-app-muted: #8a929c;
-  --color-app-border: #1f262d;
-  --color-app-border-strong: #2c343d;
-  --color-app-divider: #1a2026;
-  --color-app-row-hover: #141a20;
+  --color-app-bg: #212121;
+  --color-app-surface: #2f2f2f;
+  --color-app-sidebar: #171717;
+  --color-app-surface-muted: #303030;
+  --color-app-hover: #2f2f2f;
+  --color-app-text: #ececec;
+  --color-app-muted: #b4b4b4;
+  --color-app-border: #3a3a3a;
+  --color-app-border-strong: #4a4a4a;
+  --color-app-divider: #303030;
+  --color-app-row-hover: #2a2a2a;
 
   /* Dark theme：低对比的中性灰，绝不接近纯白。 */
-  --color-focus-ring: rgba(180, 192, 204, 0.32);
-  --color-focus-border: #6b7280;
+  --color-focus-ring: rgba(220, 220, 230, 0.22);
+  --color-focus-border: #5b5b62;
+}
+
+.app-chat-canvas {
+  background: var(--color-app-bg);
 }
 
 * { box-sizing: border-box; }
+
+/*
+ * Keep native controls and document defaults in Tailwind's base layer.
+ * Component utilities must be able to override these values; placing this
+ * reset outside a layer would make a plain selector beat text/margin utilities.
+ */
+@layer base {
+  button,
+  input,
+  textarea,
+  select {
+    font-family: inherit;
+    color: inherit;
+  }
+
+  button {
+    appearance: none;
+  }
+
+  input,
+  textarea,
+  select {
+    appearance: none;
+  }
+
+  h1, h2, h3, h4, h5, h6, p, ul, ol, dl, dd {
+    margin-block-start: 0;
+    margin-block-end: 0;
+  }
+}
 
 html, body, #root {
   width: 100%;
@@ -73,11 +109,11 @@ body {
   font-feature-settings: "cv11", "ss01", "ss03";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-size: 16px;
 }
 
-
-button, textarea { font: inherit; }
-button { cursor: pointer; }
+button:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
 
 /**
  * 全局可访问性：所有可交互元素使用统一的 focus ring（默认兜底）。
@@ -94,9 +130,9 @@ button { cursor: pointer; }
  * input / textarea / select 自带 border，focus 时不另加 outline，避免双层边框。
  * 想在子元素聚焦时增强外层容器边框（如 Composer），用 :focus-within 处理。
  */
-:where(button, a, [tabindex]):focus-visible {
-  outline: 1px solid var(--color-focus-ring);
-  outline-offset: 0;
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
 }
 
 /**
@@ -112,7 +148,7 @@ button { cursor: pointer; }
   scrollbar-color: var(--color-app-border-strong) transparent;
   scrollbar-width: thin;
 }
-.app-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.app-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .app-scroll::-webkit-scrollbar-track { background: transparent; }
 .app-scroll::-webkit-scrollbar-thumb {
   background: var(--color-app-border-strong);
@@ -140,4 +176,13 @@ button { cursor: pointer; }
 @keyframes app-loading-dot {
   0%, 100% { transform: translateY(0); opacity: 0.35; }
   50% { transform: translateY(-3px); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

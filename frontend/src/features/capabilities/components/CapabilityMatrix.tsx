@@ -29,10 +29,10 @@ export function CapabilityMatrix(props: { capabilities: AgentCapabilities }) {
         return (
           <div
             key={row.key as string}
-            className="grid grid-cols-[120px_1fr_auto] items-center gap-3 py-2.5 border-b border-app-divider last:border-b-0"
+            className="grid grid-cols-[1fr_auto] sm:grid-cols-[120px_1fr_auto] items-center gap-2 sm:gap-4 px-4 py-3.5 border-b border-app-divider last:border-b-0"
           >
-            <span className="text-[12.5px] font-medium text-app-text">{row.label}</span>
-            <span className="text-[12px] text-app-muted leading-snug">{row.hint}</span>
+            <span className="text-[14px] font-medium text-app-text">{row.label}</span>
+            <span className="col-span-2 sm:col-span-1 text-[13px] text-app-muted leading-5">{row.hint}</span>
             <StatusPill tone={enabled ? 'success' : 'muted'} className="justify-self-end">
               {enabled ? (
                 <>

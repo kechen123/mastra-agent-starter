@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Sparkles } from 'lucide-react';
 import type { LoginScreenProps } from '../types';
 
 /**
@@ -29,16 +30,23 @@ export function LoginScreen(props: LoginScreenProps) {
   }
 
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-app-bg text-app-text">
+    <div className="flex h-full w-full items-center justify-center bg-app-bg text-app-text">
       <form
         onSubmit={handleSubmit}
-        className="flex w-[360px] max-w-[92vw] flex-col gap-4 rounded-xl border border-app-border bg-app-surface p-6 shadow-md"
+        className="flex w-[400px] max-w-[92vw] flex-col gap-5 p-6"
         autoComplete="on"
         data-testid="login-screen"
       >
-        <h1 className="text-lg font-semibold leading-tight">{appName}</h1>
-        <p className="text-xs leading-snug text-app-muted">请使用本地账号登录。</p>
-        <label className="grid gap-1 text-xs">
+        <div className="grid place-items-center gap-3 mb-2 text-center">
+          <span className="grid place-items-center w-11 h-11 rounded-full bg-app-text text-app-bg">
+            <Sparkles size={19} strokeWidth={2.1} />
+          </span>
+          <h1 className="m-0 text-[24px] font-semibold tracking-[-0.03em] text-app-text">
+            {appName}
+          </h1>
+        </div>
+        <p className="text-[14px] leading-6 text-app-muted text-center m-0">登录后继续使用智能体工作台</p>
+        <label className="grid gap-2 text-[13px]">
           <span className="text-app-muted">用户名</span>
           <input
             type="text"
@@ -48,10 +56,10 @@ export function LoginScreen(props: LoginScreenProps) {
             required
             minLength={3}
             maxLength={64}
-            className="rounded-md border border-app-border-strong bg-app-bg px-3 py-2 text-sm text-app-text outline-none"
+            className="h-12 rounded-xl border border-app-border-strong bg-app-surface px-3.5 text-[15px] text-app-text outline-none focus-visible:border-focus-border"
           />
         </label>
-        <label className="grid gap-1 text-xs">
+        <label className="grid gap-2 text-[13px]">
           <span className="text-app-muted">密码</span>
           <input
             type="password"
@@ -61,18 +69,18 @@ export function LoginScreen(props: LoginScreenProps) {
             required
             minLength={12}
             maxLength={128}
-            className="rounded-md border border-app-border-strong bg-app-bg px-3 py-2 text-sm text-app-text outline-none"
+            className="h-12 rounded-xl border border-app-border-strong bg-app-surface px-3.5 text-[15px] text-app-text outline-none focus-visible:border-focus-border"
           />
         </label>
         {errorMessage && (
-          <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          <p className="rounded-md border border-app-danger/40 bg-app-danger/[0.08] px-3 py-2 text-[12px] text-app-danger">
             {errorMessage}
           </p>
         )}
         <button
           type="submit"
           disabled={busy || username.trim().length < 3 || password.length < 12}
-          className="rounded-md border border-app-text bg-app-text py-2 text-sm font-medium text-app-surface transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:opacity-90 focus-visible:border-focus-border"
+          className="h-12 rounded-xl border-0 bg-app-text text-[15px] font-medium text-app-bg transition-[transform,opacity] duration-150 active:scale-[0.99] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? '登录中…' : '登录'}
         </button>

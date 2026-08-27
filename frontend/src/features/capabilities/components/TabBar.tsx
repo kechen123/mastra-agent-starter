@@ -18,7 +18,7 @@ export function TabBar<T extends string>(props: {
   return (
     <div
       role="tablist"
-      className={cn('flex items-stretch gap-0 h-[33px] border-b border-app-divider bg-app-surface', className)}
+      className={cn('flex items-stretch gap-1 h-11 border-b border-app-divider bg-app-bg overflow-x-auto app-scroll', className)}
     >
       {tabs.map((tab) => {
         const selected = tab.id === active;
@@ -32,25 +32,25 @@ export function TabBar<T extends string>(props: {
             disabled={tab.disabled}
             onClick={() => onChange(tab.id)}
             className={cn(
-              'relative grid place-items-center px-3.5 text-[12.5px] bg-transparent border-0 border-r border-app-divider cursor-pointer',
+              'relative grid place-items-center px-3 text-[13.5px] whitespace-nowrap bg-transparent border-0 cursor-pointer',
               'transition-colors duration-150',
               'focus-visible:outline-none focus-visible:bg-app-hover',
               selected
-                ? 'text-app-text font-semibold'
-                : 'text-app-muted hover:text-app-text hover:bg-app-hover',
+                ? 'text-app-text font-medium'
+                : 'text-app-muted hover:text-app-text',
               tab.disabled && 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-app-muted',
             )}
           >
             <span className="flex items-center gap-1.5">
               <span>{tab.label}</span>
               {typeof tab.count === 'number' && (
-                <span className={cn('text-[10.5px] app-tnum', selected ? 'text-app-text' : 'text-app-muted')}>
+                <span className={cn('text-[11px] app-tnum', selected ? 'text-app-text' : 'text-app-muted')}>
                   {tab.count}
                 </span>
               )}
             </span>
             {selected && (
-              <span className="absolute left-0 right-0 bottom-[-1px] h-[2px] bg-app-text" aria-hidden="true" />
+              <span className="absolute left-3 right-3 bottom-[-1px] h-[2px] rounded-full bg-app-text" aria-hidden="true" />
             )}
           </button>
         );
