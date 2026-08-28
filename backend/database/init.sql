@@ -74,7 +74,6 @@ CREATE TABLE knowledge_bases (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX knowledge_bases_workspace_idx ON knowledge_bases(workspace_id);
 
 CREATE TABLE documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -88,7 +87,6 @@ CREATE TABLE documents (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX documents_workspace_idx ON documents(workspace_id);
 CREATE INDEX documents_workspace_kb_idx ON documents(workspace_id, knowledge_base_id);
 
 CREATE TABLE document_chunks (
@@ -101,7 +99,6 @@ CREATE TABLE document_chunks (
   embedding REAL[],
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX document_chunks_workspace_idx ON document_chunks(workspace_id);
 CREATE INDEX document_chunks_workspace_kb_idx ON document_chunks(workspace_id, knowledge_base_id);
 CREATE INDEX document_chunks_document_idx ON document_chunks(document_id);
 
@@ -115,7 +112,6 @@ CREATE TABLE conversations (
   last_message_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX conversations_workspace_idx ON conversations(workspace_id);
 CREATE INDEX conversations_workspace_user_idx ON conversations(workspace_id, user_id);
 
 CREATE TABLE messages (
@@ -130,7 +126,6 @@ CREATE TABLE messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX messages_workspace_idx ON messages(workspace_id);
 CREATE INDEX messages_conversation_idx ON messages(conversation_id);
 CREATE INDEX messages_workspace_conversation_idx ON messages(workspace_id, conversation_id);
 
@@ -147,7 +142,6 @@ CREATE TABLE tool_executions (
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ
 );
-CREATE INDEX tool_executions_workspace_idx ON tool_executions(workspace_id);
 CREATE INDEX tool_executions_workspace_message_idx ON tool_executions(workspace_id, message_id);
 
 CREATE TABLE agent_skill_bindings (
@@ -157,5 +151,4 @@ CREATE TABLE agent_skill_bindings (
   bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, agent_id, skill_id)
 );
-CREATE INDEX agent_skill_bindings_workspace_idx ON agent_skill_bindings(workspace_id);
 CREATE INDEX agent_skill_bindings_skill_idx ON agent_skill_bindings(skill_id);
