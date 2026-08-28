@@ -463,15 +463,15 @@ function mapServiceErrorToResponse(error: unknown, ctx): Response {
 | 2 | A 的 conversationId；B `getConversationWithMessages` | null |
 | 3 | A 的 conversationId；B `updateConversation` / `deleteConversation` | 抛 `ResourceNotFoundError` |
 | 4 | A 的 conversationId；B `saveUserMessage` | 抛 `CrossWorkspaceAccessError` |
-| 5 | A 的 messageId；B `updateAssistantStreaming` / `finalizeAssistant` / `resetAssistantForRetry` / `convergeAssistantToFailed` | JOIN 影响 0 行 / null |
-| 6 | A 的 messageId；B `getMessageSnapshot` / `restoreAssistantFromSnapshot` | null |
-| 7 | A 的 conversationId；B `touchConversation` / `updateConversationTitle` / `maybeUpdateTitleFromFirstMessage` | 0 行 / 标题未变 |
+| 5 | A 的 messageId；B 调用 `updateAssistantStreaming` / `finalizeAssistant` / `resetAssistantForRetry` / `convergeAssistantToFailed` | 逐函数（per §3.1）：`updateAssistantStreaming` → 内部状态写，允许 0 行；`finalizeAssistant` → 用户资源写，抛 `ResourceNotFoundError`；`resetAssistantForRetry` / `convergeAssistantToFailed` → 内部幂等终态写，允许 0 行 |
+| 6 | A 的 messageId；B 调用 `getMessageSnapshot` / `restoreAssistantFromSnapshot` | `getMessageSnapshot` → 查询，返回 `null`；`restoreAssistantFromSnapshot` → 补偿性内部写，允许 0 行 |
+| 7 | A 的 conversationId；B `touchConversation` / `updateConversationTitle` / `maybeUpdateTitleFromFirstMessage` | 0 行 / 标题未变（内部写：touch / maybeUpdateTitle 内部幂等；updateConversationTitle 用户触发的内部写，静默返回，路由层做 404 兜底） |
 | 8 | A 的 kbId；B 给自己的 document 指定 A 的 kbId `createDocument` | 抛 `CrossWorkspaceAccessError` |
 | 9 | A 的 documentId；B 调用 `getDocument` / `updateDocumentStatus` / `deleteDocument` | `getDocument` → null（查询函数）；`updateDocumentStatus` → 抛 `ResourceNotFoundError`（用户资源写）；`deleteDocument` → 抛 `ResourceNotFoundError` |
 | 10 | A 的 documentId；B `ingestDocument`（document_chunks 写入） | 抛错 |
 | 11 | A 的 messageId；B `getToolExecutionsByMessage` | 0 行 |
 | 12 | A 的 conversationId；B `createToolExecution`（伪 messageId 仍指向 A 的 message） | 抛错 |
-| 13 | A 的 executionId；B `finalizeToolExecution` | 0 行（**user-triggered** UPDATE；抛 `ResourceNotFoundError`） |
+| 13 | A 的 executionId；B `finalizeToolExecution` | 抛 `ResourceNotFoundError` |
 | 14 | 同一 `(agentId, skillId)` 分别 `bindSkillToAgent(A, ...)` 与 `bindSkillToAgent(B, ...)` | 两行共存 |
 | 15 | A 调 `bindSkillToAgent`；B 调 `getAgentSkillBindings` | B 不见 A 的绑定 |
 | 16 | `removeInstalledSkill(id)` → 验证 `agent_skill_bindings WHERE skill_id=id` | 0 行（无孤儿） |
@@ -481,11 +481,16 @@ function mapServiceErrorToResponse(error: unknown, ctx): Response {
 
 | 函数 | 类别 | 期望 |
 |---|---|---|
-| `getConversation` / `getDocument` / `getKnowledgeBase` / `getMessageSnapshot` 等 | 查询 | 跨 workspace 返回 `null`；不抛错 |
+| `getConversation` / `getDocument` / `getKnowledgeBase` / `getMessageSnapshot` | 查询 | 跨 workspace 返回 `null`；不抛错 |
+| `getLastAssistantMessage` | 查询 | 跨 workspace 返回 `null`；不抛错 |
 | `listConversations` / `listDocuments` / `listKnowledgeBases` / `getAgentSkillBindings` / `getToolExecutionsByMessage` | 列表查询 | 跨 workspace 返回空数组 |
 | `updateConversation` / `deleteConversation` / `updateKnowledgeBase` / `deleteKnowledgeBase` / `updateDocumentStatus` / `deleteDocument` / `finalizeAssistant` / `finalizeToolExecution` | 用户资源操作 | 跨 workspace 抛 `ResourceNotFoundError` |
 | `saveUserMessage` / `saveAssistantMessage` / `createAssistantPending` / `createDocument` / `createToolExecution` / `bindSkillToAgent` | JOIN 父资源校验 | 父资源 workspace 不匹配 → 抛 `CrossWorkspaceAccessError` |
-| `resetAssistantForRetry` / `convergeAssistantToFailed` / `convergeRunningToolExecutions` | 内部幂等终态写入 | 允许 0 行；**显式** `// internal idempotent` 注释 |
+| `updateAssistantStreaming` | 内部状态写 | 允许 0 行；`// internal: rowCount may be 0` 注释 |
+| `touchConversation` | 内部状态写 | 允许 0 行；`// internal: rowCount may be 0` 注释 |
+| `resetAssistantForRetry` / `convergeAssistantToFailed` / `convergeRunningToolExecutions` / `maybeUpdateTitleFromFirstMessage` | 内部幂等终态写入 | 允许 0 行；`// internal idempotent` 注释 |
+| `restoreAssistantFromSnapshot` | 补偿性内部写 | 允许 0 行；`// internal compensating write` 注释 |
+| `updateConversationTitle` | 用户触发的内部写 | 跨 workspace 静默返回（0 行 / 标题未变），不抛错；调用方路由层做 404 兜底 |
 
 每个 case 必须 try/finally + `dropIsolatedSchema()`。
 
@@ -503,32 +508,48 @@ function mapServiceErrorToResponse(error: unknown, ctx): Response {
 
 ### 7.3 错误映射单元测试（`tests/unit/error-mapping.test.ts`，新建）
 
+**唯一的错误捕获边界**：`backend/src/server/error-mapping.ts`（**新建**模块）；`withAuthenticatedWorkspace` 在 `resolveAuthenticatedContext` + `handler()` **整个范围外** `try/catch`，由该模块把任何抛出的错误统一映射：
+
+| 错误类型 | HTTP 状态 | 响应体 |
+|---|---|---|
+| `ResourceNotFoundError` / `CrossWorkspaceAccessError` | 404 | `{ error_code: 'NOT_FOUND', message: '资源不存在。' }` |
+| `InputValidationError` | 422 | `{ error_code: 'INPUT_VALIDATION_FAILED', message }` |
+| `UserNotFoundError` / `WorkspaceContextError` / `WorkspaceIntegrityError` | **500** | `{ error_code: 'INTERNAL_ERROR', message: '服务端内部错误。' }`（**不**暴露内部细节；**不**映射为 401） |
+| 任意其它 `Error` | 500 | 同上 + `console.error` 记录原 stack |
+
+**身份解析阶段抛出的 Workspace 完整性错误（如 `WorkspaceIntegrityError`）也走这个 try/catch**，最终统一为 500 —— 不会泄漏到外层变 5xx raw HTML / 进程崩溃。
+
+测试矩阵：
+
 | # | 用例 | 期望 |
 |---|---|---|
-| 1 | `ResourceNotFoundError` → 路由映射 | 404 `{ error_code: 'NOT_FOUND', message: '资源不存在。' }` |
-| 2 | `CrossWorkspaceAccessError` → 路由映射 | 404，与 #1 **响应体完全一致**（字节级断言） |
-| 3 | `InputValidationError` → 路由映射 | 422 `{ error_code: 'INPUT_VALIDATION_FAILED', message }` |
-| 4 | `UserNotFoundError` → 路由映射 | **500**，**不**映射为 401（响应体不暴露内部细节） |
-| 5 | `WorkspaceContextError` → 路由映射 | **500**，**不**映射为 401 |
-| 6 | `WorkspaceIntegrityError` → 路由映射 | **500** |
-| 7 | 任意其它 `Error` → 路由映射 | 500 |
+| 1 | `ResourceNotFoundError` → `mapErrorToResponse(err)` | 404 `{ error_code: 'NOT_FOUND', message: '资源不存在。' }` |
+| 2 | `CrossWorkspaceAccessError` → `mapErrorToResponse(err)` | 404，**响应体与 #1 字节级一致** |
+| 3 | `InputValidationError` → `mapErrorToResponse(err)` | 422 `{ error_code: 'INPUT_VALIDATION_FAILED', message }` |
+| 4 | `UserNotFoundError` → `mapErrorToResponse(err)` | **500**，**不**为 401；不暴露内部细节 |
+| 5 | `WorkspaceContextError` → `mapErrorToResponse(err)` | **500** |
+| 6 | `WorkspaceIntegrityError` → `mapErrorToResponse(err)` | **500** |
+| 7 | 任意其它 `Error`（含 `TypeError` / `SyntaxError`） → `mapErrorToResponse(err)` | 500 |
+| 8 | `withAuthenticatedWorkspace` 包一个抛 `WorkspaceIntegrityError` 的 handler | 集成测试断言：响应 500；响应体形如 #6；handler 内部 stack 不外泄 |
 
 ### 7.4 Handler 级跨 Workspace 404 集成测试（`tests/integration/handler-isolation.test.ts`，新建）
 
-**不**依赖 Service 单测；**必须**启动真实 `withAuthenticatedWorkspace` 包装器 + 真实路由 handler，对比 Workspace A 持有与 Workspace B 持有时 HTTP 响应体字节级一致。
+**不**依赖 Service 单测；**必须**启动真实 `withAuthenticatedWorkspace` 包装器 + 真实路由 handler + 真实 `mapErrorToResponse`，对比 B 用 A 的真实资源 ID 与 B 用**随机不存在**的资源 ID 两种情况下的 HTTP 响应。
 
-每个 case：两个隔离 workspace（A、B）；A 创建资源；B 用同一资源 ID 发请求。
+每个 case：两个隔离 workspace（A、B）；A 创建资源；B 用同一个 B Session 发两种请求：
 
-| # | 资源类型 | 路由 | B 请求 | 期望响应 |
-|---|---|---|---|---|
-| 1 | conversation | `GET /api/conversations/:id`（或等价 handler） | 404 `{ error_code: 'NOT_FOUND', message: '资源不存在。' }` |
-| 2 | knowledge_base | `GET /api/knowledge-bases/:id` | 同上 |
-| 3 | document | `GET /api/documents/:id` | 同上 |
-| 4 | message | `GET /api/conversations/:id/messages`（B 持有的 conversationId 但 messageId 来自 A） | 同上 |
-| 5 | （额外）conversation | `DELETE /api/conversations/:id`（B 用 A 的 id） | 同上 |
-| 6 | （额外）document | `PATCH /api/documents/:id`（B 用 A 的 id） | 同上 |
+- **请求 1**：B 请求 A 持有的真实资源 ID；
+- **请求 2**：B 请求一个**随机 UUID**（DB 中不存在）；
 
-**字节级断言**：B 的 404 响应体**与** A 调真实资源不存在的 404 响应体**完全一致**（包括 `error_code` / `message` / JSON 字段顺序）。任何差异（消息文案不同、暴露存在性的痕迹）都直接挂测试。
+**字节级断言**：两种请求的 **status code** + **响应 headers** + **原始响应 body（raw text）** 完全一致。任何差异（消息文案、暴露存在性的痕迹）都直接挂测试。
+
+| # | 资源类型 | 真实路由 | 备注 |
+|---|---|---|---|
+| 1 | conversation | `DELETE /api/conversations/:id` | B 用 A 的 conversationId → 期望 DELETE B 也成功（影响 0 行），且 A 资源未删；用随机 UUID DELETE → 同样影响 0 行；两者响应一致 |
+| 2 | knowledge_base | `GET /api/knowledge-bases/:id` | B 用 A 的 kbId → 404；随机 UUID → 404；两者响应一致 |
+| 3 | document | `DELETE /api/documents/:id` | 同 #1（DELETE 语义） |
+| 4 | assistant message | `POST /api/messages/:assistantMessageId/regenerate` | B 用 A 的 assistantMessageId → 期望 404（regenerate 找不到 message）；随机 UUID → 同样 404；两者响应一致 |
+| 5 | message | `POST /api/messages/:id/stop` | **强约束**：B 用 A 的 messageId 发 stop → 期望 404；**额外断言** `executionRegistry.abortExecution(...)` **未被调用**（B 的 stop 路径必须先验证 workspace 归属再触发 abort；A 的内存执行继续运行不被中断）。用随机 UUID → 同样 404 + abortExecution 未被调用 |
 
 ### 7.5 沿用测试
 
@@ -540,23 +561,23 @@ function mapServiceErrorToResponse(error: unknown, ctx): Response {
 
 ## 8. 文档同步
 
-| 文档 | 修改 |
-|---|---|
-| `docs/architecture-v2.md` §5.1 | 不再提"迁移编号"；明确"init.sql 单文件包含 workspaces / workspace_members 与 6 张业务表 workspace_id" |
-| 同上 §5.3 | 删除"迁移顺序 8 步"；改为"删除数据库 + 跑 `npm run migrate` 一步到位"；删除 Legacy Workspace 段；删除 `LEGACY_WORKSPACE_OWNER_USER_ID` |
-| 同上 §5.4 | 验收项合并为：本节列出的"两个 workspace 跨租户读写隔离"测试清单（17 项） |
-| 同上 §8.6 | 改写为"`init.sql` 是 Schema 唯一来源；`npm run migrate` 执行 init.sql + 校验 checksum；不维护迁移链" |
-| 同上 G-2 | 改写为"`init.sql` 是 Schema 唯一来源；`npm run migrate` 通过 checksum 防漂移；无迁移链" |
-| `docs/development.md` § 数据库变更 | 删除"按序应用 migrations/*.sql"表述；改为"`npm run migrate` 执行单一 `init.sql` 并校验 SHA-256；不维护迁移链；如需调整 Schema，修改 `init.sql` 后删库重建即可"。与本 spec §2 / §5 完全对齐；旧"迁移编号 0001/0002/0003"段落整段删除。 |
-| `docs/implementation-plan.md` | PR-1.2 + PR-1.3 合并为单 PR；PR-1.4 **不**标记完成；PR-1.5 待本 PR 范围**完整**实现后才标完成 |
-| `README.md` / `frontend/README.md` | "项目初始化跑 `npm run migrate`（执行唯一 `init.sql`）"；不再提 0001/0002/0003 或迁移链 |
-| `.github/workflows/verify.yml` | 保留 `npm run migrate` 步骤；表述统一 |
+| 文档 | 实际改写（不留过时表述） | 覆盖说明 |
+|---|---|---|
+| `docs/architecture-v2.md` §5.1 | 重写：不提"迁移编号"；明确"init.sql 单文件包含 workspaces / workspace_members 与 6 张业务表 workspace_id" | 顶部加指针行 |
+| 同上 §5.3 | 重写：删除"迁移顺序 8 步"；改为"删除数据库 + 跑 `npm run migrate` 一步到位"；删除 Legacy Workspace 段；删除 `LEGACY_WORKSPACE_OWNER_USER_ID` | 同上 |
+| 同上 §5.4 | 重写：验收项合并为"两个 workspace 跨租户读写隔离"测试清单（17 项） | 同上 |
+| 同上 §8.6 | 重写："`init.sql` 是 Schema 唯一来源；`npm run migrate` 执行 init.sql + 校验 checksum；不维护迁移链" | 同上 |
+| 同上 G-2 | 重写："`init.sql` 是 Schema 唯一来源；`npm run migrate` 通过 checksum 防漂移；无迁移链" | 同上 |
+| `docs/development.md` § 数据库变更 | **整段重写**：删除"按序应用 migrations/*.sql"表述；改为"`npm run migrate` 执行单一 `init.sql` 并校验 SHA-256；不维护迁移链；如需调整 Schema，修改 `init.sql` 后删库重建即可"。与本 spec §2 / §5 完全对齐 | 顶部加指针行 |
+| `docs/implementation-plan.md` | 重写 PR-1.2 + PR-1.3 合并为单 PR；PR-1.4 仍标记"待实施"；PR-1.5 待本 PR 范围**完整**实现后才标完成 | 顶部加指针行（**不**覆盖 PR-1.4） |
+| `README.md` / `frontend/README.md` | 重写："项目初始化跑 `npm run migrate`（执行唯一 `init.sql`）"；不再提 0001/0002/0003 或迁移链 | 顶部加指针行 |
+| `.github/workflows/verify.yml` | 重写：保留 `npm run migrate` 步骤；表述统一为单一 init.sql | — |
 
-**历史修订记录保留原则**：任何**已存档**的修订日志（`docs/implementation-plan.md` 历史段、`docs/architecture-v2.md` 历史快照、commit message 历史）**保持原样**；**不**回溯改写。仅在每个文件的**当前生效小节顶部**标注一行：
+**覆盖说明指针行模板**（加在每个被改写文档的**当前生效小节顶部**）：
 
-> 已被本次单一 init.sql 裁决覆盖：迁移链 / Legacy Workspace / `LEGACY_WORKSPACE_OWNER_USER_ID` / PR-1.4 重命名 — 详见 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md`。
+> 已被本次裁决覆盖的范围：**迁移链 / Legacy Workspace / `LEGACY_WORKSPACE_OWNER_USER_ID`**。以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` 为准。**注意**：PR-1.4 `skills_installed → skill_packages` 重命名**不**在本裁决覆盖范围内，仍按原计划后续 PR 实施。
 
-让读者一眼看到"该文档的过时表述已经被裁决覆盖、以 Spec 为准"，同时保留审计轨迹。
+**修订日志保留原则**：仅**已经存档的历史段落**（如 `docs/implementation-plan.md` 旧的 PR-1.1 完成记录、`docs/architecture-v2.md` 旧版本快照、commit message 历史）保留原样供审计；**当前生效章节**必须按上表重写，不允许"只加覆盖说明不改正文"。
 
 ---
 
