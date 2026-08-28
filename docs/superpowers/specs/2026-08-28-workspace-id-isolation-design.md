@@ -490,7 +490,10 @@ function mapServiceErrorToResponse(error: unknown, ctx): Response {
 | `touchConversation` | 内部状态写 | 允许 0 行；`// internal: rowCount may be 0` 注释 |
 | `resetAssistantForRetry` / `convergeAssistantToFailed` / `convergeRunningToolExecutions` / `maybeUpdateTitleFromFirstMessage` | 内部幂等终态写入 | 允许 0 行；`// internal idempotent` 注释 |
 | `restoreAssistantFromSnapshot` | 补偿性内部写 | 允许 0 行；`// internal compensating write` 注释 |
-| `updateConversationTitle` | 用户触发的内部写 | 跨 workspace 静默返回（0 行 / 标题未变），不抛错；调用方路由层做 404 兜底 |
+| `updateConversationTitle` | 内部辅助写 | `maybeUpdateTitleFromFirstMessage` 的内部辅助，无独立用户路由；允许 0 行；`// internal helper for maybeUpdateTitle` 注释。用户主动改标题走 `updateConversation`（用户资源写，404 由它负责） |
+| `unbindSkillFromAgent` | 内部幂等解绑 | 允许 0 行（解绑不存在的 binding 不抛错，保留已通过的"幂等解绑"契约）；`// internal idempotent unbind` 注释 |
+| `createConversation` / `ingestDocument` | 父资源校验 | 父资源（KB）workspace 不匹配 → 抛 `CrossWorkspaceAccessError` |
+| `createKnowledgeBase` | 无父资源写入 | 直接写入当前 `workspaceId`；无需跨 workspace 校验 |
 
 每个 case 必须 try/finally + `dropIsolatedSchema()`。
 
@@ -545,11 +548,11 @@ function mapServiceErrorToResponse(error: unknown, ctx): Response {
 
 | # | 资源类型 | 真实路由 | 备注 |
 |---|---|---|---|
-| 1 | conversation | `DELETE /api/conversations/:id` | B 用 A 的 conversationId → 期望 DELETE B 也成功（影响 0 行），且 A 资源未删；用随机 UUID DELETE → 同样影响 0 行；两者响应一致 |
+| 1 | conversation | `DELETE /api/conversations/:id` | B 用 A 的 conversationId → 404；随机 UUID → 404；两者响应完全一致；**额外断言** A 的 conversation 仍存在于 DB（DELETE 未影响 0 行成功，而是抛错） |
 | 2 | knowledge_base | `GET /api/knowledge-bases/:id` | B 用 A 的 kbId → 404；随机 UUID → 404；两者响应一致 |
-| 3 | document | `DELETE /api/documents/:id` | 同 #1（DELETE 语义） |
-| 4 | assistant message | `POST /api/messages/:assistantMessageId/regenerate` | B 用 A 的 assistantMessageId → 期望 404（regenerate 找不到 message）；随机 UUID → 同样 404；两者响应一致 |
-| 5 | message | `POST /api/messages/:id/stop` | **强约束**：B 用 A 的 messageId 发 stop → 期望 404；**额外断言** `executionRegistry.abortExecution(...)` **未被调用**（B 的 stop 路径必须先验证 workspace 归属再触发 abort；A 的内存执行继续运行不被中断）。用随机 UUID → 同样 404 + abortExecution 未被调用 |
+| 3 | document | `DELETE /api/documents/:id` | 同 #1：404；响应一致；A 的 document 仍存在 |
+| 4 | assistant message | `POST /api/messages/:assistantMessageId/regenerate` | B 用 A 的 assistantMessageId → 404；随机 UUID → 404；两者响应一致 |
+| 5 | message | `POST /api/messages/:id/stop` | **强约束**：B 用 A 的 messageId 发 stop → 404；**额外断言** `executionRegistry.abortExecution(...)` **未被调用**（B 的 stop 路径必须先验证 workspace 归属再触发 abort；A 的内存执行继续运行不被中断）。用随机 UUID → 同样 404 + abortExecution 未被调用 |
 
 ### 7.5 沿用测试
 
