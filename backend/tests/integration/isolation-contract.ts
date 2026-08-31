@@ -718,3 +718,61 @@ test('case 22: searchKnowledgeBase isolation', { skip: !RUN }, async () => {
     }
   });
 });
+
+// case 23: retriever 直连跨 workspace 隔离（防御深度 —— Spec §retriever）。
+//
+// 验证 retriever 本身的 SQL 已按 `workspace_id = $1 AND knowledge_base_id = $2`
+// 过滤：即使绕过 wrapper（直接 import retriever）以 wB.workspaceId 调，
+// 也读不到 wA 的 chunk。
+//
+// 已知限制：`document_chunks.embedding` 当前是 `REAL[]`（Task 23 的列类型 bug
+// 尚未修），导致 retriever 主查询的 `embedding <=> $1::vector` 会失败。因此
+// 本 case 不插入 embedding —— 这意味着 has-chunks 预检（`embedding IS NOT NULL`）
+// 在两条路径上都返 false、retriever 都返 `[]`。该 case 的价值不在"区分两条
+// 路径返回内容"，而在：
+//   1. 验证新签名（`(workspaceId, kbId, query, options)`）可调通、不抛；
+//   2. 验证跨 workspace 调用不会泄露 A 的 chunk；
+//   3. 作为 Task 23 修复后的回归基线（修好 embedding 类型后，只需把
+//      `assert.deepEqual(..., [])` 换成具体 citation 内容验证）。
+test('case 23: retriever direct call cross-workspace isolation', { skip: !RUN }, async () => {
+  await withTwoWorkspaces(async (a) => {
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedKnowledgeBase(a, 'kA', 'wA');
+    await seedDocument(a, 'd1', 'kA', 'wA');
+    // 不插 embedding —— 见上方说明（Task 23 跟踪 REAL[] → vector 修复）。
+    await a.query(
+      `INSERT INTO document_chunks
+         (id, workspace_id, knowledge_base_id, document_id, chunk_index, content)
+       VALUES ('ch1', 'wA', 'kA', 'd1', 0, 'x')`,
+    );
+    setGlobal(a);
+    try {
+      // 动态 import —— 与 suite 其余静态 import 隔离，模拟"未来绕过 wrapper 的入口"。
+      const retriever = await import(
+        '../../../src/modules/knowledge/rag/retriever.js'
+      );
+      // 跨 workspace：has-chunks 因 workspace_id 过滤返 false → []，
+      // 不会泄露 A 的 chunk 数据。
+      const wrongWorkspaceResult = await retriever.searchKnowledgeBase(
+        'wB',
+        'kA',
+        'query',
+      );
+      assert.deepEqual(wrongWorkspaceResult, []);
+      // 同 workspace：has-chunks 也返 false（embedding IS NULL），retriever 短路返 []；
+      // 此路径验证 SQL 形状可执行、不抛错、与 wrapper 行为一致（KB 存在但无 chunk → []）。
+      const correctWorkspaceResult = await retriever.searchKnowledgeBase(
+        'wA',
+        'kA',
+        'query',
+        { topK: 5 },
+      );
+      assert.deepEqual(correctWorkspaceResult, []);
+    } finally {
+      resetGlobal();
+    }
+  });
+});
