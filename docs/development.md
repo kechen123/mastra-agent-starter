@@ -1,5 +1,7 @@
 # 开发文档
 
+> **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / 已应用迁移不可变 ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。
+
 ## 环境要求
 
 - Node.js 22+
@@ -163,9 +165,13 @@ npm run dev
 
 ### 数据库变更
 
-`backend/database/init.sql` 是 `0000-initial-schema` 基线。某个环境已经执行并记录该基线后，**不得再修改它**；后续 Schema 变更必须新增 `backend/database/migrations/<序号>-<名称>.sql`。
+`npm run migrate` 执行单一 `backend/database/init.sql`，并校验 SHA-256 checksum。本项目不维护迁移链；如需调整 Schema，直接修改 `init.sql`，然后：
 
-`npm run migrate` 会把已执行文件的 SHA-256 写入 `schema_migrations`。若修改已执行迁移，命令会失败，防止环境之间静默漂移。
+1. 备份现有数据（生产环境）；
+2. 删库；
+3. 重新跑 `npm run migrate`。
+
+重复执行 `npm run migrate` 在 checksum 一致时为幂等（`action='skipped'`）；checksum 不一致时为 `action='drift'` 并退出码 2。
 
 ### 新增 Agent / Tool / Skill / Route
 
