@@ -34,75 +34,73 @@ import {
   tryReserveConversationExecution,
 } from '../../../core/execution/controller.js';
 import { isUuid } from '../../../core/execution/sse.js';
+import { withAuthenticatedWorkspace } from '../../../modules/auth/workspace-context.js';
 
 export const askRoute = registerApiRoute('/ask', {
   method: 'POST',
   requiresAuth: true,
-  handler: async (context) => {
-    try {
-      const body = await context.req.json<unknown>();
-      if (!body || typeof body !== 'object' || Array.isArray(body)) {
-        return context.json({ message: '请求体必须是 JSON 对象。' }, 400);
-      }
-      const { conversationId, message } = body as Record<string, unknown>;
-      if (typeof conversationId !== 'string' || !isUuid(conversationId)) {
-        return context.json({ message: 'conversationId 格式不正确。' }, 400);
-      }
-      if (typeof message !== 'string' || message.trim().length === 0) {
-        return context.json({ message: '请输入问题。' }, 400);
-      }
-      if (message.trim().length > 2000) {
-        return context.json({ message: '问题不能超过 2000 个字符。' }, 400);
-      }
-
-      // 关键：必须在任何 DB 状态读取之前原子预占会话执行权。
-      // 同会话的另一 ask / regenerate 若已活跃，立即返回 409。
-      const reserved = tryReserveConversationExecution(conversationId);
-      if ('conflict' in reserved) {
-        return context.json({ message: reserved.conflict.message }, 409);
-      }
-
-      let assistantMessageId: string | null = null;
-      try {
-        // 锁内读取：history 一定是本次会话锁持有期间的快照，
-        // 不会被另一并发请求交错写入。
-        const { conversation, messages: history } = await getConversationWithMessages(conversationId);
-
-        await saveUserMessage(conversationId, message.trim());
-        await maybeUpdateTitleFromFirstMessage(conversationId, message.trim());
-
-        const assistantMessage = await createAssistantPending(conversationId);
-        assistantMessageId = assistantMessage.id;
-
-        bindAssistantMessageToExecution(conversationId, assistantMessage.id);
-
-        await updateAssistantStreaming(assistantMessage.id);
-
-        return buildAskStreamResponse({
-          assistantMessageId: assistantMessage.id,
-          conversationId,
-          agentId: conversation.agentId,
-          message: message.trim(),
-          knowledgeBaseId: conversation.knowledgeBaseId,
-          history,
-          abortSignal: reserved.controller.signal,
-        }, { logTag: 'ask' });
-      } catch (setupError) {
-        // setup 阶段失败：释放会话锁；若助手消息已创建，把它收敛为 failed。
-        cleanupConversationExecution(conversationId);
-        if (assistantMessageId) {
-          await convergeAssistantToFailed(assistantMessageId).catch((err) => {
-            console.error('setup 失败后收敛助手消息失败：', err);
-          });
-        }
-        throw setupError;
-      }
-    } catch (error) {
-      console.error('问答请求失败：', error);
-      if (error instanceof Error && error.message === '会话不存在。') {
-        return context.json({ message: '会话不存在。' }, 404);
-      }
-      return context.json({ message: '服务暂时不可用，请稍后重试。' }, 500);
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
+    const body = await context.req.json<unknown>();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return context.json({ message: '请求体必须是 JSON 对象。' }, 400);
     }
-  },
+    const { conversationId, message } = body as Record<string, unknown>;
+    if (typeof conversationId !== 'string' || !isUuid(conversationId)) {
+      return context.json({ message: 'conversationId 格式不正确。' }, 400);
+    }
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      return context.json({ message: '请输入问题。' }, 400);
+    }
+    if (message.trim().length > 2000) {
+      return context.json({ message: '问题不能超过 2000 个字符。' }, 400);
+    }
+
+    // 关键：必须在任何 DB 状态读取之前原子预占会话执行权。
+    // 同会话的另一 ask / regenerate 若已活跃，立即返回 409。
+    const reserved = tryReserveConversationExecution(conversationId);
+    if ('conflict' in reserved) {
+      return context.json({ message: reserved.conflict.message }, 409);
+    }
+
+    let assistantMessageId: string | null = null;
+    try {
+      // 锁内读取：history 一定是本次会话锁持有期间的快照，
+      // 不会被另一并发请求交错写入。null → 跨 workspace 访问 / 会话不存在 → 404。
+      const detail = await getConversationWithMessages(authCtx.workspaceId, conversationId);
+      if (!detail) {
+        return context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
+      }
+      const { conversation, messages: history } = detail;
+
+      await saveUserMessage(authCtx.workspaceId, conversationId, message.trim());
+      await maybeUpdateTitleFromFirstMessage(authCtx.workspaceId, conversationId, message.trim());
+
+      const assistantMessage = await createAssistantPending(authCtx.workspaceId, conversationId);
+      assistantMessageId = assistantMessage.id;
+
+      bindAssistantMessageToExecution(conversationId, assistantMessage.id);
+
+      await updateAssistantStreaming(authCtx.workspaceId, assistantMessage.id);
+
+      return buildAskStreamResponse({
+        workspaceId: authCtx.workspaceId,
+        assistantMessageId: assistantMessage.id,
+        conversationId,
+        agentId: conversation.agentId,
+        message: message.trim(),
+        knowledgeBaseId: conversation.knowledgeBaseId,
+        history,
+        abortSignal: reserved.controller.signal,
+      }, { logTag: 'ask' });
+    } catch (setupError) {
+      // setup 阶段失败：释放会话锁；若助手消息已创建，把它收敛为 failed。
+      cleanupConversationExecution(conversationId);
+      if (assistantMessageId) {
+        await convergeAssistantToFailed(authCtx.workspaceId, assistantMessageId).catch((err) => {
+          console.error('setup 失败后收敛助手消息失败：', err);
+        });
+      }
+      throw setupError;
+    }
+  }),
 });

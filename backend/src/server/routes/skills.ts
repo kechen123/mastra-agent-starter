@@ -17,6 +17,7 @@ import {
   type SkillPreview,
 } from '../../infrastructure/external-skills/market.js';
 import { assertSafeSkillName } from '@mastra/server/handlers/skills-sh-shared';
+import { withAuthenticatedWorkspace } from '../../modules/auth/workspace-context.js';
 
 /**
  * 解析并校验 `owner / repo / skillName` 三元组：
@@ -46,7 +47,7 @@ function parseSkillTriple(input: unknown): { owner: string; repo: string; skillN
 export const listSkillsRoute = registerApiRoute('/skills', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     await ensureSkillRegistryLoaded();
     const skills = listSkills();
     return context.json(
@@ -61,13 +62,13 @@ export const listSkillsRoute = registerApiRoute('/skills', {
         metadata: s.metadata,
       })),
     );
-  },
+  }),
 });
 
 export const getSkillRoute = registerApiRoute('/skills/:id', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     const skill = getSkill(id);
@@ -84,13 +85,13 @@ export const getSkillRoute = registerApiRoute('/skills/:id', {
       allowedTools: skill.allowedTools,
       metadata: skill.metadata,
     });
-  },
+  }),
 });
 
 export const searchMarketSkillsRoute = registerApiRoute('/skills/market/search', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     const query = context.req.query('q') ?? '';
     const limitRaw = context.req.query('limit');
     const limit = limitRaw ? Math.min(Math.max(Number.parseInt(limitRaw, 10) || 20, 1), 50) : 20;
@@ -103,13 +104,13 @@ export const searchMarketSkillsRoute = registerApiRoute('/skills/market/search',
       const message = err instanceof Error ? err.message : '搜索失败';
       return context.json({ message }, 502);
     }
-  },
+  }),
 });
 
 export const listPopularMarketSkillsRoute = registerApiRoute('/skills/market/popular', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     try {
       const results: MarketSkillInfo[] = await listPopularMarketSkills({ limit: 20 });
       return context.json({ results });
@@ -117,13 +118,13 @@ export const listPopularMarketSkillsRoute = registerApiRoute('/skills/market/pop
       const message = err instanceof Error ? err.message : '获取热门失败';
       return context.json({ message }, 502);
     }
-  },
+  }),
 });
 
 export const previewSkillRoute = registerApiRoute('/skills/market/preview', {
   method: 'POST',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     const body = await context.req.json<unknown>();
     const parsed = parseSkillTriple(body);
     if (!parsed) {
@@ -139,13 +140,13 @@ export const previewSkillRoute = registerApiRoute('/skills/market/preview', {
       const message = err instanceof Error ? err.message : '预览失败';
       return context.json({ message }, 502);
     }
-  },
+  }),
 });
 
 export const installSkillRoute = registerApiRoute('/skills/market/install', {
   method: 'POST',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     const body = await context.req.json<unknown>();
     const parsed = parseSkillTriple(body);
     if (!parsed) {
@@ -160,13 +161,13 @@ export const installSkillRoute = registerApiRoute('/skills/market/install', {
       const message = err instanceof Error ? err.message : '安装失败';
       return context.json({ message }, 502);
     }
-  },
+  }),
 });
 
 export const updateSkillRoute = registerApiRoute('/skills/:id/update', {
   method: 'POST',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     try {
@@ -180,13 +181,13 @@ export const updateSkillRoute = registerApiRoute('/skills/:id/update', {
       const message = err instanceof Error ? err.message : '更新失败';
       return context.json({ message }, 500);
     }
-  },
+  }),
 });
 
 export const removeSkillRoute = registerApiRoute('/skills/:id', {
   method: 'DELETE',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     try {
@@ -197,13 +198,13 @@ export const removeSkillRoute = registerApiRoute('/skills/:id', {
       const message = err instanceof Error ? err.message : '卸载失败';
       return context.json({ message }, 500);
     }
-  },
+  }),
 });
 
 export const bindSkillRoute = registerApiRoute('/skills/:id/bind', {
   method: 'POST',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     const body = await context.req.json<unknown>();
@@ -215,19 +216,19 @@ export const bindSkillRoute = registerApiRoute('/skills/:id/bind', {
       return context.json({ message: 'agentId 不能为空。' }, 400);
     }
     try {
-      await bindSkillToAgent(agentId.trim(), id);
+      await bindSkillToAgent(authCtx.workspaceId, agentId.trim(), id);
       return context.json({ message: '绑定成功。' });
     } catch (err) {
       const message = err instanceof Error ? err.message : '绑定失败';
       return context.json({ message }, 400);
     }
-  },
+  }),
 });
 
 export const unbindSkillRoute = registerApiRoute('/skills/:id/unbind', {
   method: 'POST',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     const body = await context.req.json<unknown>();
@@ -239,11 +240,11 @@ export const unbindSkillRoute = registerApiRoute('/skills/:id/unbind', {
       return context.json({ message: 'agentId 不能为空。' }, 400);
     }
     try {
-      await unbindSkillFromAgent(agentId.trim(), id);
+      await unbindSkillFromAgent(authCtx.workspaceId, agentId.trim(), id);
       return context.json({ message: '解绑成功。' });
     } catch (err) {
       const message = err instanceof Error ? err.message : '解绑失败';
       return context.json({ message }, 400);
     }
-  },
+  }),
 });

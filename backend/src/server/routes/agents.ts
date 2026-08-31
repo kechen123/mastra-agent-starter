@@ -1,15 +1,17 @@
 import { registerApiRoute } from '@mastra/core/server';
 import { listAgentDefinitions } from '../../core/agent/registry.js';
 import { getDatabasePool } from '../../infrastructure/database/pool.js';
+import { withAuthenticatedWorkspace } from '../../modules/auth/workspace-context.js';
 
 export const agentsRoute = registerApiRoute('/agents', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     const defs = listAgentDefinitions();
     const pool = getDatabasePool();
     const bindingsResult = await pool.query<{ agent_id: string; skill_id: string }>(
-      `SELECT agent_id, skill_id FROM agent_skill_bindings WHERE enabled = true`,
+      `SELECT agent_id, skill_id FROM agent_skill_bindings WHERE workspace_id = $1`,
+      [authCtx.workspaceId],
     );
     const bindingsMap = new Map<string, string[]>();
     for (const row of bindingsResult.rows) {
@@ -27,5 +29,5 @@ export const agentsRoute = registerApiRoute('/agents', {
         boundSkillIds: bindingsMap.get(d.id) ?? [],
       })),
     );
-  },
+  }),
 });

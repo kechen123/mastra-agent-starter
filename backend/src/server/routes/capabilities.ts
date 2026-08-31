@@ -6,6 +6,7 @@ import {
   resolveDefaultChatModelId,
   resolveDefaultChatModelInfo,
 } from '../../infrastructure/llm/registry.js';
+import { withAuthenticatedWorkspace } from '../../modules/auth/workspace-context.js';
 
 /**
  * 能力声明接口：返回前端所需的运行期开关、可用 Agent 列表与品牌信息。
@@ -24,7 +25,7 @@ import {
 export const capabilitiesRoute = registerApiRoute('/capabilities', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
     const parserConfig = getDocumentParserConfig();
     const defs = listAgentDefinitions();
     return context.json({
@@ -44,5 +45,5 @@ export const capabilitiesRoute = registerApiRoute('/capabilities', {
       defaultChatModel: resolveDefaultChatModelId(),
       llm: resolveDefaultChatModelInfo(),
     });
-  },
+  }),
 });

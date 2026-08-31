@@ -17,7 +17,6 @@
  */
 import { registerApiRoute } from '@mastra/core/server';
 import {
-  resolveCurrentUser,
   login,
   logout,
   MissingCredentialsError,
@@ -31,6 +30,7 @@ import {
   serializeSessionCookie,
 } from '../../infrastructure/auth/request.js';
 import { extractSessionTokenFromRequest } from '../../infrastructure/auth/local-auth-provider.js';
+import { withAuthenticatedWorkspace } from '../../modules/auth/workspace-context.js';
 
 function rawRequestFromContext(context: { req: { raw?: Request; header?: (n: string) => string | undefined } }): Request | null {
   const req = context.req as { raw?: Request };
@@ -109,21 +109,32 @@ export const loginRoute = registerApiRoute('/auth/login', {
 
 /**
  * GET /auth/me — requiresAuth。
- * 通过 Provider 鉴权后，Mastra 把当前用户对象放到 context 上（具体字段名
- * 因版本而异，这里以"先尝试 Provider 校验回传，再走 DB 二查"的兜底方式
- * 表达一致性）。
+ *
+ * 通过 Provider 鉴权后，从服务端 session 解析已认证身份上下文：
+ *   - `userId` / `username` 来自 `auth_sessions` + `app_users`；
+ *   - `workspaceId` 由 `ensurePersonalWorkspace` 服务端兜底创建；
+ *   - 任何请求 body / header / query 中伪造的 `workspaceId` 都会被忽略。
+ *
+ * 实现：本路由走 `withAuthenticatedWorkspace` 包装器。**所有
+ * `requiresAuth: true` 的业务路由都必须使用同一包装器**——这是 V2.3.6
+ * §5.1 的强约束，目的是让 PR-1.2 给业务表加 `workspace_id` 时所有写入
+ * 路径都能拿到可信的非空 `workspaceId`，而不是逐路由手写 401 映射。
  */
 export const meRoute = registerApiRoute('/auth/me', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
-    const request = getRequestFromContext(context);
-    if (!request) return context.json({ message: '请求异常。' }, 500);
-    const token = extractSessionTokenFromRequest(request);
-    const user = await resolveCurrentUser(token);
-    if (!user) return context.json({ message: '未登录或会话已失效。' }, 401);
-    return context.json({ user }, 200);
-  },
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
+    return context.json(
+      {
+        user: {
+          id: authCtx.userId,
+          username: authCtx.username,
+          workspaceId: authCtx.workspaceId,
+        },
+      },
+      200,
+    );
+  }),
 });
 
 /**

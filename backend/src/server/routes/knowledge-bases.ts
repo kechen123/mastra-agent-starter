@@ -6,6 +6,7 @@ import {
   listKnowledgeBases,
   updateKnowledgeBase,
 } from '../../modules/knowledge/service.js';
+import { withAuthenticatedWorkspace } from '../../modules/auth/workspace-context.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_NAME_LENGTH = 120;
@@ -14,73 +15,55 @@ const MAX_DESCRIPTION_LENGTH = 2_000;
 export const listKnowledgeBasesRoute = registerApiRoute('/knowledge-bases', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => context.json(await listKnowledgeBases()),
+  handler: withAuthenticatedWorkspace(async (authCtx, context) =>
+    context.json(await listKnowledgeBases(authCtx.workspaceId)),
+  ),
 });
 
 export const createKnowledgeBaseRoute = registerApiRoute('/knowledge-bases', {
   method: 'POST',
   requiresAuth: true,
-  handler: async (context) => {
-    try {
-      const input = validateCreateInput(await context.req.json<unknown>());
-      if ('message' in input) return context.json(input, 400);
-      return context.json(await createKnowledgeBase(input), 201);
-    } catch (error) {
-      return handleRouteError(context, error);
-    }
-  },
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
+    const input = validateCreateInput(await context.req.json<unknown>());
+    if ('message' in input) return context.json(input, 400);
+    return context.json(await createKnowledgeBase(authCtx.workspaceId, input), 201);
+  }),
 });
 
 export const getKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id', {
   method: 'GET',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
-    try {
-      const knowledgeBase = await getKnowledgeBase(id);
-      return knowledgeBase
-        ? context.json(knowledgeBase)
-        : context.json({ message: '知识库不存在。' }, 404);
-    } catch (error) {
-      return handleRouteError(context, error);
-    }
-  },
+    const knowledgeBase = await getKnowledgeBase(authCtx.workspaceId, id);
+    return knowledgeBase
+      ? context.json(knowledgeBase)
+      : context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
+  }),
 });
 
 export const updateKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id', {
   method: 'PATCH',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
-    try {
-      const input = validateUpdateInput(await context.req.json<unknown>());
-      if ('message' in input) return context.json(input, 400);
-      const knowledgeBase = await updateKnowledgeBase(id, input);
-      return knowledgeBase
-        ? context.json(knowledgeBase)
-        : context.json({ message: '知识库不存在。' }, 404);
-    } catch (error) {
-      return handleRouteError(context, error);
-    }
-  },
+    const input = validateUpdateInput(await context.req.json<unknown>());
+    if ('message' in input) return context.json(input, 400);
+    return context.json(await updateKnowledgeBase(authCtx.workspaceId, id, input));
+  }),
 });
 
 export const deleteKnowledgeBaseRoute = registerApiRoute('/knowledge-bases/:id', {
   method: 'DELETE',
   requiresAuth: true,
-  handler: async (context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     const id = context.req.param('id');
     if (!isUuid(id)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
-    try {
-      return await deleteKnowledgeBase(id)
-        ? context.body(null, 204)
-        : context.json({ message: '知识库不存在。' }, 404);
-    } catch (error) {
-      return handleRouteError(context, error);
-    }
-  },
+    await deleteKnowledgeBase(authCtx.workspaceId, id);
+    return context.body(null, 204);
+  }),
 });
 
 function validateCreateInput(body: unknown): { name: string; description?: string } | { message: string } {
@@ -128,12 +111,4 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
-}
-
-function handleRouteError(
-  context: { json: (data: unknown, status?: number) => Response },
-  error: unknown,
-): Response {
-  console.error('知识库请求失败：', error);
-  return context.json({ message: '知识库服务暂时不可用，请稍后重试。' }, 500);
 }
