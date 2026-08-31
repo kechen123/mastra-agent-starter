@@ -1,5 +1,7 @@
 # V2 实施计划（阶段 0～5 / PR 切片）
 
+> **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / `LEGACY_WORKSPACE_OWNER_USER_ID` ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。PR-1.2 / PR-1.3 / PR-1.5 已合并落地；PR-1.4（`skills_installed → skill_packages` 重命名）仍按原计划后续 PR 实施。
+
 > **状态：基于 V2.3.6（2026-08-28）** —— `architecture-v2.md` 已升版至 V2.3.6，五项定向修正全部落定（含 §8.4.1 Core/RAG Schema 边界与 §8.4.2 存量内联向量迁移）。本文档据此拆解阶段 0～5 的 PR 切片。**仍为文档/计划阶段，不进入代码开发。**
 
 ## 本文档的定位
@@ -132,13 +134,7 @@ PR-0.3 测试约定       ─┘             │           │           │    
 
 **目标**：建立请求身份上下文与 `workspace_id` 归属；五张核心表 + `document_chunks` 全部加归属列；隔离合约测试覆盖所有归属表。
 
-> **迁移编号说明**：本计划按"已实施迁移"持续推进。PR-1.1 第一次落地时
-> 创建了 `0002-workspaces.sql`（骨架 + `workspaces.owner_user_id ON DELETE SET NULL`），
-> 但与 V2.3.6 §5.1 不一致（缺 `kind`、Personal/Shared 互斥 CHECK、partial
-> unique、外键 `ON DELETE CASCADE`）。PR-1.1 修正追加
-> `0003-workspace-constraints.sql`，**不**改 `0002`（已应用迁移不可变）。
-> 后续 PR 的迁移文件编号顺延一档：原 `0003-...` → `0004-...`，
-> 原 `0004-...` → `0005-...`，以此类推。
+> **阶段 1 目标（PR-1.2 / PR-1.3 / PR-1.5 已合并落地）**：建立请求身份上下文与 `workspace_id` 归属；五张核心表 + `document_chunks` 全部加归属列；隔离合约测试覆盖所有归属表。**Schema 唯一来源**：`backend/database/init.sql`（不维护迁移链，见 §5.3 / G-2）。
 
 ### PR-1.1：workspace 与会话身份上下文（V2.3.6 收紧版）
 

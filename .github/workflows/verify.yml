@@ -21,6 +21,7 @@ jobs:
         working-directory: backend
         run: |
           npm ci
+          npm run lint
           npm run typecheck
           npm run test:contracts
           npx tsx tests/fixtures/skill-classifier.ts
@@ -30,3 +31,5 @@ jobs:
           npm ci
           npm run lint
           npm run build
+# Schema 由 backend/database/init.sql 单文件提供；`npm run migrate` 在本地或生产执行。
+# CI 不跑迁移（无 DB 服务）；依赖 contracts / unit / integration 测试 + typecheck 兜底。

@@ -1,5 +1,7 @@
 # Mastra Agent Starter
 
+> **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / `LEGACY_WORKSPACE_OWNER_USER_ID` ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。PR-1.2 / PR-1.3 / PR-1.5 已合并落地；归属列 `workspace_id` 已加到 6 张业务表。
+
 Mastra Agent Starter 是一个基于 [Mastra](https://mastra.ai/) 框架的智能对话平台，支持通用对话与知识库问答两种模式，具备可扩展的 Tool Registry、Skill Registry 和 Agent 能力绑定系统。
 
 ## 当前保留的能力
@@ -69,7 +71,7 @@ Copy-Item backend/.env.example backend/.env
 # 2. 启动本地 PostgreSQL；首次创建数据卷时会自动执行 Schema 基线
 docker compose up -d
 
-# 3. 安装后端依赖、记录基线并执行未来增量迁移
+# 3. 安装后端依赖；初始化数据库（执行唯一 init.sql）
 Set-Location backend
 npm ci
 npm run migrate
@@ -90,7 +92,7 @@ cp backend/.env.example backend/.env
 # 2. 启动本地 PostgreSQL；首次创建数据卷时会自动执行 Schema 基线
 docker compose up -d
 
-# 3. 安装后端依赖、记录基线并执行未来增量迁移
+# 3. 安装后端依赖；初始化数据库（执行唯一 init.sql）
 cd backend
 npm ci
 npm run migrate
@@ -144,7 +146,15 @@ npm run ask
 
 ## 项目文档
 
-- [架构总览](docs/architecture.md)
+> **三份架构文档的定位**（避免混读）：
+> [`docs/architecture.md`](docs/architecture.md) 描述**当前已实现**的系统（as-built），本 README 陈述的所有能力都以它为准；
+> [`docs/architecture-v2.md`](docs/architecture-v2.md) 是**尚未实现**的目标架构设计（V2.3.5），只作为演进依据，**不描述任何现有代码**；
+> [`docs/implementation-plan.md`](docs/implementation-plan.md) 是从当前实现走到 V2 的落地路径（阶段 0～5 的 PR 切片）。
+> 三者冲突时，**以 `architecture.md` 为当前事实**。
+
+- [架构总览（当前实现）](docs/architecture.md)
+- [V2 目标架构设计（未实现）](docs/architecture-v2.md)
+- [V2 实施计划（阶段 0～5 / PR 切片）](docs/implementation-plan.md)
 - [Agent 系统](docs/agents.md)
 - [Tool 系统](docs/tools.md)
 - [Skill 系统](docs/skills.md)
@@ -213,8 +223,8 @@ Conversation → AgentDefinition → Tool Registry + DB Bindings → Skill Regis
 `DEPLOYMENT_PROFILE=production` 当前会明确拒绝启动。这是防止误部署的保护措施，不是认证实现；待认证、租户隔离和限流完成后才会开放生产档位。
 
 - 不适用于公网直接部署——所有路由都是匿名访问，没有任何身份校验或速率限制。
-- 不适用于多用户、多租户、私有知识库隔离场景——`conversations`、`knowledge_bases`、`documents`、`tool_executions`、`agent_skill_bindings` 都没有 owner/tenant 归属列。
-- 未来接入认证时，必须先建立请求身份上下文，再为上述五张表增加 owner/tenant 归属列；本阶段不创建这些列、不写迁移脚本。
+- 不适用于多用户、多租户、私有知识库隔离场景——归属列 `workspace_id` 已加到 6 张业务表（`conversations` / `knowledge_bases` / `documents` / `document_chunks` / `tool_executions` / `agent_skill_bindings`）；跨 workspace 访问统一返回 404（详见 §5.4 隔离合约测试）。
+- 后续接入审批、限流、审计时，必须复用现成的 `withAuthenticatedWorkspace(handler)` 包装器与 `authCtx.workspaceId` 上下文——不要另起一套身份/租户机制。归属列的目标形态与隔离语义见 [`docs/architecture-v2.md`](docs/architecture-v2.md) §5 与 [`docs/implementation-plan.md`](docs/implementation-plan.md)。
 - `ToolDefinition.metadata`（`readOnly` / `destructive` / `idempotent` / `openWorld` / `requiresRuntime`）当前只是能力声明与 UI 展示信息，不是生产级授权系统。任何自定义 Tool 不得返回密码、Token、Cookie、Authorization Header 或其他 secret。`destructive: true` 或 `openWorld: true` 的 Tool 在引入生产业务前必须接入身份认证、租户/资源归属校验、用户确认或策略审批，以及输入输出脱敏与审计。
 - 在没有真实身份提供方之前，**禁止** 把 `requiresAuth: false` 批量替换为 `true`——那会造成伪安全或系统不可用。
 
