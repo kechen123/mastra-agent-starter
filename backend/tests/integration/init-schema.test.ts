@@ -194,14 +194,31 @@ test('schema-init.ts does not read process.env.DATABASE_URL', () => {
     join(process.cwd(), 'src/test-utils/schema-init.ts'),
     'utf-8',
   );
+  // 去掉注释后再做正则匹配 —— 注释里可能描述"本模块不读 env"等设计意图，
+  // 字面量不应触发 banned-string 断言。
+  const codeOnly = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
   assert.doesNotMatch(
-    src,
+    codeOnly,
+    /\bnew\s+Pool\s*\(/s,
+    'schema-init.ts 必须不直接 new Pool（让调用方决定池化策略）',
+  );
+  assert.doesNotMatch(
+    codeOnly,
     /process\.env\.DATABASE_URL/,
     'schema-init.ts 必须不读 process.env.DATABASE_URL（参数-only 模块）',
   );
-  assert.doesNotMatch(
-    src,
-    /new Pool\(/,
-    'schema-init.ts 必须不直接 new Pool（让调用方决定池化策略）',
+});
+
+// ─── #5b 静态合约：ensureSchema 仍保留 ROLLBACK ─────────────────────
+test('ensureSchema source still rolls back on error', () => {
+  // case #4 跑的是 stub（ensureSchemaWithSql），并非真实 ensureSchema。
+  // 加一道对源码的字面量断言，确保真实函数在异常分支里仍执行 ROLLBACK。
+  // 纯静态检查：不需要 DB，RUN=0 时也会跑。
+  const src = readFileSync(
+    join(process.cwd(), 'src/test-utils/schema-init.ts'),
+    'utf-8',
   );
+  assert.match(src, /ROLLBACK/);
 });

@@ -12,7 +12,7 @@
  *   - migrations.ts 接受 `PoolClient`（让调用方决定事务边界）；
  *   - 本模块 self-manage BEGIN/COMMIT/ROLLBACK：调用方只传 `Pool`，由 ensureSchema
  *     内部 `pool.connect()` 拿 client、跑事务、释放。
- *   - 本模块不读 `process.env.DATABASE_URL`，不自己 new Pool —— 由 Global
+ *   - 本模块不读环境变量、不自行构建连接池 —— 由 Global
  *     Constraint 要求；调用方负责把"测试专用 pool"传进来。
  *
  * checksum 必须独立于 Pool（Task 16 的静态契约测试会锁这一点）：
