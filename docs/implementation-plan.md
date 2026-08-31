@@ -361,7 +361,7 @@ ALTER TABLE document_chunks
 - Create: `backend/database/migrations/0006-skill-packages.sql`
 - Modify: `backend/src/modules/skills/`（所有引用 `skills_installed` 的地方改为 `skill_packages`）
 
-> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+> 实际未创建此文件——PR-1.4（`skills_installed → skill_packages` 重命名）仍按原计划后续 PR 实施，预期合并到 `backend/database/init.sql` 单文件（见 §5.3 / G-2）。
 
 **Schema**
 ```sql
