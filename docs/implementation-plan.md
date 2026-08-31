@@ -659,7 +659,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 | V2 章节 | 验收项摘要 | 对应 PR | 阶段 |
 |---|---|---|---|
-| §4.2 | CI 门禁、迁移不可变、命名约定 | PR-0.1 / PR-0.2 | 0 |
+| §4.2 | Schema 唯一来源、checksum 校验、不维护迁移链 | PR-1.2 / PR-1.3 / PR-1.5 | 1 |
 | §5.4 | 6 张归属表隔离（含 `document_chunks`）+ Skill 全局目录 | PR-1.2 / PR-1.3 / PR-1.4 / PR-1.5 | 1 |
 | §6.6 | 幂等 POST + SSE 续传 + `agent_runs` 生命周期 | PR-2.1 / PR-2.2 / PR-2.3 | 2 |
 | §7.4 | Tool 网关 + 审批 + 跨 workspace 404 | PR-3.1 / PR-3.2 / PR-3.3 | 3 |
