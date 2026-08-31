@@ -313,9 +313,24 @@ export async function saveInstalledSkill(
 }
 
 export async function removeInstalledSkill(id: string): Promise<void> {
+  // 全局 Skill 卸载（不绑定到 workspaceId）：单连接单事务级联删除
+  // agent_skill_bindings → skills_installed，避免外部 ON DELETE CASCADE 在
+  // 其他事务中干扰。
   const pool = getDatabasePool();
-  await pool.query(`DELETE FROM agent_skill_bindings WHERE skill_id = $1`, [id]);
-  await pool.query(`DELETE FROM skills_installed WHERE id = $1`, [id]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // 1. 删 agent_skill_bindings 引用
+    await client.query('DELETE FROM agent_skill_bindings WHERE skill_id = $1', [id]);
+    // 2. 删 skills_installed 行
+    await client.query('DELETE FROM skills_installed WHERE id = $1', [id]);
+    await client.query('COMMIT');
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch {}
+    throw error;
+  } finally {
+    client.release();
+  }
   await loadInstalledSkills();
 }
 

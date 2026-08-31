@@ -33,7 +33,7 @@ export function resolveSkillsForAgent(agentId: string, ids: string[]): SkillDefi
     });
 }
 
-export async function bindSkillToAgent(agentId: string, skillId: string): Promise<void> {
+export async function bindSkillToAgent(workspaceId: string, agentId: string, skillId: string): Promise<void> {
   if (!getAgentDefinition(agentId)) {
     throw new Error('Agent 不存在。');
   }
@@ -59,26 +59,27 @@ export async function bindSkillToAgent(agentId: string, skillId: string): Promis
   }
   const pool = bindingsPool();
   await pool.query(
-    `INSERT INTO agent_skill_bindings (agent_id, skill_id, enabled)
-     VALUES ($1, $2, true)
-     ON CONFLICT (agent_id, skill_id) DO UPDATE SET enabled = true, updated_at = now()`,
-    [agentId, skillId],
+    `INSERT INTO agent_skill_bindings (workspace_id, agent_id, skill_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (workspace_id, agent_id, skill_id) DO NOTHING`,
+    [workspaceId, agentId, skillId],
   );
 }
 
-export async function unbindSkillFromAgent(agentId: string, skillId: string): Promise<void> {
+export async function unbindSkillFromAgent(workspaceId: string, agentId: string, skillId: string): Promise<void> {
   const pool = bindingsPool();
+  // internal idempotent unbind —— 行不存在 / 已解绑都视为正常返回。
   await pool.query(
-    `DELETE FROM agent_skill_bindings WHERE agent_id = $1 AND skill_id = $2`,
-    [agentId, skillId],
+    `DELETE FROM agent_skill_bindings WHERE workspace_id = $1 AND agent_id = $2 AND skill_id = $3`,
+    [workspaceId, agentId, skillId],
   );
 }
 
-export async function getAgentSkillBindings(agentId: string): Promise<string[]> {
+export async function getAgentSkillBindings(workspaceId: string, agentId: string): Promise<string[]> {
   const pool = bindingsPool();
   const result = await pool.query<{ skill_id: string }>(
-    `SELECT skill_id FROM agent_skill_bindings WHERE agent_id = $1 AND enabled = true`,
-    [agentId],
+    `SELECT skill_id FROM agent_skill_bindings WHERE workspace_id = $1 AND agent_id = $2`,
+    [workspaceId, agentId],
   );
   return result.rows.map((r) => r.skill_id);
 }
