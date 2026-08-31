@@ -113,6 +113,7 @@ export const regenerateMessageRoute = registerApiRoute('/messages/:assistantMess
 
       snapshot = await getMessageSnapshot(authCtx.workspaceId, assistantMessageId);
       if (!snapshot) {
+        cleanupConversationExecution(conversationId);
         return context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
       }
 
