@@ -13,20 +13,47 @@ interface DocumentChunkRow {
 }
 
 /**
- * 查询指定通用知识库；score 与 distance 均为 pgvector cosine distance，数值越小越相近。
+ * retriever 调用选项（Spec §retriever）。
+ *
+ * 当前仅承载 `topK`；后续要扩展（如 `filter` / `minScore`）只需新增可选字段，
+ * 保持向后兼容（调用方传 `{}` 即可拿到默认行为）。
+ */
+export interface SearchKnowledgeBaseOptions {
+  topK?: number;
+  // 后续可加 filter / minScore 等
+}
+
+/**
+ * 在指定工作区内检索知识库片段（防御深度 —— Spec §retriever）。
+ *
+ * 隔离合约：
+ *   - 两个 SQL 查询（has-chunks 预检 + chunk 主查询）都按
+ *     `workspace_id = $N AND knowledge_base_id = $N` 双重过滤；
+ *   - 即使上游 `core/knowledge/search.ts` 预检被绕过，本函数也不会
+ *     越权读到其它 workspace 的 chunk。
+ *
+ * 推荐调用：通过 `core/knowledge/search.ts` 入口（会先校验 KB 归属本工作区，
+ * 跨 workspace 抛 `CrossWorkspaceAccessError` —— 404）。
+ *
+ * @param workspaceId       当前会话所属工作区（来自 `authCtx.workspaceId`）。
+ * @param knowledgeBaseId   待检索知识库 ID。
+ * @param query             用户查询文本。
+ * @param options           调用选项；`topK` 默认 5。
  */
 export async function searchKnowledgeBase(
+  workspaceId: string,
   knowledgeBaseId: string,
   query: string,
-  topK = 5,
+  options: SearchKnowledgeBaseOptions = {},
 ): Promise<Citation[]> {
+  const topK = options.topK ?? 5;
   const pool = getDatabasePool();
   const hasChunks = await pool.query<{ has_chunks: boolean }>(`
     SELECT EXISTS(
       SELECT 1 FROM document_chunks
-      WHERE knowledge_base_id = $1 AND embedding IS NOT NULL
+      WHERE workspace_id = $1 AND knowledge_base_id = $2 AND embedding IS NOT NULL
     ) AS has_chunks
-  `, [knowledgeBaseId]);
+  `, [workspaceId, knowledgeBaseId]);
   if (!hasChunks.rows[0]?.has_chunks) return [];
 
   const embedding = await embedQuery(query);
@@ -41,11 +68,11 @@ export async function searchKnowledgeBase(
       c.embedding <=> $1::vector AS distance
     FROM document_chunks c
     INNER JOIN documents d ON d.id = c.document_id
-    WHERE c.knowledge_base_id = $2
+    WHERE c.workspace_id = $2 AND c.knowledge_base_id = $3
       AND c.embedding IS NOT NULL
     ORDER BY c.embedding <=> $1::vector
-    LIMIT $3
-  `, [`[${embedding.join(',')}]`, knowledgeBaseId, topK]);
+    LIMIT $4
+  `, [`[${embedding.join(',')}]`, workspaceId, knowledgeBaseId, topK]);
 
   return result.rows.map((row) => {
     const metadata = row.metadata ?? {};

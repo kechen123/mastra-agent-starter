@@ -1,14 +1,17 @@
 /**
- * 工作区隔离的知识库检索门面（V2.3.6 §5.1）。
+ * 工作区隔离的知识库检索门面（V2.3.6 §5.1 / Spec §retriever）。
  *
  * 把 `modules/knowledge/rag/retriever.ts` 的 `searchKnowledgeBase` 包一层：
  *   1. 先以 `workspace_id` 校验目标 KB 是否属于本工作区 —— 跨工作区访问
  *      一律抛 `CrossWorkspaceAccessError`（→ 404），不暴露 ID 存在性。
- *   2. 通过校验后，把请求委托给底层 retriever；retriever 只关心 `kbId`
- *      本身，不再重复做工作区校验。
+ *   2. 通过校验后，把请求委托给底层 retriever，并把 `workspaceId` 传过去；
+ *      retriever 自身的 SQL 也按 `workspace_id` 过滤（防御深度），即使上层
+ *      其它入口绕过本预检，下游也不会越权读到其它 workspace 的 chunk。
  *
- * 这是 Agent 运行时唯一允许触发的 KB 检索入口——`streamAgent` 拿到
- * `workspaceId` 后必须走本函数，不能直接 import retriever（防止上层漏校验）。
+ * 这是 Agent 运行时唯一允许触发的 KB 检索入口 —— `streamAgent` 拿到
+ * `workspaceId` 后必须走本函数，不能直接 import retriever（防止上层漏校验
+ * 漏传 workspaceId）。retriever 自身已按 workspace_id 过滤，但本 wrapper 仍
+ * 负责抛 `CrossWorkspaceAccessError`（404）给上层，避免泄露 ID 存在性。
  */
 import { getDatabasePool } from '../../infrastructure/database/pool.js';
 import { searchKnowledgeBase as ragSearch } from '../../modules/knowledge/rag/retriever.js';
@@ -42,5 +45,5 @@ export async function searchKnowledgeBase(
   if (r.rows.length === 0) {
     throw new CrossWorkspaceAccessError();
   }
-  return ragSearch(knowledgeBaseId, query, topK);
+  return ragSearch(workspaceId, knowledgeBaseId, query, { topK });
 }

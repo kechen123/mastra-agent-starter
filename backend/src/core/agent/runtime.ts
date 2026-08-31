@@ -104,8 +104,9 @@ export async function* streamAgent(
         yield { type: 'error', error: '绑定的知识库不存在，请重新选择。' };
         return;
       }
-      // 走 core/knowledge/search.ts 的工作区校验封装——禁止直连
-      // modules/knowledge/rag/retriever，绕过 workspaceId 校验。
+      // 必须通过 core/knowledge/search.ts wrapper 调用；retriever 本身已按
+      // workspace_id 过滤（防御深度），但 wrapper 仍负责抛 CrossWorkspaceAccessError
+      // 给上层，避免泄露 ID 存在性。禁止直连 retriever 绕过 workspaceId 校验。
       const retrieved = await searchKnowledgeBase(workspaceId, knowledgeBaseId, prompt);
       if (retrieved.length === 0) {
         // citations=false 的 Agent 也会发出同样的 done 事件，但 citations
