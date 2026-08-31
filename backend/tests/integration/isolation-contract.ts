@@ -477,11 +477,12 @@ test('case 13: finalizeToolExecution isolation', { skip: !RUN }, async () => {
 //          同一 (agentId, skillId) 在两个 workspace 各自绑定 → 两行共存
 test('case 14: bindSkillToAgent workspace-scoped PK', { skip: !RUN }, async () => {
   await withTwoWorkspaces(async (a) => {
-    await seedUser(a, 'u1');
-    await seedWorkspace(a, 'wA', 'u1');
-    await seedWorkspace(a, 'wB', 'u1');
-    await seedCompatibleSkill(a, 's1');
     setGlobal(a);
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedCompatibleSkill(a, 's1');
     try {
       await bind.bindSkillToAgent('wA', 'general-chat', 's1');
       await bind.bindSkillToAgent('wB', 'general-chat', 's1');
@@ -504,11 +505,12 @@ test('case 14: bindSkillToAgent workspace-scoped PK', { skip: !RUN }, async () =
 // case 15: getAgentSkillBindings —— 列表查询，B 看不到 A 的绑定
 test('case 15: getAgentSkillBindings workspace isolation', { skip: !RUN }, async () => {
   await withTwoWorkspaces(async (a) => {
-    await seedUser(a, 'u1');
-    await seedWorkspace(a, 'wA', 'u1');
-    await seedWorkspace(a, 'wB', 'u1');
-    await seedCompatibleSkill(a, 's1');
     setGlobal(a);
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedCompatibleSkill(a, 's1');
     try {
       await bind.bindSkillToAgent('wA', 'general-chat', 's1');
       const wABindings = await bind.getAgentSkillBindings('wA', 'general-chat');
@@ -525,11 +527,12 @@ test('case 15: getAgentSkillBindings workspace isolation', { skip: !RUN }, async
 //          skill_id=id，0 孤儿
 test('case 16: removeInstalledSkill cascades bindings', { skip: !RUN }, async () => {
   await withTwoWorkspaces(async (a) => {
-    await seedUser(a, 'u1');
-    await seedWorkspace(a, 'wA', 'u1');
-    await seedWorkspace(a, 'wB', 'u1');
-    await seedCompatibleSkill(a, 's1');
     setGlobal(a);
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedCompatibleSkill(a, 's1');
     try {
       await bind.bindSkillToAgent('wA', 'general-chat', 's1');
       await bind.bindSkillToAgent('wB', 'general-chat', 's1');
@@ -549,9 +552,11 @@ test('case 16: removeInstalledSkill cascades bindings', { skip: !RUN }, async ()
 //          knowledge_bases / workspace_members）由 ON DELETE CASCADE 清空
 test('case 17: workspace deletion cascades all owned resources', { skip: !RUN }, async () => {
   await withTwoWorkspaces(async (a) => {
+    setGlobal(a);
     await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
     await seedWorkspace(a, 'wA', 'u1');
-    await seedWorkspace(a, 'wB', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
     await seedConversation(a, 'c1', 'wA', 'u1');
     await seedAssistantMessage(a, 'm1', 'c1', 'wA');
     await seedKnowledgeBase(a, 'kA', 'wA');
@@ -563,7 +568,6 @@ test('case 17: workspace deletion cascades all owned resources', { skip: !RUN },
     );
     await seedToolExecution(a, 'e1', 'm1', 'wA');
     await seedCompatibleSkill(a, 's1');
-    setGlobal(a);
     try {
       await bind.bindSkillToAgent('wA', 'general-chat', 's1');
     } finally {
