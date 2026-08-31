@@ -1,58 +1,67 @@
+import {
+  ResourceNotFoundError,
+  CrossWorkspaceAccessError,
+} from '../../server/error-mapping.js';
 import { getDatabasePool } from '../../infrastructure/database/pool.js';
 
-export type ExecutionStatus = 'running' | 'completed' | 'failed' | 'stopped';
+export type ExecutionStatus = 'pending' | 'running' | 'success' | 'error' | 'cancelled';
 
 export interface ToolExecutionRecord {
   id: string;
-  conversationId: string;
   messageId: string;
-  toolId: string;
-  input: Record<string, unknown>;
-  output?: Record<string, unknown>;
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: Record<string, unknown>;
   status: ExecutionStatus;
-  errorCode?: string;
+  error?: string;
   startedAt: Date;
-  completedAt?: Date;
-  durationMs?: number;
+  finishedAt?: Date;
 }
 
 export async function createToolExecution(
-  conversationId: string,
+  workspaceId: string,
   messageId: string,
-  toolId: string,
-  input: Record<string, unknown>,
+  toolName: string,
+  args: Record<string, unknown>,
 ): Promise<string> {
   const pool = getDatabasePool();
+  // 父 message 不属于 workspace → 跨 workspace 访问，抛 CrossWorkspaceAccessError（404）。
+  const msgCheck = await pool.query<{ id: string }>(
+    'SELECT id FROM messages WHERE id = $1 AND workspace_id = $2',
+    [messageId, workspaceId],
+  );
+  if (msgCheck.rows.length === 0) {
+    throw new CrossWorkspaceAccessError();
+  }
+
   const result = await pool.query<{ id: string }>(
-    `INSERT INTO tool_executions (conversation_id, message_id, tool_id, input, status)
+    `INSERT INTO tool_executions (workspace_id, message_id, tool_name, args, status)
      VALUES ($1, $2, $3, $4, 'running')
      RETURNING id`,
-    [conversationId, messageId, toolId, JSON.stringify(input)],
+    [workspaceId, messageId, toolName, JSON.stringify(args)],
   );
   return result.rows[0]!.id;
 }
 
 export async function finalizeToolExecution(
-  id: string,
-  output: Record<string, unknown> | null,
-  status: Extract<ExecutionStatus, 'completed' | 'failed' | 'stopped'>,
-  errorCode?: string,
+  workspaceId: string,
+  execId: string,
+  result: Record<string, unknown> | null,
+  status: Extract<ExecutionStatus, 'success' | 'error' | 'cancelled'>,
+  error?: string,
 ): Promise<void> {
   const pool = getDatabasePool();
-  const completedAt = new Date();
-  const startedResult = await pool.query<{ started_at: Date }>(
-    `SELECT started_at FROM tool_executions WHERE id = $1`,
-    [id],
-  );
-  const startedAt = startedResult.rows[0]?.started_at;
-  const durationMs = startedAt ? Math.max(0, completedAt.getTime() - new Date(startedAt).getTime()) : undefined;
-
-  await pool.query(
+  const updateResult = await pool.query<{ id: string }>(
     `UPDATE tool_executions
-     SET output = $2, status = $3, error_code = $4, completed_at = $5, duration_ms = $6
-     WHERE id = $1`,
-    [id, output ? JSON.stringify(output) : null, status, errorCode ?? null, completedAt, durationMs ?? null],
+        SET result = $2, status = $3, error = $4, finished_at = now()
+      WHERE id = $1 AND workspace_id = $2
+      RETURNING id`,
+    [execId, workspaceId, result ? JSON.stringify(result) : null, status, error ?? null],
   );
+  // 用户资源写：rowCount===0 → 抛 ResourceNotFoundError（404）。
+  if (updateResult.rowCount === 0) {
+    throw new ResourceNotFoundError('工具执行记录不存在。');
+  }
 }
 
 /**
@@ -60,45 +69,48 @@ export async function finalizeToolExecution(
  * 在流结束、异常或停止信号时调用，确保不会出现 status='running' 的孤儿行。
  */
 export async function convergeRunningToolExecutions(
+  workspaceId: string,
   messageId: string,
-  status: Extract<ExecutionStatus, 'stopped' | 'failed'>,
-  errorCode?: string,
 ): Promise<number> {
   const pool = getDatabasePool();
-  const completedAt = new Date();
-  const result = await pool.query<{ id: string; started_at: Date }>(
+  // internal idempotent —— 跨 workspace 一律按"未命中"语义处理；行不存在或已
+  // 收敛的视为正常收敛结果（0 行）。
+  const result = await pool.query<{ id: string }>(
     `UPDATE tool_executions
-     SET status = $2,
-         error_code = COALESCE($3, error_code),
-         completed_at = COALESCE(completed_at, $4),
-         duration_ms = COALESCE(duration_ms, GREATEST(0, EXTRACT(EPOCH FROM ($4 - started_at)) * 1000)::int)
-     WHERE message_id = $1 AND status = 'running'
-     RETURNING id, started_at`,
-    [messageId, status, errorCode ?? null, completedAt],
+        SET status = 'cancelled',
+            error = COALESCE(error, 'converged'),
+            finished_at = COALESCE(finished_at, now())
+      WHERE message_id = $1 AND workspace_id = $2 AND status = 'running'
+      RETURNING id`,
+    [messageId, workspaceId],
   );
   return result.rowCount ?? 0;
 }
 
-export async function getToolExecutionsByMessage(messageId: string): Promise<ToolExecutionRecord[]> {
+export async function getToolExecutionsByMessage(
+  workspaceId: string,
+  messageId: string,
+): Promise<ToolExecutionRecord[]> {
   const pool = getDatabasePool();
   const result = await pool.query<
-    { id: string; conversation_id: string; message_id: string; tool_id: string; input: unknown; output: unknown; status: string; error_code: string | null; started_at: Date; completed_at: Date | null; duration_ms: number | null }
+    { id: string; message_id: string; tool_name: string; args: unknown; result: unknown; status: string; error: string | null; started_at: Date; finished_at: Date | null }
   >(
-    `SELECT id, conversation_id, message_id, tool_id, input, output, status, error_code, started_at, completed_at, duration_ms
-     FROM tool_executions WHERE message_id = $1 ORDER BY started_at ASC`,
-    [messageId],
+    `SELECT id, message_id, tool_name, args, result, status, error, started_at, finished_at
+       FROM tool_executions
+      WHERE message_id = $1 AND workspace_id = $2
+      ORDER BY started_at ASC`,
+    [messageId, workspaceId],
   );
+  // 查询类：跨 workspace 0 行返空数组（不抛错，与其他 query 语义一致）。
   return result.rows.map((r) => ({
     id: r.id,
-    conversationId: r.conversation_id,
     messageId: r.message_id,
-    toolId: r.tool_id,
-    input: (r.input as Record<string, unknown>) ?? {},
-    output: r.output ? (r.output as Record<string, unknown>) : undefined,
+    toolName: r.tool_name,
+    args: (r.args as Record<string, unknown>) ?? {},
+    result: r.result ? (r.result as Record<string, unknown>) : undefined,
     status: r.status as ExecutionStatus,
-    errorCode: r.error_code ?? undefined,
+    error: r.error ?? undefined,
     startedAt: r.started_at,
-    completedAt: r.completed_at ?? undefined,
-    durationMs: r.duration_ms ?? undefined,
+    finishedAt: r.finished_at ?? undefined,
   }));
 }
