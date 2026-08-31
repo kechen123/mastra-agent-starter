@@ -74,6 +74,7 @@ CREATE TABLE knowledge_bases (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX knowledge_bases_workspace_idx ON knowledge_bases(workspace_id);
 
 CREATE TABLE documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
