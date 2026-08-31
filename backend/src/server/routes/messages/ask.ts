@@ -68,6 +68,8 @@ export const askRoute = registerApiRoute('/ask', {
       // 不会被另一并发请求交错写入。null → 跨 workspace 访问 / 会话不存在 → 404。
       const detail = await getConversationWithMessages(authCtx.workspaceId, conversationId);
       if (!detail) {
+        // 跨 workspace / 会话不存在：reserve 已成功预占会话执行权，必须在 404 之前释放锁。
+        cleanupConversationExecution(conversationId);
         return context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
       }
       const { conversation, messages: history } = detail;

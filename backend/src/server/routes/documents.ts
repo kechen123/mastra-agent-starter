@@ -158,6 +158,7 @@ interface TextChunk {
  * 与 `modules/documents/ingestion.ts` 的拆分逻辑保持一致：按 CHUNK_SIZE 切片，
  * 在候选分隔符中寻找最晚的合理断点。该函数在路由层 inline 以避免改动 ingestion.ts。
  */
+// TODO: extract splitText to a shared module — currently duplicated to keep this PR scoped to routes/
 function splitText(text: string): TextChunk[] {
   const chunks: TextChunk[] = [];
   let start = 0;

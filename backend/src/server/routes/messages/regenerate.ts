@@ -96,6 +96,8 @@ export const regenerateMessageRoute = registerApiRoute('/messages/:assistantMess
       const detail = await getConversationWithMessages(authCtx.workspaceId, conversationId);
       if (!detail) {
         // reserve 后再次校验：理论上 workspace 校验已通过，但保留防御性 404。
+        // reserve 已预占会话执行权，必须在 404 之前释放锁，避免锁泄漏。
+        cleanupConversationExecution(conversationId);
         return context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
       }
       const { conversation, messages: history } = detail;
