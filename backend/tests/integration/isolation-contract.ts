@@ -40,6 +40,7 @@ import {
 import * as conv from '../../src/modules/conversations/service.js';
 import * as tool from '../../src/modules/conversations/tool-executions.js';
 import * as kb from '../../src/modules/knowledge/service.js';
+import { searchKnowledgeBase } from '../../src/core/knowledge/search.js';
 import * as doc from '../../src/modules/documents/service.js';
 import { ingestDocument } from '../../src/modules/documents/ingestion.js';
 import * as bind from '../../src/core/skill/bindings.js';
@@ -594,6 +595,126 @@ test('case 17: workspace deletion cascades all owned resources', { skip: !RUN },
         `SELECT count(*)::text AS c FROM ${table} WHERE ${where}`,
       );
       assert.equal(rows.rows[0]?.c, '0', `${table} 应为 0 行`);
+    }
+  });
+});
+
+// ─── 5 cases（Spec §5.4 补完：KB 服务层 + document_chunks 读隔离） ─────────
+
+// case 18: listKnowledgeBases —— 列表查询，B 看不到 A 的 KB
+test('case 18: listKnowledgeBases isolation', { skip: !RUN }, async () => {
+  await withTwoWorkspaces(async (a) => {
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedKnowledgeBase(a, 'kA1', 'wA');
+    await seedKnowledgeBase(a, 'kA2', 'wA');
+    setGlobal(a);
+    try {
+      const rows = await kb.listKnowledgeBases('wB');
+      assert.deepEqual(rows, []);
+    } finally {
+      resetGlobal();
+    }
+  });
+});
+
+// case 19: getKnowledgeBase —— 查询类，跨 workspace 返 null
+test('case 19: getKnowledgeBase isolation', { skip: !RUN }, async () => {
+  await withTwoWorkspaces(async (a) => {
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedKnowledgeBase(a, 'kA', 'wA');
+    setGlobal(a);
+    try {
+      const result = await kb.getKnowledgeBase('wB', 'kA');
+      assert.equal(result, null);
+    } finally {
+      resetGlobal();
+    }
+  });
+});
+
+// case 20: updateKnowledgeBase —— 用户资源写，rowCount===0 抛
+//          ResourceNotFoundError；A 的 KB 不应被改名
+test('case 20: updateKnowledgeBase isolation', { skip: !RUN }, async () => {
+  await withTwoWorkspaces(async (a) => {
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedKnowledgeBase(a, 'kA', 'wA');
+    setGlobal(a);
+    try {
+      await assert.rejects(
+        kb.updateKnowledgeBase('wB', 'kA', { name: 'hijacked' }),
+        (err: unknown) => err instanceof ResourceNotFoundError,
+      );
+      const rows = await a.query<{ name: string }>(
+        `SELECT name FROM knowledge_bases WHERE id = 'kA'`,
+      );
+      assert.equal(rows.rows[0]?.name, 'k');
+    } finally {
+      resetGlobal();
+    }
+  });
+});
+
+// case 21: deleteKnowledgeBase —— 用户资源写，rowCount===0 抛
+//          ResourceNotFoundError；A 的 KB 不应被删
+test('case 21: deleteKnowledgeBase isolation', { skip: !RUN }, async () => {
+  await withTwoWorkspaces(async (a) => {
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedKnowledgeBase(a, 'kA', 'wA');
+    setGlobal(a);
+    try {
+      await assert.rejects(
+        kb.deleteKnowledgeBase('wB', 'kA'),
+        (err: unknown) => err instanceof ResourceNotFoundError,
+      );
+      const rows = await a.query<{ c: string }>(
+        `SELECT count(*)::text AS c FROM knowledge_bases WHERE id = 'kA'`,
+      );
+      assert.equal(rows.rows[0]?.c, '1');
+    } finally {
+      resetGlobal();
+    }
+  });
+});
+
+// case 22: searchKnowledgeBase —— 上游 KB 归属校验失败抛
+//          CrossWorkspaceAccessError（即使 wA 已为该 KB 建 chunks，
+//          wB 也不应读到任何 chunk；实现走预检短路，不依赖下游 filter）
+test('case 22: searchKnowledgeBase isolation', { skip: !RUN }, async () => {
+  await withTwoWorkspaces(async (a) => {
+    await seedUser(a, 'u1');
+    await seedUser(a, 'u2');
+    await seedWorkspace(a, 'wA', 'u1');
+    await seedWorkspace(a, 'wB', 'u2');
+    await seedKnowledgeBase(a, 'kA', 'wA');
+    await seedDocument(a, 'd1', 'kA', 'wA');
+    // wA 已有 1 个 chunk（模拟"已完成 ingestion"的最弱前置）：
+    // 仅需 DB 形状真实，预检抛错在调用 embedQuery 之前触发，
+    // 故无需配置真实 Embedding 服务。
+    await a.query(
+      `INSERT INTO document_chunks
+         (id, workspace_id, knowledge_base_id, document_id, chunk_index, content)
+       VALUES ('ch1', 'wA', 'kA', 'd1', 0, 'x')`,
+    );
+    setGlobal(a);
+    try {
+      await assert.rejects(
+        searchKnowledgeBase('wB', 'kA', 'query'),
+        (err: unknown) => err instanceof CrossWorkspaceAccessError,
+      );
+    } finally {
+      resetGlobal();
     }
   });
 });
