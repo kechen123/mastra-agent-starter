@@ -3,6 +3,7 @@
 -- 重复执行必须显式失败（除 pgcrypto 外全部不带 IF NOT EXISTS）。
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE app_users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -97,7 +98,8 @@ CREATE TABLE document_chunks (
   knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
   chunk_index INTEGER NOT NULL,
   content TEXT NOT NULL,
-  embedding REAL[],
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  embedding vector(2048),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX document_chunks_workspace_kb_idx ON document_chunks(workspace_id, knowledge_base_id);
