@@ -1,3 +1,7 @@
+import {
+  ResourceNotFoundError,
+  CrossWorkspaceAccessError,
+} from '../../server/error-mapping.js';
 import { getDatabasePool } from '../../infrastructure/database/pool.js';
 
 export type DocumentStatus = 'uploaded' | 'parsing' | 'chunking' | 'embedding' | 'completed' | 'failed';
@@ -46,59 +50,89 @@ const documentJoins = `
   LEFT JOIN document_chunks c ON c.document_id = d.id
 `;
 
-export async function createDocument(input: {
-  knowledgeBaseId: string;
-  name: string;
-  type: string;
-  size: number;
-}): Promise<DocumentSummary> {
-  const result = await getDatabasePool().query<DocumentRow>(`
+export async function createDocument(
+  workspaceId: string,
+  knowledgeBaseId: string,
+  input: {
+    name: string;
+    type: string;
+    size: number;
+  },
+): Promise<DocumentSummary> {
+  const pool = getDatabasePool();
+  // 父 KB 不属于 workspace → 跨 workspace 访问，抛 CrossWorkspaceAccessError（404）。
+  const kbCheck = await pool.query<{ id: string }>(
+    'SELECT id FROM knowledge_bases WHERE id = $1 AND workspace_id = $2',
+    [knowledgeBaseId, workspaceId],
+  );
+  if (kbCheck.rows.length === 0) {
+    throw new CrossWorkspaceAccessError();
+  }
+
+  const result = await pool.query<DocumentRow>(`
     WITH created AS (
-      INSERT INTO documents (knowledge_base_id, name, type, size, status)
-      VALUES ($1, $2, $3, $4, 'uploaded')
+      INSERT INTO documents (workspace_id, knowledge_base_id, name, type, size, status)
+      VALUES ($1, $2, $3, $4, $5, 'uploaded')
       RETURNING id, knowledge_base_id, name, type, size, status, error_message, created_at, updated_at
     )
     SELECT created.*, 0::int AS chunk_count FROM created
-  `, [input.knowledgeBaseId, input.name, input.type, input.size]);
+  `, [workspaceId, knowledgeBaseId, input.name, input.type, input.size]);
   return toDocument(result.rows[0]!);
 }
 
-export async function listDocuments(knowledgeBaseId: string): Promise<DocumentSummary[]> {
+export async function listDocuments(
+  workspaceId: string,
+  knowledgeBaseId?: string,
+): Promise<DocumentSummary[]> {
+  const filterKb = knowledgeBaseId ? 'AND d.knowledge_base_id = $2' : '';
   const result = await getDatabasePool().query<DocumentRow>(`
     SELECT ${documentFields}
     ${documentJoins}
-    WHERE d.knowledge_base_id = $1
+    WHERE d.workspace_id = $1 ${filterKb}
     GROUP BY d.id
     ORDER BY d.created_at DESC
-  `, [knowledgeBaseId]);
+  `, knowledgeBaseId ? [workspaceId, knowledgeBaseId] : [workspaceId]);
   return result.rows.map(toDocument);
 }
 
-export async function getDocument(id: string): Promise<DocumentSummary | null> {
+export async function getDocument(workspaceId: string, docId: string): Promise<DocumentSummary | null> {
   const result = await getDatabasePool().query<DocumentRow>(`
     SELECT ${documentFields}
     ${documentJoins}
-    WHERE d.id = $1
+    WHERE d.id = $1 AND d.workspace_id = $2
     GROUP BY d.id
-  `, [id]);
+  `, [docId, workspaceId]);
+  // 查询类：跨 workspace 0 行返 null（不抛错，与其他 query 语义一致）。
   return result.rows[0] ? toDocument(result.rows[0]) : null;
 }
 
 export async function updateDocumentStatus(
-  id: string,
+  workspaceId: string,
+  docId: string,
   status: DocumentStatus,
   errorMessage: string | null = null,
 ): Promise<void> {
-  await getDatabasePool().query(`
+  const result = await getDatabasePool().query(`
     UPDATE documents
-    SET status = $2, error_message = $3, updated_at = now()
-    WHERE id = $1
-  `, [id, status, errorMessage]);
+    SET status = $3, error_message = $4, updated_at = now()
+    WHERE id = $1 AND workspace_id = $2
+  `, [docId, workspaceId, status, errorMessage]);
+  // 用户资源写：rowCount===0 → 抛 ResourceNotFoundError（404）。
+  if (result.rowCount === 0) {
+    throw new ResourceNotFoundError('文档不存在。');
+  }
 }
 
-export async function deleteDocument(id: string): Promise<boolean> {
-  const result = await getDatabasePool().query('DELETE FROM documents WHERE id = $1', [id]);
-  return result.rowCount === 1;
+export async function deleteDocument(workspaceId: string, docId: string): Promise<boolean> {
+  const result = await getDatabasePool().query(
+    'DELETE FROM documents WHERE id = $1 AND workspace_id = $2',
+    [docId, workspaceId],
+  );
+  // 用户资源写：rowCount===0 → 抛 ResourceNotFoundError（404）。
+  if (result.rowCount === 0) {
+    throw new ResourceNotFoundError('文档不存在。');
+  }
+  return true;
 }
 
 function toDocument(row: DocumentRow): DocumentSummary {
