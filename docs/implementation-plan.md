@@ -49,9 +49,9 @@
 
 | # | 约束 | 来源 |
 |---|---|---|
-| G-1 | **迁移不可变**：已应用的迁移文件（`backend/database/migrations/*.sql`）SHA-256 校验失败时 `npm run migrate` 必须拒绝继续执行；任何已应用文件不得事后修改，只能新增 | §8.6、阶段 0 验收 |
+| G-1 | **Init.sql 唯一**：所有 Schema 集中定义在 `backend/database/init.sql` 单文件；项目不维护迁移链。`npm run migrate` 计算 init.sql 的 SHA-256 并与 `_init_meta` 中登记值比对。详见 §5.3 / G-2 | §5.3、阶段 0 验收 |
 | G-2 | **Schema 唯一来源**：`backend/database/init.sql` 是 Schema 唯一来源；项目不维护迁移链；`npm run migrate` 计算 SHA-256 checksum 后执行：未登记 → 应用；一致 → 跳过；不一致 → 拒绝（退出码 2）。任何 DB 失败 → ROLLBACK | §5.3、阶段 0 验收 |
-| G-3 | **迁移命名**：`NNNN-kebab-case-description.sql`，单调递增；`0000` 保留为基线；`0001-local-auth.sql` 已存在作为参照 | 既有约定 |
+| G-3 | **（已撤销）** 原 G-3 命名约定与 §5.3 / G-2 冲突；项目不维护迁移链，不需要文件命名约束 | 既有约定 |
 | G-4 | **测试 runner**：后端 `package.json` 的 `test` 脚本用 `tsx` 直接加载 `src/**/*.test.ts`；新增测试文件放对应模块目录，命名 `<module>.test.ts` | `backend/package.json` 当前实现 |
 | G-5 | **CI 门禁**（`.github/workflows/verify.yml`）：backend `lint`（PR-0.2 后存在）+ `typecheck` + `test`；frontend `lint` + `typecheck` + `build`；任一失败阻断 merge | §4.1 |
 | G-6 | **Core / RAG SQL 隔离**：RAG-only 路径（`<=>`、`vector(...)`、`document_embeddings`）必须包在 `if (await ragEnabled())` 分支；Core 路径 SQL 编译期静态可证不引用 RAG 表 | §8.4.1 |
@@ -83,6 +83,8 @@ PR-0.3 测试约定       ─┘             │           │           │    
 - Modify: `backend/database/init.sql`
 - Create: `backend/database/migrations/0000-init-baseline.sql`
 - Modify: `backend/src/infrastructure/db/migrate.ts`（如不存在则新建）
+
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
 
 **依赖**：无
 
@@ -149,6 +151,8 @@ PR-0.3 测试约定       ─┘             │           │           │    
 - Create: `backend/src/test-utils/migrations.ts`（测试侧：跑 `init.sql` + `migrations/*.sql`）
 - Modify: `backend/src/modules/auth/service.ts`（`SafeUser.workspaceId` 非空；登录顺序固定）
 - Modify: `backend/src/server/routes/auth.ts`（`/auth/me` 走 `resolveAuthenticatedContext`）
+
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
 
 **Schema**（V2.3.6 §5.1 终态）：
 
@@ -303,6 +307,8 @@ interface SafeUser {
 - Create: `backend/database/migrations/0004-tenant-columns.sql`（`conversations` / `knowledge_bases` / `documents` / `tool_executions` / `agent_skill_bindings` 加 `workspace_id UUID NOT NULL REFERENCES workspaces(id)`）
 - Modify: 各表写入路径补 `workspace_id`
 
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+
 **注意**：V2.3.6 §5.1 明确本阶段只加列与默认值回填；隔离校验在 PR-1.5 集中做。
 
 **测试**：迁移前后 `column column_name='workspace_id'` 命中六张表（含 `document_chunks`，见 PR-1.3）。
@@ -330,6 +336,8 @@ CREATE EXTENSION vector
 - Create: `backend/database/migrations/0005-chunks-workspace-id.sql`
 - Modify: `backend/src/modules/documents/chunks.ts`（写入路径补 `workspace_id`）
 
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+
 **Schema**
 ```sql
 ALTER TABLE document_chunks
@@ -352,6 +360,8 @@ ALTER TABLE document_chunks
 **Files**
 - Create: `backend/database/migrations/0006-skill-packages.sql`
 - Modify: `backend/src/modules/skills/`（所有引用 `skills_installed` 的地方改为 `skill_packages`）
+
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
 
 **Schema**
 ```sql
@@ -400,6 +410,8 @@ CREATE TABLE skill_packages (
 
 **Files**
 - Create: `backend/database/migrations/0006-agent-runs.sql`
+
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
 
 **Schema**
 ```sql
@@ -473,6 +485,8 @@ CREATE TABLE agent_run_events (
 **Files**
 - Create: `backend/database/migrations/0007-tool-policy.sql`
 
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+
 **Schema**
 ```sql
 CREATE TABLE tool_policy_rules (
@@ -527,6 +541,8 @@ CREATE TABLE tool_approvals (
 **Files**
 - Create: `backend/database/migrations/0008-rag-extensions.sql`
 
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+
 **Schema**
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -541,6 +557,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 **Files**
 - Create: `backend/database/migrations/0009-storage-jobs.sql`（`document_ingestion_jobs` / `storage_finalize_jobs` / `storage_deletion_outbox`）
+
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
 - Modify: 文档上传路径切到 staging
 - Create: `backend/src/workers/finalize-worker.ts`
 
@@ -559,7 +577,9 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 **Files**
 - Create: `backend/database/migrations/0010-legacy-embeddings-migration.sql`
-- Create: `backend/src/migrations/legacy-embedding-profile.ts`（应用层迁移 runner，注册到 `npm run migrate`）
+
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+- （已撤销）应用层 migration runner 与 §5.3 / G-2 "不维护迁移链" 冲突；如需 embedding profile 调整，改 init.sql + 删库重建
 
 **步骤**（按 §8.4.2 顺序，逐 PR 子任务）：
 - Step 1：`CREATE EXTENSION` + 插入 Legacy Profile (`status='migrating', is_active=false`)
@@ -591,6 +611,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 **Files**
 - Create: `backend/database/migrations/0011-eval-schema.sql`
+
+> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
 
 **Schema**：把 README「评测表为伪 schema」涉及到的所有表定稿（`eval_suites` / `eval_cases` / `eval_runs` / `eval_results`），含 FK、CHECK 与 partial index。**先定稿 Schema 再写 runner**——避免 runner 用临时表然后被推翻重写。
 
@@ -629,7 +651,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 - [ ] V2 §4.2、§5.4、§6.6、§7.4、§8.7、§9.8 全部对应至少一个 PR 验收项
 - [ ] 阶段 0 PR-0.1 + PR-4.1 形成 Core/RAG 双向可证
-- [ ] 全部迁移在仓库内可重放（`docker compose down -v && docker compose up -d && npm run migrate`）
+- [ ] Schema 在仓库内可重放：`rm -rf data/postgres && docker compose up -d && npm run migrate`（删库重建路径，详见 §5.3）
 - [ ] 全部 CI 门禁在 `.github/workflows/verify.yml` 中可见
 - [ ] 全部验收项对应 `architecture-v2.md` 章节指针，可在 PR 描述中追溯
 

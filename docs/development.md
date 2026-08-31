@@ -15,7 +15,7 @@ mastra-agent-starter/
 ├── backend/
 │   ├── database/
 │   │   ├── init.sql                     # 首次安装的 Schema 基线（0000）
-│   │   └── migrations/                  # 后续只增不改的增量迁移
+│   │   └── migrations/                  # 保留目录（已被 §5.3 / G-2 裁决为不再维护）；保留仅为兼容旧 docker volume 初始化路径
 │   ├── market-skills/                   # 通过 skills.sh 安装的本地化技能
 │   ├── src/
 │   │   ├── mastra/
@@ -104,7 +104,7 @@ npm ci
 npm run migrate
 ```
 
-根目录的 Compose 会把 `backend/database/init.sql` 挂载为新数据卷的初始化 Schema。`npm run migrate` 负责记录该基线，并执行 `database/migrations/` 中尚未执行的增量迁移。
+根目录的 Compose 会把 `backend/database/init.sql` 挂载为新数据卷的初始化 Schema。
 
 ### 2. 环境变量
 
