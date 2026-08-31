@@ -5,12 +5,17 @@
  * `message-start` / `content-delta` / `tool-call-*` / `message-complete` /
  * `message-error`。差异仅在上游输入（起点消息、历史切片），通过 `AskStreamInput`
  * 显式传入。
+ *
+ * V2.3.6 §5.1：`AskStreamInput` 现在强制携带 `workspaceId`（已认证上下文中
+ * 解析得到的非空字符串），并贯穿到 `streamAgent` / `dispatchStreamEvent` /
+ * `finalizeMessage` / `finalizeAfterStreamError` / `sweepRunningToolExecutions`
+ * 全链。客户端字段（`body.workspaceId` / `?workspaceId=` / `X-Workspace-Id`）
+ * 一律忽略。
  */
 import { streamAgent, type StreamEvent } from '../agent/runtime.js';
 import {
   appendPartialContent,
   cleanupExecution,
-  type ExecutionConflictError,
 } from './controller.js';
 import {
   buildSseController,
@@ -29,6 +34,8 @@ import type { Citation } from '../../modules/citations/types.js';
 import type { Message } from '../../modules/conversations/types.js';
 
 export interface AskStreamInput {
+  /** 已认证上下文中解析到的非空工作区 ID（V2.3.6 §5.1）。 */
+  workspaceId: string;
   assistantMessageId: string;
   conversationId: string;
   agentId: string;
@@ -52,13 +59,15 @@ interface RunAgentStreamState {
  * 让两条路由共享同一调用形态。
  */
 async function* runAgentStream(input: AskStreamInput): AsyncGenerator<StreamEvent, void, unknown> {
-  yield* streamAgent(
-    input.agentId,
-    input.message,
-    input.knowledgeBaseId,
-    input.history,
-    input.abortSignal,
-  );
+  yield* streamAgent({
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    prompt: input.message,
+    conversationId: input.conversationId,
+    knowledgeBaseId: input.knowledgeBaseId,
+    history: input.history,
+    abortSignal: input.abortSignal,
+  });
 }
 
 /**
@@ -71,6 +80,11 @@ async function* runAgentStream(input: AskStreamInput): AsyncGenerator<StreamEven
  *  3. 终态事件（`done` / `stopped` / `error`）走 `finalizeMessage`；
  *  4. 异常通过 `finalizeAfterStreamError` 兜底；
  *  5. `finally` 清理内存执行条目。
+ *
+ * 全链路 `workspaceId` 透传——`streamAgent` 用于技能绑定 / KB 校验，
+ * `dispatchStreamEvent` / `finalizeMessage` / `finalizeAfterStreamError` /
+ * `sweepRunningToolExecutions` 用于 `tool_executions` / `messages` 写入的
+ * 工作区隔离校验。
  */
 export function buildAskStreamResponse(
   input: AskStreamInput,
@@ -105,6 +119,7 @@ export function buildAskStreamResponse(
 
           if (event.type === 'tool-call-start' || event.type === 'tool-call-complete' || event.type === 'tool-call-error') {
             await dispatchStreamEvent(event, {
+              workspaceId: input.workspaceId,
               conversationId: input.conversationId,
               assistantMessageId: input.assistantMessageId,
               fullTextRef,
@@ -115,7 +130,7 @@ export function buildAskStreamResponse(
           }
 
           if (event.type === 'done') {
-            await finalizeMessage(input.assistantMessageId, {
+            await finalizeMessage(input.workspaceId, input.assistantMessageId, {
               terminal: 'completed',
               content: event.content,
               citations: event.citations,
@@ -125,7 +140,7 @@ export function buildAskStreamResponse(
           }
 
           if (event.type === 'stopped') {
-            await finalizeMessage(input.assistantMessageId, {
+            await finalizeMessage(input.workspaceId, input.assistantMessageId, {
               terminal: 'stopped',
               content: event.content,
               citations: [],
@@ -135,7 +150,7 @@ export function buildAskStreamResponse(
           }
 
           if (event.type === 'error') {
-            await finalizeMessage(input.assistantMessageId, {
+            await finalizeMessage(input.workspaceId, input.assistantMessageId, {
               terminal: 'failed',
               fullText: state.fullText,
               errorMessage: event.error,
@@ -147,13 +162,14 @@ export function buildAskStreamResponse(
         const isAbort = (error as Error).name === 'AbortError' || input.abortSignal.aborted;
         console.error(isAbort ? `${options.logTag} SSE 流已中断` : `${options.logTag} SSE 流错误：`, error);
         await finalizeAfterStreamError(
+          input.workspaceId,
           input.assistantMessageId,
           state.fullText,
           isAbort,
           sse,
         );
       } finally {
-        await sweepRunningToolExecutions(input.assistantMessageId, 'stream_finalized');
+        await sweepRunningToolExecutions(input.workspaceId, input.assistantMessageId, 'stream_finalized');
         cleanupExecution(input.assistantMessageId);
         sse.close();
       }

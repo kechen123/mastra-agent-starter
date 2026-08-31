@@ -16,6 +16,13 @@
  * DB 写入通过可注入的 `MessageFinalizer` 接口进行；生产路径默认指向
  * `finalizeAssistant` / `convergeRunningToolExecutions`，测试路径可注入
  * 内存假实现（见 `_setMessageFinalizerForTesting`）。
+ *
+ * V2.3.6 §5.1：所有 `messages` 写入必须携带 `workspaceId`——
+ * `finalizeAssistant` / `convergeRunningToolExecutions`（Task 8/9）已
+ * 把 `workspace_id` 列为必填首参，本文件把 `workspaceId` 透传给 finalizer，
+ * 并作为前向参数贯穿到 `finalizeMessage` / `finalizeAfterStreamError` /
+ * `sweepRunningToolExecutions`，让上层调用方（ask-driver）能直接传入
+ * 已认证上下文中的非空 workspaceId。
  */
 import { finalizeAssistant } from '../../modules/conversations/service.js';
 import {
@@ -44,24 +51,24 @@ export type FinalizeInput = FinalizeSuccess | FinalizeError;
 /** 可注入的"终态写入器"接口。生产实现走 DB；测试实现走内存假实现。 */
 export interface MessageFinalizer {
   finalizeAssistant(
+    workspaceId: string,
     id: string,
     content: string,
     citations: Citation[],
     terminal: 'completed' | 'stopped' | 'failed',
   ): Promise<Message>;
   convergeRunningToolExecutions(
+    workspaceId: string,
     messageId: string,
-    terminal: 'stopped' | 'failed',
-    reason?: string,
   ): Promise<number>;
 }
 
 const productionFinalizer: MessageFinalizer = {
-  async finalizeAssistant(id, content, citations, terminal) {
-    return finalizeAssistant(id, content, citations, terminal);
+  async finalizeAssistant(workspaceId, id, content, citations, terminal) {
+    return finalizeAssistant(workspaceId, id, content, citations, terminal);
   },
-  async convergeRunningToolExecutions(messageId, terminal, reason) {
-    return convergeRunningToolExecutions(messageId, terminal, reason);
+  async convergeRunningToolExecutions(workspaceId, messageId) {
+    return convergeRunningToolExecutions(workspaceId, messageId);
   },
 };
 
@@ -83,15 +90,20 @@ function isError(input: FinalizeInput): input is FinalizeError {
  *   - 即便 DB 写入失败（行已被并发终态化等），SSE 仍必须 emit 一次终态事件，
  *     否则客户端会一直挂在等待 `message-complete` 上。
  *   - 终态事件字段必须和 DB 行内容一致（content / citations / status）。
+ *
+ * `workspaceId` 必填（V2.3.6 §5.1）——透传给 `finalizeAssistant`，由
+ * 底层 `UPDATE messages ... WHERE id = $1 AND workspace_id = $2` 完成
+ * 跨工作区访问的 404 兜底。
  */
 export async function finalizeMessage(
+  workspaceId: string,
   assistantMessageId: string,
   input: FinalizeInput,
   sse: SseController,
 ): Promise<void> {
   if (isError(input)) {
     try {
-      await activeFinalizer.finalizeAssistant(assistantMessageId, input.fullText, [], 'failed');
+      await activeFinalizer.finalizeAssistant(workspaceId, assistantMessageId, input.fullText, [], 'failed');
     } catch {
       // 静默忽略：消息已经处于终态或被并发请求处理
     }
@@ -112,6 +124,7 @@ export async function finalizeMessage(
 
   try {
     const finalized = await activeFinalizer.finalizeAssistant(
+      workspaceId,
       assistantMessageId,
       input.content,
       input.citations,
@@ -150,22 +163,29 @@ export async function finalizeMessage(
 
 /**
  * 紧急路径：流循环内部抛出异常。区分 Abort 与真实错误并收敛 DB 行。
+ *
+ * `workspaceId` 必填（V2.3.6 §5.1）——透传给 finalizeAssistant 与
+ * convergeRunningToolExecutions。
+ *
+ * `convergeRunningToolExecutions` 由 Task 9 简化为 `(workspaceId, messageId)`
+ * 两参形态（内部固定把 status 收敛为 cancelled / error 收敛为 converged），
+ * 不再需要外部传入 terminal / reason。
  */
 export async function finalizeAfterStreamError(
+  workspaceId: string,
   assistantMessageId: string,
   fullText: string,
   isAbort: boolean,
   sse: SseController,
 ): Promise<void> {
   const status: TerminalStatus = isAbort ? 'stopped' : 'failed';
-  const reason = isAbort ? 'stream_aborted' : 'stream_error';
   try {
-    await activeFinalizer.finalizeAssistant(assistantMessageId, fullText, [], status);
+    await activeFinalizer.finalizeAssistant(workspaceId, assistantMessageId, fullText, [], status);
   } catch {
     // 静默忽略：消息已经处于终态或被并发请求处理
   }
   try {
-    await activeFinalizer.convergeRunningToolExecutions(assistantMessageId, status, reason);
+    await activeFinalizer.convergeRunningToolExecutions(workspaceId, assistantMessageId);
   } catch (err) {
     console.error('收敛 tool executions 失败：', err);
   }
@@ -196,13 +216,21 @@ export async function finalizeAfterStreamError(
 /**
  * 兜底：无论正常完成还是异常退出，最后都跑一次"仍 running 工具执行"收敛，
  * 避免孤儿行。总是从 `finally` 块调用。
+ *
+ * `workspaceId` 必填（V2.3.6 §5.1）——透传给 convergeRunningToolExecutions。
+ *
+ * 注：`reason` 在 Task 9 简化的 convergeRunningToolExecutions 形态下已
+ * 不再被消费（底层固定写 'converged' / 'cancelled'），但保留参数避免
+ * 重排 ask-driver 现有 finally 块的形状；上游仍然按习惯传入语义化的
+ * 字符串（如 'stream_finalized'）以便日志/排错时保持阅读连续性。
  */
 export async function sweepRunningToolExecutions(
+  workspaceId: string,
   assistantMessageId: string,
-  reason: string,
+  _reason: string,
 ): Promise<void> {
   try {
-    await activeFinalizer.convergeRunningToolExecutions(assistantMessageId, 'stopped', reason);
+    await activeFinalizer.convergeRunningToolExecutions(workspaceId, assistantMessageId);
   } catch (err) {
     console.error('最终收敛 tool executions 失败：', err);
   }

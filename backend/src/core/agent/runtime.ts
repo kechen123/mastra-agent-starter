@@ -1,7 +1,7 @@
 import type { Citation } from '../../modules/citations/types.js';
 import type { Message } from '../../modules/conversations/types.js';
 import { getKnowledgeBase } from '../../modules/knowledge/service.js';
-import { searchKnowledgeBase } from '../../modules/knowledge/rag/retriever.js';
+import { searchKnowledgeBase } from '../knowledge/search.js';
 import { resolveTools, resolveToolIds } from '../tool/registry.js';
 import {
   resolveSkillsForAgent,
@@ -9,11 +9,39 @@ import {
   ensureSkillRegistryLoaded,
 } from '../skill/registry.js';
 import { getAgentDefinition } from './registry.js';
-import type { StreamChunk, StreamResult, StreamStopped, StreamError, StreamToolCallStart, StreamToolCallComplete, StreamToolCallError } from '../execution/stream-events.js';
-
-export type { StreamChunk, StreamResult, StreamStopped, StreamError, StreamToolCallStart, StreamToolCallComplete, StreamToolCallError } from '../execution/stream-events.js';
 import type { StreamEvent } from '../execution/stream-events.js';
-export type { StreamEvent };
+export type {
+  StreamChunk,
+  StreamResult,
+  StreamStopped,
+  StreamError,
+  StreamToolCallStart,
+  StreamToolCallComplete,
+  StreamToolCallError,
+  StreamEvent,
+} from '../execution/stream-events.js';
+
+/**
+ * `streamAgent` 的入参契约（V2.3.6 §5.1）。
+ *
+ * `workspaceId` 是唯一可信的工作区身份来源——调用方（HTTP 路由通过
+ * `withAuthenticatedWorkspace`、CLI 脚本通过 SESSION_TOKEN 解析）必须
+ * 把已经校验过的 `workspaceId` 传进来。Agent 运行时内部不允许再走任何
+ * 客户端字段或回退路径。
+ *
+ * `conversationId` / `knowledgeBaseId` / `history` 都是**可选**的——Agent
+ * 运行时本身不写 DB（写入路径在 `core/execution/ask-driver.ts`），但这些
+ * 字段保留在契约上便于上层做最小上下文透传。
+ */
+export interface StreamAgentInput {
+  workspaceId: string;
+  agentId: string;
+  prompt: string;
+  conversationId?: string;
+  knowledgeBaseId?: string | null;
+  history?: Message[];
+  abortSignal: AbortSignal;
+}
 
 /**
  * 通用 Agent 运行时（Runtime Driver）。
@@ -22,7 +50,7 @@ export type { StreamEvent };
  * `instructions` / `model` / 特定配置；Core 只负责"按能力驱动"：
  *
  *   - 当 `capabilities.knowledgeBase = true`：
- *       - 必须提供 knowledgeBaseId，并校验其存在；
+ *       - 必须提供 knowledgeBaseId，并校验其存在（受 workspaceId 约束）；
  *       - 检索为空时立即发"done-empty"事件，不再进入 LLM；
  *       - 把引文上下文注入 prompt（带编号 [1] [2]...）。
  *       - `citations: false` 仍会注入上下文，但不会回传引文给调用方。
@@ -35,12 +63,10 @@ export type { StreamEvent };
  *   `definition.capabilities` 表达。
  */
 export async function* streamAgent(
-  agentId: string,
-  message: string,
-  knowledgeBaseId: string | null,
-  history: Message[],
-  abortSignal: AbortSignal,
+  input: StreamAgentInput,
 ): AsyncGenerator<StreamEvent, void, unknown> {
+  const { workspaceId, agentId, prompt, knowledgeBaseId, history, abortSignal } = input;
+
   const definition = getAgentDefinition(agentId);
   if (!definition) {
     yield { type: 'error', error: 'Agent 不存在。' };
@@ -60,24 +86,27 @@ export async function* streamAgent(
       ? resolveTools(resolveToolIds(definition.toolIds ?? [], undefined))
       : {};
     const skills: unknown[] = definition.capabilities.skills
-      ? resolveSkillsForAgent(agentId, await getAgentSkillBindings(agentId))
+      ? resolveSkillsForAgent(agentId, await getAgentSkillBindings(workspaceId, agentId))
           .map((s) => s.skill)
           .filter((s): s is NonNullable<typeof s> => !!s)
       : [];
 
-    let prompt: string;
+    let resolvedPrompt: string;
     let citations: Citation[] = [];
+    const historyOrEmpty = history ?? [];
 
     if (definition.capabilities.knowledgeBase) {
       if (!knowledgeBaseId) {
         yield { type: 'error', error: '请先选择一个知识库。' };
         return;
       }
-      if (!(await getKnowledgeBase(knowledgeBaseId))) {
+      if (!(await getKnowledgeBase(workspaceId, knowledgeBaseId))) {
         yield { type: 'error', error: '绑定的知识库不存在，请重新选择。' };
         return;
       }
-      const retrieved = await searchKnowledgeBase(knowledgeBaseId, message);
+      // 走 core/knowledge/search.ts 的工作区校验封装——禁止直连
+      // modules/knowledge/rag/retriever，绕过 workspaceId 校验。
+      const retrieved = await searchKnowledgeBase(workspaceId, knowledgeBaseId, prompt);
       if (retrieved.length === 0) {
         // citations=false 的 Agent 也会发出同样的 done 事件，但 citations
         // 数组为空；下游消费者按 capabilities.citations 自己忽略即可。
@@ -92,16 +121,16 @@ export async function* streamAgent(
       const context = retrieved
         .map((c, i) => `[${i + 1}] ${c.title}｜${c.chapter}\n${c.content}`)
         .join('\n\n');
-      prompt = buildPrompt(
-        history,
-        `请仅根据以下当前知识库资料回答问题：「${message}」。\n\n${context}\n\n不要使用资料以外的知识，也不要调用其他检索工具。引文由系统单独返回。`,
+      resolvedPrompt = buildPrompt(
+        historyOrEmpty,
+        `请仅根据以下当前知识库资料回答问题：「${prompt}」。\n\n${context}\n\n不要使用资料以外的知识，也不要调用其他检索工具。引文由系统单独返回。`,
       );
     } else {
-      prompt = buildPrompt(history, message);
+      resolvedPrompt = buildPrompt(historyOrEmpty, prompt);
     }
 
     const agent = definition.factory(tools, skills);
-    const stream = await agent.stream(prompt, { abortSignal });
+    const stream = await agent.stream(resolvedPrompt, { abortSignal });
     if (abortSignal.aborted) {
       yield { type: 'stopped', content: '' };
       return;
