@@ -15,6 +15,7 @@ import {
   getMarketSkillsRootAbsolute,
   isPathStrictlyUnder,
   saveInstalledSkill,
+  enableWorkspaceSkill,
   removeInstalledSkill,
   loadInstalledSkills,
   getSkill,
@@ -210,7 +211,7 @@ export async function previewMarketSkill(owner: string, repo: string, skillName:
   );
 }
 
-export async function installMarketSkill(owner: string, repo: string, skillName: string): Promise<SkillPreview> {
+export async function installMarketSkill(workspaceId: string, owner: string, repo: string, skillName: string): Promise<SkillPreview> {
   const preview = await previewMarketSkill(owner, repo, skillName);
   if (!preview) {
     throw new Error('无法获取 Skill 详情，请确认 owner/repo/skillName 是否正确。');
@@ -262,6 +263,7 @@ export async function installMarketSkill(owner: string, repo: string, skillName:
     { source: preview.source, installable, reason: onDiskAnalysis.reason },
     onDiskAllowedTools.length > 0 ? onDiskAllowedTools : undefined,
   );
+  await enableWorkspaceSkill(workspaceId, preview.id);
   await loadInstalledSkills();
 
   return {
@@ -274,7 +276,7 @@ export async function installMarketSkill(owner: string, repo: string, skillName:
   };
 }
 
-export async function updateMarketSkill(id: string): Promise<SkillPreview | null> {
+export async function updateMarketSkill(workspaceId: string, id: string): Promise<SkillPreview | null> {
   const skill = getSkill(id);
   if (!skill || skill.source !== 'marketplace') {
     throw new Error('仅支持更新市场来源的 Skill。');
@@ -283,7 +285,7 @@ export async function updateMarketSkill(id: string): Promise<SkillPreview | null
   if (!parsed) {
     throw new Error('Skill ID 格式无效，应为 owner/repo/skillName。');
   }
-  return installMarketSkill(parsed.owner, parsed.repo, parsed.skillName);
+  return installMarketSkill(workspaceId, parsed.owner, parsed.repo, parsed.skillName);
 }
 
 export async function uninstallMarketSkill(id: string): Promise<void> {

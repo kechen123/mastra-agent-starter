@@ -53,7 +53,8 @@ CREATE TABLE workspace_members (
 );
 CREATE INDEX workspace_members_user_id_idx ON workspace_members(user_id);
 
-CREATE TABLE skills_installed (
+-- 全局 Skill 包目录：代码与校验和在所有 Workspace 间共享。
+CREATE TABLE skill_packages (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT NOT NULL,
@@ -186,8 +187,20 @@ CREATE INDEX tool_executions_workspace_message_idx ON tool_executions(workspace_
 CREATE TABLE agent_skill_bindings (
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   agent_id TEXT NOT NULL,
-  skill_id TEXT NOT NULL REFERENCES skills_installed(id) ON DELETE CASCADE,
-  bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  skill_id TEXT NOT NULL REFERENCES skill_packages(id) ON DELETE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, agent_id, skill_id)
 );
 CREATE INDEX agent_skill_bindings_skill_idx ON agent_skill_bindings(skill_id);
+
+-- Workspace 对全局 Skill 的启用状态。绑定与实际运行均受它约束。
+CREATE TABLE workspace_skills (
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  skill_id TEXT NOT NULL REFERENCES skill_packages(id) ON DELETE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, skill_id)
+);
+CREATE INDEX workspace_skills_skill_idx ON workspace_skills(skill_id);

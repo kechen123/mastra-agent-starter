@@ -1,6 +1,6 @@
 # V2 实施计划（阶段 0～5 / PR 切片）
 
-> **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / `LEGACY_WORKSPACE_OWNER_USER_ID` ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。PR-1.2 / PR-1.3 / PR-1.5 已合并落地；PR-1.4（`skills_installed → skill_packages` 重命名）仍按原计划后续 PR 实施。
+> **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / `LEGACY_WORKSPACE_OWNER_USER_ID` ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。PR-1.2 / PR-1.3 / PR-1.4 / PR-1.5 已合并落地。
 
 > **状态：基于 V2.3.6（2026-08-28）** —— `architecture-v2.md` 已升版至 V2.3.6，五项定向修正全部落定（含 §8.4.1 Core/RAG Schema 边界与 §8.4.2 存量内联向量迁移）。本文档据此拆解阶段 0～5 的 PR 切片。**仍为文档/计划阶段，不进入代码开发。**
 
@@ -355,13 +355,13 @@ ALTER TABLE document_chunks
 - 迁移后 `\d document_chunks` 命中 `workspace_id` 列；
 - Core-only 安装（无 `vector` 扩展）下，迁移成功，无 pgvector 对象创建。
 
-### PR-1.4：Skill 三表迁移 + `skills_installed → skill_packages` 重命名
+### PR-1.4：Skill 三表迁移 + `skills_installed → skill_packages` 重命名（已落地）
 
 **Files**
 - Create: `backend/database/migrations/0006-skill-packages.sql`
 - Modify: `backend/src/modules/skills/`（所有引用 `skills_installed` 的地方改为 `skill_packages`）
 
-> 实际未创建此文件——PR-1.4（`skills_installed → skill_packages` 重命名）仍按原计划后续 PR 实施，预期合并到 `backend/database/init.sql` 单文件（见 §5.3 / G-2）。
+> 已合并至 `backend/database/init.sql`：`skill_packages` 是全局目录表，`workspace_skills` 控制 Workspace 启用状态，`agent_skill_bindings` 保留 Workspace 内 Agent 绑定与 enabled 状态。
 
 **Schema**
 ```sql
@@ -397,7 +397,7 @@ CREATE TABLE skill_packages (
 ### 阶段 1 验收（映射 V2 §5.4）
 
 - [ ] 所有 6 张归属表都具备 `workspace_id` 且隔离合约测试通过（**含 `document_chunks`**）
-- [ ] `skill_packages` 是全局目录表，绑定表归属 workspace
+- [x] `skill_packages` 是全局目录表，绑定表归属 workspace
 - [ ] 行级 soft delete 与 partial unique index 不破坏
 
 ---

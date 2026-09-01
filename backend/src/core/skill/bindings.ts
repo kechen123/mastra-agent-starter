@@ -57,12 +57,25 @@ export async function bindSkillToAgent(workspaceId: string, agentId: string, ski
       throw new Error(`Agent ${agentId} 未授权工具：${notInAgent.join(', ')}`);
     }
   }
+  await enableWorkspaceSkill(workspaceId, skillId);
   const pool = bindingsPool();
   await pool.query(
-    `INSERT INTO agent_skill_bindings (workspace_id, agent_id, skill_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (workspace_id, agent_id, skill_id) DO NOTHING`,
+    `INSERT INTO agent_skill_bindings (workspace_id, agent_id, skill_id, enabled)
+     VALUES ($1, $2, $3, TRUE)
+     ON CONFLICT (workspace_id, agent_id, skill_id) DO UPDATE
+       SET enabled = TRUE, updated_at = now()`,
     [workspaceId, agentId, skillId],
+  );
+}
+
+/** 将一个全局 Skill Package 显式启用到当前 Workspace。 */
+export async function enableWorkspaceSkill(workspaceId: string, skillId: string): Promise<void> {
+  const pool = bindingsPool();
+  await pool.query(
+    `INSERT INTO workspace_skills (workspace_id, skill_id, enabled)
+     VALUES ($1, $2, TRUE)
+     ON CONFLICT (workspace_id, skill_id) DO UPDATE SET enabled = TRUE`,
+    [workspaceId, skillId],
   );
 }
 
@@ -78,7 +91,15 @@ export async function unbindSkillFromAgent(workspaceId: string, agentId: string,
 export async function getAgentSkillBindings(workspaceId: string, agentId: string): Promise<string[]> {
   const pool = bindingsPool();
   const result = await pool.query<{ skill_id: string }>(
-    `SELECT skill_id FROM agent_skill_bindings WHERE workspace_id = $1 AND agent_id = $2`,
+    `SELECT binding.skill_id
+       FROM agent_skill_bindings binding
+       JOIN workspace_skills workspace_skill
+         ON workspace_skill.workspace_id = binding.workspace_id
+        AND workspace_skill.skill_id = binding.skill_id
+      WHERE binding.workspace_id = $1
+        AND binding.agent_id = $2
+        AND binding.enabled = TRUE
+        AND workspace_skill.enabled = TRUE`,
     [workspaceId, agentId],
   );
   return result.rows.map((r) => r.skill_id);

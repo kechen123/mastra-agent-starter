@@ -591,10 +591,8 @@ test('case 16: removeInstalledSkill cascades bindings', { skip: !RUN }, async ()
                 (md5('wB')::uuid, 'general-chat', 's1')`,
       );
       // 直删走 production `removeInstalledSkill` 同款 SQL（不开事务、不重
-      // 载 registry）：先清 agent_skill_bindings 的引用，再清 skills_installed。
-      // FK 已声明 ON DELETE CASCADE；本 SQL 等价复刻 production 路径的级联效果。
-      await a.query(`DELETE FROM agent_skill_bindings WHERE skill_id = 's1'`);
-      await a.query(`DELETE FROM skills_installed WHERE id = 's1'`);
+      // 载 registry）：直接删全局 package；FK 自动级联清理 workspace 启用和绑定。
+      await a.query(`DELETE FROM skill_packages WHERE id = 's1'`);
       const rows = await a.query<{ c: string }>(
         `SELECT count(*)::text AS c FROM agent_skill_bindings WHERE skill_id = 's1'`,
       );

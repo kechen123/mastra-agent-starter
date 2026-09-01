@@ -169,6 +169,9 @@ function makeInMemoryDbPool(): { pool: Pool; bindings: Map<string, Set<string>>;
   const pool = {
     async query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
       const trimmed = sql.trim();
+      if (/INSERT INTO workspace_skills/i.test(trimmed)) {
+        return { rows: [] };
+      }
       if (/INSERT INTO agent_skill_bindings/i.test(trimmed)) {
         const [workspaceId, agentId, skillId] = params as [string, string, string];
         const key = `${workspaceId}::${agentId}`;
@@ -181,7 +184,7 @@ function makeInMemoryDbPool(): { pool: Pool; bindings: Map<string, Set<string>>;
         calls.insert++;
         return { rows: [] };
       }
-      if (/SELECT skill_id FROM agent_skill_bindings/i.test(trimmed)) {
+      if (/FROM agent_skill_bindings binding/i.test(trimmed)) {
         const [workspaceId, agentId] = params as [string, string];
         calls.select++;
         const key = `${workspaceId}::${agentId}`;

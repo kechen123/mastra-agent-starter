@@ -146,7 +146,7 @@ export const previewSkillRoute = registerApiRoute('/skills/market/preview', {
 export const installSkillRoute = registerApiRoute('/skills/market/install', {
   method: 'POST',
   requiresAuth: true,
-  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     const body = await context.req.json<unknown>();
     const parsed = parseSkillTriple(body);
     if (!parsed) {
@@ -154,7 +154,7 @@ export const installSkillRoute = registerApiRoute('/skills/market/install', {
     }
     try {
       await ensureSkillRegistryLoaded();
-      const installed: SkillPreview = await installMarketSkill(parsed.owner, parsed.repo, parsed.skillName);
+      const installed: SkillPreview = await installMarketSkill(authCtx.workspaceId, parsed.owner, parsed.repo, parsed.skillName);
       await ensureSkillRegistryLoaded();
       return context.json(installed);
     } catch (err) {
@@ -167,11 +167,11 @@ export const installSkillRoute = registerApiRoute('/skills/market/install', {
 export const updateSkillRoute = registerApiRoute('/skills/:id/update', {
   method: 'POST',
   requiresAuth: true,
-  handler: withAuthenticatedWorkspace(async (_authCtx, context) => {
+  handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     await ensureSkillRegistryLoaded();
     const id = context.req.param('id');
     try {
-      const updated = await updateMarketSkill(id);
+      const updated = await updateMarketSkill(authCtx.workspaceId, id);
       await ensureSkillRegistryLoaded();
       if (!updated) {
         return context.json({ message: '未找到对应的 Skill。' }, 404);

@@ -1,8 +1,8 @@
 # Mastra Agent Starter 架构文档
 
 > **文档定位**：本文描述 **当前已实现** 的系统架构（as-built）——文中出现的每个模块、表、路由都对应仓库里真实存在的代码。
-> 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)（V2.3.5，**尚未实现任何代码**）；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
-> 本文与 V2 文档冲突时，**以本文为当前代码事实**；V2 文档中的表（`workspaces`、`agent_runs`、`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等）目前一律不存在。
+> 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
+> 本文与 V2 文档冲突时，**以本文为当前代码事实**；当前已落地 `workspaces` 与 Skill 三表，`agent_runs`、`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等仍未实现。
 
 ## 概述
 
@@ -91,7 +91,7 @@ Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持
   - `backend/src/skills/local/<id>/SKILL.md` —— 本地自定义
   - `backend/market-skills/<owner>/<repo>/<skill>/SKILL.md` —— skills.sh 安装
 - `_template` 目录会被 `discovery.ts` 的 `readSkillMdEntries()` 跳过（`if (id === '_template') continue`），**不会污染 Skill 列表**
-- DB `skills_installed` 与 `agent_skill_bindings` 表驱动运行时注入与绑定
+- DB `skill_packages`、`workspace_skills` 与 `agent_skill_bindings` 三表驱动全局包、Workspace 启用与 Agent 绑定
 - `compatibility === 'compatible'` 才会被采纳；`requires-runtime` 在 `resolveSkillsForAgent()` 阶段被丢弃
 - 一次 `ensureSkillRegistryLoaded()` 必须只触发一次 DB hydration；失败时回滚到加载前快照、清空 in-flight Promise、下次调用可重试（不允许把"仅 builtin/local/marketplace 的部分列表"当作完整注册表）
 
@@ -259,7 +259,7 @@ infrastructure/llm/
 2. 用户从结果中选择 `owner/repo/skillName`，前端调用 `POST /skills/market/preview` 预览
 3. 预览通过 `fetchSkillFiles()` 拉取真实文件列表，计算 `compatibility`
 4. 前端调用 `POST /skills/market/install`
-5. 服务端下载所有文件到 `backend/market-skills/<owner>/<repo>/<skillName>/`，注册到 `skills_installed` 表
+5. 服务端下载所有文件到 `backend/market-skills/<owner>/<repo>/<skillName>/`，注册到全局 `skill_packages` 并在当前 Workspace 启用
 6. 调用 `loadInstalledSkills()` 刷新内存缓存
 7. `compatible` 技能可通过 `POST /skills/:id/bind` 绑定到 Agent
 
@@ -335,7 +335,7 @@ infrastructure/llm/
 明确边界：
 
 - **不** 适用于公网直接部署——速率限制、租户隔离、Tool 风险治理都未实现。
-- **不** 适用于多用户、多租户、私有知识库隔离场景——`conversations`、`knowledge_bases`、`documents`、`tool_executions`、`agent_skill_bindings` 都没有 owner/tenant 归属列。目标形态（`workspaces` + 各表 `workspace_id`）与落地顺序见 [`architecture-v2.md`](architecture-v2.md) 阶段 1；**在 `implementation-plan.md` 对应 PR 落地前，不要提前给这些表加列**。
+- Workspace 隔离已覆盖会话、知识库、文档、分块、工具执行与 Agent-Skill 绑定；跨 Workspace 资源访问统一隐藏为 404。公开生产部署仍不适用，因为速率限制、Tool 风险治理和审批流尚未实现。
 - **不** 实现审批流——`ToolDefinition.metadata` 中的 `destructive` / `openWorld` 字段仅作为能力声明与 UI 展示，**不是** 运行时授权策略。
 - **Phase 1 认证范围**——本地用户名 / 密码登录已落地，但仅保证"可登录、可吊销当前会话"，未实现密码找回 / 多因素 / 风控锁定 / 公开注册；多账号共享数据。
 

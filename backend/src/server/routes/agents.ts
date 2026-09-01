@@ -10,7 +10,14 @@ export const agentsRoute = registerApiRoute('/agents', {
     const defs = listAgentDefinitions();
     const pool = getDatabasePool();
     const bindingsResult = await pool.query<{ agent_id: string; skill_id: string }>(
-      `SELECT agent_id, skill_id FROM agent_skill_bindings WHERE workspace_id = $1`,
+      `SELECT binding.agent_id, binding.skill_id
+         FROM agent_skill_bindings binding
+         JOIN workspace_skills workspace_skill
+           ON workspace_skill.workspace_id = binding.workspace_id
+          AND workspace_skill.skill_id = binding.skill_id
+        WHERE binding.workspace_id = $1
+          AND binding.enabled = TRUE
+          AND workspace_skill.enabled = TRUE`,
       [authCtx.workspaceId],
     );
     const bindingsMap = new Map<string, string[]>();

@@ -417,6 +417,8 @@ test(
         'messages',
         'tool_executions',
         'agent_skill_bindings',
+        'skill_packages',
+        'workspace_skills',
       ];
       for (const t of required) {
         assert.ok(

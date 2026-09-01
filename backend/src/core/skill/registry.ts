@@ -48,6 +48,7 @@ import {
   setSkillLookup,
   resolveSkillsForAgent,
   bindSkillToAgent,
+  enableWorkspaceSkill,
   unbindSkillFromAgent,
   getAgentSkillBindings,
   _setBindingsPoolForTesting,
@@ -75,6 +76,7 @@ export {
   analyzeCompatibility,
   resolveSkillsForAgent,
   bindSkillToAgent,
+  enableWorkspaceSkill,
   unbindSkillFromAgent,
   getAgentSkillBindings,
   _setBindingsPoolForTesting,
@@ -196,7 +198,7 @@ async function hydrateInstalledFromDb(): Promise<void> {
     metadata: unknown;
     allowed_tools?: string[];
   }>(
-    `SELECT id, name, description, source, location, compatibility, has_scripts, metadata, allowed_tools FROM skills_installed ORDER BY installed_at DESC`,
+    `SELECT id, name, description, source, location, compatibility, has_scripts, metadata, allowed_tools FROM skill_packages ORDER BY installed_at DESC`,
   );
   for (const row of result.rows) {
     // 每次加载都重新读盘：DB 中的 has_scripts 可能是过期的（例如卸载后
@@ -296,7 +298,7 @@ export async function saveInstalledSkill(
 ): Promise<void> {
   const pool = getDatabasePool();
   await pool.query(
-    `INSERT INTO skills_installed (id, name, description, source, location, compatibility, has_scripts, metadata, allowed_tools)
+    `INSERT INTO skill_packages (id, name, description, source, location, compatibility, has_scripts, metadata, allowed_tools)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (id) DO UPDATE SET
        name = EXCLUDED.name,
@@ -313,17 +315,12 @@ export async function saveInstalledSkill(
 }
 
 export async function removeInstalledSkill(id: string): Promise<void> {
-  // 全局 Skill 卸载（不绑定到 workspaceId）：单连接单事务级联删除
-  // agent_skill_bindings → skills_installed，避免外部 ON DELETE CASCADE 在
-  // 其他事务中干扰。
+  // 全局 Skill 包卸载：外键会级联清理所有 Workspace 的启用与绑定记录。
   const pool = getDatabasePool();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // 1. 删 agent_skill_bindings 引用
-    await client.query('DELETE FROM agent_skill_bindings WHERE skill_id = $1', [id]);
-    // 2. 删 skills_installed 行
-    await client.query('DELETE FROM skills_installed WHERE id = $1', [id]);
+    await client.query('DELETE FROM skill_packages WHERE id = $1', [id]);
     await client.query('COMMIT');
   } catch (error) {
     try {

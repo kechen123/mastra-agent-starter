@@ -18,7 +18,7 @@ Skill 来源分为三类：
 - `loadBuiltinSkills()`: 扫描 `backend/src/skills/builtin/<id>/SKILL.md`
 - `discoverLocalSkills()`: 扫描 `backend/src/skills/local/<id>/SKILL.md`
 - `discoverMarketplaceSkills()`: 扫描 `backend/market-skills/<owner>/<repo>/<skill>/`
-- `loadInstalledSkills()`: 从 `skills_installed` 表加载，并每次基于磁盘文件列表重新校验兼容性
+- `loadInstalledSkills()`: 从全局 `skill_packages` 表加载，并每次基于磁盘文件列表重新校验兼容性
 - `getSkill(id)`: 获取技能定义（builtin → installed → local 顺序）
 - `listSkills()`: 列出所有技能（内置 + 已安装 + 本地）
 - `resolveSkillsForAgent(agentId, ids)`: 仅返回 `compatibility === 'compatible'` 且 `allowedTools ⊆ agent.toolIds` 的技能
@@ -74,8 +74,8 @@ interface SkillDefinition {
 - `searchMarketSkills(query)`: 调用 `searchSkillsSh()`（GET `/api/skills?query=...`）
 - `listPopularMarketSkills()`: 调用 `getPopularSkillsSh()`（GET `/api/skills/top`）
 - `previewMarketSkill(owner, repo, skillName)`: 调用 `previewSkillsSh()` + `fetchSkillFiles()`，根据返回的文件列表计算兼容性
-- `installMarketSkill(owner, repo, skillName)`: 拉取文件、写入 `market-skills/<owner>/<repo>/<skillName>/`，写入 `skills_installed` 表
-- `updateMarketSkill(id)`: 重新拉取并更新
+- `installMarketSkill(workspaceId, owner, repo, skillName)`: 拉取文件、写入 `market-skills/<owner>/<repo>/<skillName>/`，写入全局 `skill_packages` 并在当前 Workspace 启用
+- `updateMarketSkill(workspaceId, id)`: 重新拉取、更新全局包并确保当前 Workspace 启用
 - `uninstallMarketSkill(id)`: 删除本地文件、清理数据库、刷新注册表
 
 安装流程：
@@ -83,7 +83,7 @@ interface SkillDefinition {
 2. 调用 `previewSkillsSh()` + `fetchSkillFiles()` 获取 SKILL.md 与完整文件清单
 3. 使用 `assertSafeSkillName()` 与 `assertSafeFilePath()` 验证每个返回路径，**拒绝任何越界或绝对路径**
 4. 写入文件到 `backend/market-skills/<owner>/<repo>/<skillName>/`
-5. 写入 `skills_installed` 表
+5. 写入全局 `skill_packages`，并写入当前 Workspace 的 `workspace_skills(enabled=true)`
 6. 重新调用 `loadInstalledSkills()`
 
 **前端必须从搜索/热门结果中选择技能**，不允许任意输入 owner/repo。
@@ -93,12 +93,16 @@ interface SkillDefinition {
 `backend/src/core/skill/registry.ts` 提供绑定 API：
 
 - `bindSkillToAgent(agentId, skillId)`: 绑定技能到 Agent（仅允许 `compatible`，会自动拒绝 `requires-runtime`）
-- `unbindSkillFromAgent(agentId, skillId)`: 解绑
-- `getAgentSkillBindings(agentId)`: 获取 Agent 的已启用绑定列表
+- `unbindSkillFromAgent(workspaceId, agentId, skillId)`: 解绑
+- `getAgentSkillBindings(workspaceId, agentId)`: 获取 Workspace 中已启用的 Agent 绑定列表
 
-绑定关系存储在 `agent_skill_bindings` 表：
-- `agent_id` + `skill_id` 联合主键
-- `enabled`: 布尔值，支持软禁用
+Skill 使用三层表达：
+
+- `skill_packages`：全局安装包目录；所有 Workspace 共享，不含 `workspace_id`。
+- `workspace_skills`：Workspace 是否启用某全局 Skill。
+- `agent_skill_bindings`：Workspace 内 Agent 与 Skill 的绑定；主键为 `workspace_id` + `agent_id` + `skill_id`，并保留 `enabled`。
+
+运行时仅解析同时满足 Workspace 已启用、绑定已启用且兼容的 Skill。
 
 运行时，Agent 的技能集合 = 数据库中的 `boundSkillIds`（不含任何硬编码默认值）。`requires-runtime` 技能在 `resolveSkillsForAgent()` 阶段就会被过滤掉。
 

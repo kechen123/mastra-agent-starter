@@ -369,7 +369,7 @@ export async function dropIsolatedSchema(
  * 在隔离 schema 内跑 Core 基线 DDL。
  *
  * 仅放 §5.1 之前所有阶段都依赖的对象：auth、conversations、messages、
- * tool_executions、agent_skill_bindings、skills_installed、knowledge_bases、
+ * tool_executions、agent_skill_bindings、workspace_skills、skill_packages、knowledge_bases、
  * documents、document_chunks（无 embedding 列）、_migrations。
  *
  * 不放：
@@ -449,17 +449,7 @@ export async function runCoreBaseline(client: PoolClient): Promise<void> {
     )
   `);
   await client.query(`
-    CREATE TABLE agent_skill_bindings (
-      agent_id TEXT NOT NULL,
-      skill_id TEXT NOT NULL,
-      enabled BOOLEAN NOT NULL DEFAULT true,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (agent_id, skill_id)
-    )
-  `);
-  await client.query(`
-    CREATE TABLE skills_installed (
+    CREATE TABLE skill_packages (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
@@ -471,6 +461,26 @@ export async function runCoreBaseline(client: PoolClient): Promise<void> {
       allowed_tools TEXT[],
       installed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await client.query(`
+    CREATE TABLE workspace_skills (
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      skill_id TEXT NOT NULL REFERENCES skill_packages(id) ON DELETE CASCADE,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (workspace_id, skill_id)
+    )
+  `);
+  await client.query(`
+    CREATE TABLE agent_skill_bindings (
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      skill_id TEXT NOT NULL REFERENCES skill_packages(id) ON DELETE CASCADE,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (workspace_id, agent_id, skill_id)
     )
   `);
   // _migrations 表存在即可：PR-0.1 后续会在迁移 runner 中维护
