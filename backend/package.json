@@ -7,6 +7,7 @@
     "dev": "mastra dev",
     "start": "mastra start",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
     "test:contracts": "tsx tests/contracts/run.ts",
     "test:unit": "tsx tests/unit/run.ts",
     "test:integration": "tsx tests/integration/run.ts",
@@ -27,9 +28,12 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
+    "eslint": "^10.9.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.68.0"
   }
 }

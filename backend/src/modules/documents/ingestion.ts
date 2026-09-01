@@ -1,28 +1,15 @@
 import type { PoolClient } from 'pg';
 import { getDatabasePool } from '../../infrastructure/database/pool.js';
 import { CrossWorkspaceAccessError } from '../../server/error-mapping.js';
-import { embedTexts } from '../knowledge/rag/embedding-service.js';
 import {
   getDocument,
   updateDocumentStatus,
   type DocumentSummary,
 } from './service.js';
-import { getParser } from './parsers/registry.js';
-import { normalizeText } from './parsers/plain-text-parser.js';
 import { UnsupportedDocumentTypeError } from './parsers/types.js';
 import { MinerUClientError, MinerUParseError } from './parsers/mineru-client.js';
 
-const CHUNK_SIZE = 1_000;
-const CHUNK_OVERLAP = 150;
 const INSERT_BATCH_SIZE = 50;
-
-interface TextChunk {
-  content: string;
-  chunkIndex: number;
-  startChar: number;
-  endChar: number;
-  heading?: string;
-}
 
 /**
  * 已嵌入完成的待入库文本块 —— caller 负责 parse / split / embed，
@@ -165,52 +152,6 @@ async function insertChunkBatch(
     INSERT INTO document_chunks (workspace_id, knowledge_base_id, document_id, content, chunk_index, metadata, embedding)
     VALUES ${rows.join(', ')}
   `, values);
-}
-
-function splitText(text: string): TextChunk[] {
-  const chunks: TextChunk[] = [];
-  let start = 0;
-  while (start < text.length) {
-    const targetEnd = Math.min(start + CHUNK_SIZE, text.length);
-    const end = targetEnd === text.length ? targetEnd : findBoundary(text, start, targetEnd);
-    const content = text.slice(start, end).trim();
-    if (content) {
-      chunks.push({
-        content,
-        chunkIndex: chunks.length,
-        startChar: start,
-        endChar: end,
-        heading: findHeading(text, start),
-      });
-    }
-    if (end >= text.length) break;
-    start = Math.max(end - CHUNK_OVERLAP, start + 1);
-  }
-  return chunks;
-}
-
-function findBoundary(text: string, start: number, targetEnd: number): number {
-  const minimumBoundary = start + Math.floor(CHUNK_SIZE * 0.5);
-  const candidates = ['\n\n', '\n', '。', '！', '？', '；'];
-  let best = -1;
-  let boundaryLength = 0;
-  for (const delimiter of candidates) {
-    const index = text.lastIndexOf(delimiter, targetEnd - 1);
-    if (index >= minimumBoundary && index > best) {
-      best = index;
-      boundaryLength = delimiter.length;
-    }
-  }
-  return best >= 0 ? best + boundaryLength : targetEnd;
-}
-
-function findHeading(text: string, position: number): string | undefined {
-  const headingAtChunkStart = text.slice(position).match(/^#{1,6}\s+([^\n]+)/)?.[1]?.trim();
-  if (headingAtChunkStart) return headingAtChunkStart;
-  const preceding = text.slice(0, position);
-  const matches = [...preceding.matchAll(/^#{1,6}\s+(.+)$/gm)];
-  const heading = matches.at(-1)?.[1]?.trim();
-  return heading || undefined;
 }
 
 function toVectorLiteral(embedding: number[]): string {

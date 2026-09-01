@@ -826,6 +826,278 @@ record(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 8. Phase 1 鉴权包装器契约：所有 requiresAuth: true 的路由必须经
+//    `withAuthenticatedWorkspace` 包装，使处理器统一收到可信的
+//    AuthenticatedContext（userId / username / workspaceId）。
+//
+// 背景：
+//   V2.3.6 §5.1 要求 PR-1.2 给业务表加 workspace_id 时，所有写入路径必须
+//   能从统一入口拿到非空、可信、非请求体可控的 workspaceId。如果个别路由
+//   漏掉包装，PR-1.2 只能"逐路由补洞"，而 PR-1.1 的本意就是"先把壳装齐"。
+//
+// 实现方式：
+//   静态扫描所有路由文件，逐个 `registerApiRoute(...)` 调用解析其
+//   `{ method, requiresAuth, handler }` 配置体。当 requiresAuth === true
+//   时，检查紧跟其后的 `handler:` 字段的初始化表达式是否引用
+//   `withAuthenticatedWorkspace`（函数表达式被解析为同一个
+//   `registerApiRoute` 调用内的 `handler:` 初始化器）。
+//
+// 反例（必须失败）：
+//   registerApiRoute('/foo', {
+//     method: 'GET',
+//     requiresAuth: true,
+//     handler: async (context) => { ... },     // ❌ 没有包装器
+//   });
+//
+// 正例（必须通过）：
+//   registerApiRoute('/foo', {
+//     method: 'GET',
+//     requiresAuth: true,
+//     handler: withAuthenticatedWorkspace(async (_authCtx, context) => { ... }),
+//   });
+// ─────────────────────────────────────────────────────────────────────────
+
+interface RouteHandlerCheck {
+  file: string;
+  routePath: string;
+  method: string;
+  requiresAuth: boolean;
+  handlerStart: number;
+  handlerBody: string;
+}
+
+function scanRouteHandlers(): RouteHandlerCheck[] {
+  const results: RouteHandlerCheck[] = [];
+  const files: string[] = [];
+  function walk(dir: string) {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) walk(full);
+      else if (st.isFile() && /\.(ts)$/.test(entry)) files.push(full);
+    }
+  }
+  walk(ROUTES_DIR);
+
+  // 对每个 registerApiRoute(... { ..., handler: <expr>, ... } ) 调用做配对扫描。
+  // 关键：handler: <expr> 中 <expr> 可以跨多行；我们用花括号匹配的方式
+  // 截取 handler 表达式的纯文本头部，并断言其以 `withAuthenticatedWorkspace`
+  // 开头（允许空白 / 换行 / 类型断言前缀）。
+  for (const file of files) {
+    const text = readFileSync(file, 'utf-8');
+    const routeRegex =
+      /registerApiRoute\(\s*(['"])([^'"]+)\1\s*,\s*\{/g;
+    let m: RegExpExecArray | null;
+    while ((m = routeRegex.exec(text)) !== null) {
+      const routePath = m[2] ?? '';
+      const bodyStart = m.index + m[0].length;
+      // 从 bodyStart 起，逐字符扫描花括号深度，匹配到与 registerApiRoute
+      // 配置对象 `{` 同级的 `}`；期间所有出现的 handler: / method: /
+      // requiresAuth: 都登记下来。
+      let depth = 1;
+      let i = bodyStart;
+      while (i < text.length && depth > 0) {
+        const ch = text[i];
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        i++;
+      }
+      if (depth !== 0) continue;
+      const body = text.slice(bodyStart, i - 1);
+
+      const methodMatch = body.match(/\bmethod\s*:\s*(['"])([^'"]+)\1/);
+      const method = methodMatch ? (methodMatch[2] ?? '').toUpperCase() : '';
+      const requiresMatch = body.match(/\brequiresAuth\s*:\s*(true|false)/);
+      const requiresAuth = requiresMatch ? requiresMatch[1] === 'true' : false;
+
+      // handler: <expr>，expr 可能跨越括号 / 花括号 / 多行。
+      // 在 body 中寻找 `handler:`，并从冒号后开始按"括号深度"扫描，直到
+      // 表达式结束（括号深度回到 0）或 body 结束。
+      const handlerKeyMatch = /\bhandler\s*:/.exec(body);
+      if (!handlerKeyMatch) continue;
+      const exprStart = findExpressionStart(body, handlerKeyMatch.index + handlerKeyMatch[0].length);
+      if (exprStart < 0) continue;
+      const exprEnd = scanExpressionEnd(body, exprStart);
+      if (exprEnd < 0) continue;
+      const expr = body.slice(exprStart, exprEnd + 1);
+
+      results.push({
+        file: relative(BACKEND_SRC, file).split(sep).join('/'),
+        routePath,
+        method,
+        requiresAuth,
+        handlerStart: exprStart,
+        handlerBody: expr,
+      });
+    }
+  }
+  return results;
+}
+
+function findExpressionStart(body: string, from: number): number {
+  // 跳过空白与换行、类型断言（as Foo）、TS 类型注解。
+  let i = from;
+  while (i < body.length && /\s/.test(body[i]!)) i++;
+  // 处理 `as Xxx` 类型断言：仅当紧接着是标识符或 `(` 才视为断言。
+  while (body.startsWith('as', i) && /\W/.test(body[i + 2] ?? ' ')) {
+    // 跳过 `as Ident`
+    i += 2;
+    while (i < body.length && /\s/.test(body[i]!)) i++;
+    while (i < body.length && /[A-Za-z0-9_]/.test(body[i]!)) i++;
+    while (i < body.length && /\s/.test(body[i]!)) i++;
+  }
+  return i;
+}
+
+function scanExpressionEnd(body: string, start: number): number {
+  // 通过括号 / 方括号 / 花括号 深度判断表达式结束。
+  // 同时正确处理字符串字面量、单引号 / 双引号 / 模板字符串（仅计
+  // `${...}` 内部的嵌套深度），避免被字面量里的括号误判。
+  let depth = 0;
+  let i = start;
+  while (i < body.length) {
+    const ch = body[i]!;
+    const prev = i > 0 ? body[i - 1] : '';
+    // 字符串字面量
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      i++;
+      while (i < body.length && body[i] !== quote) {
+        if (body[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (quote === '`' && body[i] === '$' && body[i + 1] === '{') {
+          // 模板字符串插值：递归扫描内部表达式。
+          let inner = 1;
+          i += 2;
+          while (i < body.length && inner > 0) {
+            const c = body[i]!;
+            if (c === '{') inner++;
+            else if (c === '}') inner--;
+            i++;
+          }
+          continue;
+        }
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      depth--;
+      if (depth < 0) return i - 1; // 表达式结束
+    }
+    // 逗号或下一个属性键出现且当前 depth === 0，意味着表达式结束。
+    if (depth === 0 && (ch === ',' || ch === '\n')) {
+      // 仅在表达式确实"已启动"且深度为 0 时认为结束。
+      // 简化：遇到 ',' 且 depth===0 时，认为是属性分隔，结束。
+      if (ch === ',') return i - 1;
+    }
+    i++;
+  }
+  return -1;
+}
+
+const allHandlers = scanRouteHandlers();
+record(
+  '[Wrapper] 至少存在 1 个 registerApiRoute 配置可被解析',
+  allHandlers.length > 0,
+  `共扫描到 ${allHandlers.length} 条 registerApiRoute 块`,
+);
+
+// §7 ↔ §8 一致性闸门：必须在 §7 / §8 两个 scanner 都跑完之后再算。
+// 闸门逻辑：
+//   - §7 扫描 method / requiresAuth 字段；
+//   - §8 扫描 handler 表达式是否以 withAuthenticatedWorkspace( 起始；
+//   - 两者对"业务受保护路由数"必须一致；否则某个 registerApiRoute 块可能在
+//     §8 的花括号 / 表达式配对解析中失败、被静默跳过，导致 wrapper 检查一边绿、
+//     实际路由根本没被扫描。
+//   - 取 §7 的计数为权威基准（它只关心 method / requiresAuth，与 wrapper 检查无关）。
+const PROTECTED_BUSINESS_ROUTE_KEYS = new Set(
+  allRoutes
+    .filter((r) => r.hasExplicitRequiresAuth && r.requiresAuthValue === 'true')
+    .filter((r) => !ROUTE_AUTH_ALLOWLIST.some((a) => a.method === r.method && a.path === r.path))
+    .map((r) => routeKey(r.method, r.path)),
+);
+
+const WRAPPED_ROUTE_KEYS = new Set(
+  allHandlers
+    .filter((h) => h.requiresAuth)
+    .map((h) => routeKey(h.method, h.routePath)),
+);
+
+const PROTECTED_COUNT = PROTECTED_BUSINESS_ROUTE_KEYS.size;
+const WRAPPED_COUNT = WRAPPED_ROUTE_KEYS.size;
+
+record(
+  '[Auth ↔ Wrapper] §7 鉴权扫描器识别到 31 条业务受保护路由（权威基准）',
+  PROTECTED_COUNT === 31,
+  `实际 ${PROTECTED_COUNT} 条：${[...PROTECTED_BUSINESS_ROUTE_KEYS].sort().join(', ')}`,
+);
+
+record(
+  '[Auth ↔ Wrapper] §8 包装器扫描器与 §7 计数一致（解析失败会导致不一致）',
+  WRAPPED_COUNT === PROTECTED_COUNT,
+  `§7=${PROTECTED_COUNT} 条，§8=${WRAPPED_COUNT} 条；` +
+    `差异说明某个 registerApiRoute 块在 §8 的花括号/表达式配对解析中失败被静默跳过。`,
+);
+
+// 双向逐项核对：§7 列出的每条受保护路由都必须被 §8 看到（反之亦然）。
+const onlyInAuth = [...PROTECTED_BUSINESS_ROUTE_KEYS].filter((k) => !WRAPPED_ROUTE_KEYS.has(k));
+const onlyInWrapper = [...WRAPPED_ROUTE_KEYS].filter((k) => !PROTECTED_BUSINESS_ROUTE_KEYS.has(k));
+record(
+  '[Auth ↔ Wrapper] §7 列出的每条受保护路由都被 §8 解析到',
+  onlyInAuth.length === 0,
+  onlyInAuth.length > 0 ? `§7 出现 §8 缺失： ${onlyInAuth.join(', ')}` : undefined,
+);
+record(
+  '[Auth ↔ Wrapper] §8 解析到的每条 requiresAuth: true 路由都在 §7 列表内',
+  onlyInWrapper.length === 0,
+  onlyInWrapper.length > 0 ? `§8 出现 §7 缺失： ${onlyInWrapper.join(', ')}` : undefined,
+);
+
+let wrapperViolations = 0;
+for (const h of allHandlers) {
+  if (!h.requiresAuth) continue;
+  // 要求 handler 表达式以 withAuthenticatedWorkspace 开头（允许空白）。
+  const ok = /^\s*withAuthenticatedWorkspace\s*\(/.test(h.handlerBody);
+  if (!ok) wrapperViolations++;
+  record(
+    `[Wrapper] ${h.method} ${h.routePath}（${h.file}）必须经过 withAuthenticatedWorkspace 包装`,
+    ok,
+    `实际 handler 表达式前 80 字符：${h.handlerBody.slice(0, 80).replace(/\s+/g, ' ')}`,
+  );
+}
+
+record(
+  '[Wrapper] 所有 requiresAuth: true 路由都已接入 withAuthenticatedWorkspace',
+  wrapperViolations === 0,
+  wrapperViolations > 0 ? `${wrapperViolations} 条路由仍裸跑 handler` : undefined,
+);
+
+// 兜底：withAuthenticatedWorkspace 必须从 auth/workspace-context.js 导入，
+// 否则包装器引用就不成立。该检查确保模板导入的格式稳定，方便后续重构。
+let wrapperImportOk = true;
+let wrapperImportDetail: string | undefined;
+for (const file of walk(ROUTES_DIR).filter((f) => /\.ts$/.test(f))) {
+  const text = readFileSync(file, 'utf-8');
+  if (/withAuthenticatedWorkspace\s*\(/.test(text)) {
+    if (!/from\s+['"][^'"]*modules\/auth\/workspace-context(?:\.js)?['"]/.test(text)) {
+      wrapperImportOk = false;
+      wrapperImportDetail = relative(BACKEND_SRC, file).split(sep).join('/');
+      break;
+    }
+  }
+}
+record(
+  '[Wrapper] 使用 withAuthenticatedWorkspace 的文件必须从 modules/auth/workspace-context 导入',
+  wrapperImportOk,
+  wrapperImportDetail ? `缺少导入：${wrapperImportDetail}` : undefined,
+);
+
+// ─────────────────────────────────────────────────────────────────────────
 // 输出
 // ─────────────────────────────────────────────────────────────────────────
 

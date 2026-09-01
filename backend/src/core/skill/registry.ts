@@ -326,7 +326,12 @@ export async function removeInstalledSkill(id: string): Promise<void> {
     await client.query('DELETE FROM skills_installed WHERE id = $1', [id]);
     await client.query('COMMIT');
   } catch (error) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try {
+      // best-effort：连接可能已被服务端关闭
+      await client.query('ROLLBACK');
+    } catch {
+      // 静默忽略 —— 异常本身会通过外层 throw 透传给调用方
+    }
     throw error;
   } finally {
     client.release();

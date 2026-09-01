@@ -58,7 +58,7 @@ import {
   createIsolatedSchema,
   dropIsolatedSchema,
 } from '../../src/test-utils/db-isolation.js';
-import { runProjectMigrations } from '../../src/test-utils/migrations.js';
+import { ensureSchema } from '../../src/test-utils/schema-init.js';
 import {
   __resetTestPool,
   __setTestPool,
@@ -90,9 +90,8 @@ const DOC_A = 'e7e7e7e7-7777-4777-8777-e7e7e7e7e7e7';
 const M_USER_A = 'f8f8f8f8-8888-4888-8888-f8f8f8f8f8f8';
 const M_ASST_A = 'a9a9a9a9-9999-4999-8999-a9a9a9a9a9a9';
 
-// init.sql 是当前阶段唯一的迁移文件。`through` 字典序比较用 `'init.sql'`
-// 即可截到这条；后续 PR 增加 migrations/*.sql 时本测试需要升级到对应文件名。
-const THROUGH_INIT = 'init.sql';
+// init.sql 是当前阶段唯一的 Schema 来源（PR-1.2/1.3/1.5 整改）；
+// 项目不维护 migrations 链；ensureSchema 直接读 `backend/database/init.sql`。
 
 let passed = 0;
 let failed = 0;
@@ -218,7 +217,7 @@ async function main(): Promise<void> {
     console.log(
       'SKIPPED: 设置 RUN_DB_TESTS=1 + TEST_DATABASE_URL 后才会跑（typecheck 已通过）。',
     );
-    process.exit(0);
+    return;
   }
 
   // -------------------------------------------------------------------------
@@ -233,7 +232,8 @@ async function main(): Promise<void> {
   try {
     // 回归守卫：确保 setupClient 真实落在隔离 schema，再做任何写入。
     await assertSearchPathIsolated(setupClient, schema);
-    await runProjectMigrations(setupClient, { through: THROUGH_INIT });
+    // 直接跑真实生产 ensureSchema —— 应用 init.sql + 写入 _init_meta
+    await ensureSchema(setupPool);
 
     const hashed = await hashPassword('correct horse battery staple');
     await setupClient.query(
@@ -258,9 +258,9 @@ async function main(): Promise<void> {
     );
     // wA 的会话
     await setupClient.query(
-      `INSERT INTO conversations (id, workspace_id, user_id, agent_id, title)
-       VALUES ($1, $2, $3, 'general-chat', 'original-title')`,
-      [C_A, W_A, U_A],
+      `INSERT INTO conversations (id, workspace_id, agent_id, title)
+       VALUES ($1, $2, 'general-chat', 'original-title')`,
+      [C_A, W_A],
     );
     // wA 的知识库
     await setupClient.query(
@@ -268,16 +268,18 @@ async function main(): Promise<void> {
        VALUES ($1, $2, 'kb-original')`,
       [KB_A, W_A],
     );
-    // wA 的文档（必须挂在 wA 的 KB 下，status = 'ready' 标识未变更）
+    // wA 的文档（必须挂在 wA 的 KB 下，status = 'uploaded' 标识未变更）。
+    // 表列对齐 init.sql（documents 表没有 title / source，使用 name / type / size）。
     await setupClient.query(
-      `INSERT INTO documents (id, workspace_id, knowledge_base_id, title, source, status)
-       VALUES ($1, $2, $3, 'doc-original', 'text/plain', 'ready')`,
+      `INSERT INTO documents (id, workspace_id, knowledge_base_id, name, type, size, status)
+       VALUES ($1, $2, $3, 'doc-original', 'text/plain', 0, 'uploaded')`,
       [DOC_A, W_A, KB_A],
     );
-    // wA 的 user / assistant 消息（与 conversations.workspace_id 一致）
+    // wA 的 user / assistant 消息（与 conversations.workspace_id 一致）。
+    // status 取值对齐 init.sql CHECK：'completed' / 'pending'。
     await setupClient.query(
       `INSERT INTO messages (id, workspace_id, conversation_id, role, content, status)
-       VALUES ($1, $2, $3, 'user',      'hi',           'complete'),
+       VALUES ($1, $2, $3, 'user',      'hi',           'completed'),
               ($4, $2, $3, 'assistant', 'hello there',  'pending')`,
       [M_USER_A, W_A, C_A, M_ASST_A],
     );
@@ -299,10 +301,12 @@ async function main(): Promise<void> {
       typeof ensured.workspaceId === 'string' && ensured.workspaceId.length > 0,
       `got ${ensured.workspaceId}`,
     );
-    // 关键不变量：uB 的真实 workspaceId 是服务端兜底新建的（与 W_B 常量
-    // **不**相等）——这是为了在本测试中显式区分"客户端伪造 / cookie 解析"
-    // 与"fixture 字面 ID"。W_B 仅用于 workspace / member 表里建立归属
-    // 关系，路由上下文拿到的 workspaceId 来自 ensurePersonalWorkspace。
+    // 关键不变量：fixture 已在 setup 阶段显式 INSERT 了
+    //   workspaces(id=W_B, kind='personal', owner_user_id=U_B)
+    //   workspace_members(workspace_id=W_B, user_id=U_B, role='owner')
+    // 因此 `ensurePersonalWorkspace(U_B)` 应当**命中既有行**并返回 W_B；
+    // 不会再另建随机 workspace。W_B 不是"仅 fixture 字面 ID"，而是 U_B
+    // 服务端可信的 Personal Workspace（与 W_A 字面常量严格区分）。
     const wBRealWorkspaceId = ensured.workspaceId;
     const created = await createSession({ userId: U_B, ttlDays });
     uBToken = created.token;
@@ -455,16 +459,16 @@ async function main(): Promise<void> {
       const body = (await res.json()) as unknown;
       assertNotFound('case 5 getDocument cross-workspace', res, body);
 
-      const r = await verifyPool.query<{ title: string; status: string }>(
-        `SELECT title, status FROM documents WHERE id = $1`,
+      const r = await verifyPool.query<{ name: string; status: string }>(
+        `SELECT name, status FROM documents WHERE id = $1`,
         [DOC_A],
       );
       assert(
         'case 5 getDocument: wA 文档行未被修改',
         r.rows.length === 1 &&
-          r.rows[0]!.title === 'doc-original' &&
-          r.rows[0]!.status === 'ready',
-        `title=${r.rows[0]?.title}, status=${r.rows[0]?.status}`,
+          r.rows[0]!.name === 'doc-original' &&
+          r.rows[0]!.status === 'uploaded',
+        `name=${r.rows[0]?.name}, status=${r.rows[0]?.status}`,
       );
     }
 
@@ -567,20 +571,34 @@ async function main(): Promise<void> {
     }
 
     // 防回归：uB 拿到的真实 workspaceId 与 wA 字面常量 W_A 不同，避免有人
-    // 在未来误用 W_B 作为路由 ctx 注入的 workspaceId。
+    // 在未来误用 W_A 作为路由 ctx 注入的 workspaceId（跨 workspace 越权）。
     assert(
       'sanity: uB 真实 workspaceId !== fixture 字面 W_A',
       wBRealWorkspaceId !== W_A,
       `wB=${wBRealWorkspaceId}`,
     );
-    // 防回归：uB 真实 workspaceId 与 W_B 也不同——ensurePersonalWorkspace
-    // 返回的是新建行（fixture 字面 W_B 仅用于建表归属关系）。这是为了
-    // 显式证明"客户端无法伪造 workspaceId"，只走 cookie 解析出的服务端
-    // 上下文。
+    // PR-1.2/1.3/1.5 收尾整改 — fixture 已显式 INSERT W_B 作为 U_B 的
+    // Personal Workspace，ensurePersonalWorkspace(U_B) 必须命中既有行
+    // 返回 W_B，证明：服务端 Personal Workspace 是 **幂等可达** 的，不
+    // 会因为 fixture 显式建过就另起一条；客户端也无法伪造 workspaceId
+    // （cookie 解析拿到的就是服务端落库的真值）。
     assert(
-      'sanity: uB 真实 workspaceId !== fixture 字面 W_B',
-      wBRealWorkspaceId !== W_B,
-      `wB=${wBRealWorkspaceId}`,
+      'sanity: uB 真实 workspaceId === fixture 字面 W_B（命中既有 personal 行）',
+      wBRealWorkspaceId === W_B,
+      `wB=${wBRealWorkspaceId}, expected=${W_B}`,
+    );
+    // 数据库落库断言：U_B 在该 schema 下只有 1 行 personal workspace。
+    // 这一行计数同时覆盖"ensure 命中既有 W_B 没另建"和"partial unique
+    // 索引 one_personal_workspace_per_user 实际生效"两个不变量。
+    const personalCount = await verifyPool.query<{ c: string }>(
+      `SELECT count(*)::text AS c FROM workspaces
+        WHERE owner_user_id = $1 AND kind = 'personal'`,
+      [U_B],
+    );
+    assert(
+      'sanity: U_B 在本 schema 仅 1 行 personal workspace（ensure 命中既有、未另建）',
+      personalCount.rows[0]?.c === '1',
+      `count=${personalCount.rows[0]?.c}`,
     );
 
     await verifyPool.end().catch(() => {});
@@ -593,7 +611,12 @@ async function main(): Promise<void> {
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
-  process.exit(failed > 0 ? 1 : 0);
+  if (failed > 0) {
+    throw new Error(`handler-http-404 失败 ${failed} 项断言`);
+  }
 }
 
-void main();
+// Top-level await（直接 await main()，不调用 process.exit）——
+// 让 `npm run test:integration` 继续 import 后续 fixture；
+// 任一 fixture 失败向上 throw，被 runner 接住 → 进程 exit 1。
+await main();

@@ -1,5 +1,9 @@
 # Mastra Agent Starter 架构文档
 
+> **文档定位**：本文描述 **当前已实现** 的系统架构（as-built）——文中出现的每个模块、表、路由都对应仓库里真实存在的代码。
+> 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)（V2.3.5，**尚未实现任何代码**）；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
+> 本文与 V2 文档冲突时，**以本文为当前代码事实**；V2 文档中的表（`workspaces`、`agent_runs`、`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等）目前一律不存在。
+
 ## 概述
 
 Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持通用对话和知识库问答两种 Agent 模式。系统采用前后端分离架构，使用 PostgreSQL 持久化数据，并通过 SSE 流式传输实现实时对话体验。
@@ -331,7 +335,7 @@ infrastructure/llm/
 明确边界：
 
 - **不** 适用于公网直接部署——速率限制、租户隔离、Tool 风险治理都未实现。
-- **不** 适用于多用户、多租户、私有知识库隔离场景——`conversations`、`knowledge_bases`、`documents`、`tool_executions`、`agent_skill_bindings` 都没有 owner/tenant 归属列。
+- **不** 适用于多用户、多租户、私有知识库隔离场景——`conversations`、`knowledge_bases`、`documents`、`tool_executions`、`agent_skill_bindings` 都没有 owner/tenant 归属列。目标形态（`workspaces` + 各表 `workspace_id`）与落地顺序见 [`architecture-v2.md`](architecture-v2.md) 阶段 1；**在 `implementation-plan.md` 对应 PR 落地前，不要提前给这些表加列**。
 - **不** 实现审批流——`ToolDefinition.metadata` 中的 `destructive` / `openWorld` 字段仅作为能力声明与 UI 展示，**不是** 运行时授权策略。
 - **Phase 1 认证范围**——本地用户名 / 密码登录已落地，但仅保证"可登录、可吊销当前会话"，未实现密码找回 / 多因素 / 风控锁定 / 公开注册；多账号共享数据。
 

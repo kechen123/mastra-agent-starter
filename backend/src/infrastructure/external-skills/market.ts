@@ -244,7 +244,6 @@ export async function installMarketSkill(owner: string, repo: string, skillName:
   // ── 物化后重新分类 ─────────────────────────────────────────────────────
   // 用磁盘上的真实文件再跑一次分类与兼容性，避免预览与落库结果不一致。
   const onDiskFiles = listFilesRecursive(dir);
-  const skillMdPath = join(dir, 'SKILL.md');
   const onDiskAllowedTools = parseAllowedToolsFromFrontmatter(preview.skillMd);
   const onDiskAnalysis = analyzeCompatibility(onDiskFiles, onDiskAllowedTools);
   const finalCompatibility = onDiskAnalysis.compatibility;

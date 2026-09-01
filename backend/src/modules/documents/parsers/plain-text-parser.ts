@@ -27,7 +27,7 @@ export class PlainTextParser implements DocumentParser {
 
 export function normalizeText(text: string): string {
   return text
-    .replace(/^﻿/, '')
+    .replace(/^\uFEFF/, '')
     .replace(/\r\n?/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();

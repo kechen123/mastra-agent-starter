@@ -160,32 +160,39 @@ setSkillLookup((id) => skillMap.get(id));
 
 /** 极简内存假 DB pool——仅支持本测试的 INSERT / SELECT / DELETE。 */
 function makeInMemoryDbPool(): { pool: Pool; bindings: Map<string, Set<string>>; calls: { insert: number; select: number; delete: number } } {
+  // PR-1.2/1.3/1.5 整改：e406f74 把 bindSkillToAgent / unbindSkillFromAgent /
+  // getAgentSkillBindings 签名改成 (workspaceId, agentId, skillId) 三元组。
+  // 本内存假池的 key 也跟着用 `(workspaceId, agentId)` 二元组，保证假池
+  // 与生产 SQL 的"按 workspace + agent 维度隔离"语义一致。
   const bindings = new Map<string, Set<string>>();
   const calls = { insert: 0, select: 0, delete: 0 };
   const pool = {
     async query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
       const trimmed = sql.trim();
       if (/INSERT INTO agent_skill_bindings/i.test(trimmed)) {
-        const [agentId, skillId] = params as [string, string];
-        let set = bindings.get(agentId);
+        const [workspaceId, agentId, skillId] = params as [string, string, string];
+        const key = `${workspaceId}::${agentId}`;
+        let set = bindings.get(key);
         if (!set) {
           set = new Set();
-          bindings.set(agentId, set);
+          bindings.set(key, set);
         }
         set.add(skillId);
         calls.insert++;
         return { rows: [] };
       }
       if (/SELECT skill_id FROM agent_skill_bindings/i.test(trimmed)) {
-        const [agentId] = params as [string];
+        const [workspaceId, agentId] = params as [string, string];
         calls.select++;
-        const set = bindings.get(agentId) ?? new Set<string>();
+        const key = `${workspaceId}::${agentId}`;
+        const set = bindings.get(key) ?? new Set<string>();
         return { rows: Array.from(set).map((id) => ({ skill_id: id })) as unknown as T[] };
       }
       if (/DELETE FROM agent_skill_bindings/i.test(trimmed)) {
-        const [agentId, skillId] = params as [string];
+        const [workspaceId, agentId, skillId] = params as [string, string, string];
+        const key = `${workspaceId}::${agentId}`;
         calls.delete++;
-        bindings.get(agentId)?.delete(skillId);
+        bindings.get(key)?.delete(skillId);
         return { rows: [] };
       }
       throw new Error(`未预期的 SQL：${trimmed.slice(0, 80)}`);
@@ -197,6 +204,9 @@ function makeInMemoryDbPool(): { pool: Pool; bindings: Map<string, Set<string>>;
 const { pool, calls } = makeInMemoryDbPool();
 _setBindingsPoolForTesting(pool);
 
+// 本测试不依赖真实 workspace——所有 binding 调用都走同一个常量 workspace。
+const TEST_WS = 'test-workspace';
+
 // ─────────────────────────────────────────────────────────────────────────
 // 场景 1：兼容 Skill 绑定成功，DB 写入一次
 // ─────────────────────────────────────────────────────────────────────────
@@ -204,11 +214,11 @@ _setBindingsPoolForTesting(pool);
 console.log('[scenario 1] 兼容 Skill + 真实 Agent → 绑定成功且 DB 写入一次');
 
 const insertBefore = calls.insert;
-await bindSkillToAgent('general-chat', COMPATIBLE_SKILL_ID);
+await bindSkillToAgent(TEST_WS, 'general-chat', COMPATIBLE_SKILL_ID);
 
 assert(
   '首次绑定后 getAgentSkillBindings 返回该 Skill',
-  (await getAgentSkillBindings('general-chat')).includes(COMPATIBLE_SKILL_ID),
+  (await getAgentSkillBindings(TEST_WS, 'general-chat')).includes(COMPATIBLE_SKILL_ID),
 );
 assert(
   '首次绑定恰好触发一次 INSERT',
@@ -219,7 +229,7 @@ assert(
 // 重复绑定同一 (agent, skill) 应走 ON CONFLICT，仍然算一次 SQL 调用，
 // 不抛错。这是对"幂等"的最小保证。
 const insertBeforeDup = calls.insert;
-await bindSkillToAgent('general-chat', COMPATIBLE_SKILL_ID);
+await bindSkillToAgent(TEST_WS, 'general-chat', COMPATIBLE_SKILL_ID);
 assert(
   '重复绑定同一 Skill 不会抛错',
   true,
@@ -239,7 +249,7 @@ const insertBeforeScript = calls.insert;
 const selectBeforeScript = calls.select;
 let scriptErr = '';
 try {
-  await bindSkillToAgent('general-chat', SCRIPT_SKILL_ID);
+  await bindSkillToAgent(TEST_WS, 'general-chat', SCRIPT_SKILL_ID);
 } catch (err) {
   scriptErr = err instanceof Error ? err.message : String(err);
 }
@@ -264,7 +274,7 @@ assert(
 );
 assert(
   '绑定失败后 getAgentSkillBindings 仍只返回成功绑定过的 Skill',
-  !(await getAgentSkillBindings('general-chat')).includes(SCRIPT_SKILL_ID),
+  !(await getAgentSkillBindings(TEST_WS, 'general-chat')).includes(SCRIPT_SKILL_ID),
 );
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -276,7 +286,7 @@ console.log('\n[scenario 3] allowed-tools 引用未注册工具 → 拒绝且零
 const insertBeforeUnreg = calls.insert;
 let unregErr = '';
 try {
-  await bindSkillToAgent('general-chat', UNREGISTERED_TOOL_SKILL_ID);
+  await bindSkillToAgent(TEST_WS, 'general-chat', UNREGISTERED_TOOL_SKILL_ID);
 } catch (err) {
   unregErr = err instanceof Error ? err.message : String(err);
 }
@@ -304,7 +314,7 @@ console.log('\n[scenario 4] allowed-tools 引用 Agent 未授权工具 → 拒�
 const insertBeforeUnauth = calls.insert;
 let unauthErr = '';
 try {
-  await bindSkillToAgent('general-chat', UNAUTHORIZED_TOOL_SKILL_ID);
+  await bindSkillToAgent(TEST_WS, 'general-chat', UNAUTHORIZED_TOOL_SKILL_ID);
 } catch (err) {
   unauthErr = err instanceof Error ? err.message : String(err);
 }
@@ -324,7 +334,7 @@ assert(
 );
 assert(
   '未授权工具路径下 getAgentSkillBindings 不包含该 Skill',
-  !(await getAgentSkillBindings('general-chat')).includes(UNAUTHORIZED_TOOL_SKILL_ID),
+  !(await getAgentSkillBindings(TEST_WS, 'general-chat')).includes(UNAUTHORIZED_TOOL_SKILL_ID),
 );
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -334,26 +344,26 @@ assert(
 console.log('\n[scenario 5] unbindSkillFromAgent → DB 行移除，查询一致');
 
 const deleteBefore = calls.delete;
-const beforeUnbind = await getAgentSkillBindings('general-chat');
+const beforeUnbind = await getAgentSkillBindings(TEST_WS, 'general-chat');
 assert(
   '解绑前 getAgentSkillBindings 包含已绑定 Skill',
   beforeUnbind.includes(COMPATIBLE_SKILL_ID),
 );
 
-await unbindSkillFromAgent('general-chat', COMPATIBLE_SKILL_ID);
+await unbindSkillFromAgent(TEST_WS, 'general-chat', COMPATIBLE_SKILL_ID);
 assert(
   '解绑操作触发一次 DELETE',
   calls.delete === deleteBefore + 1,
 );
 assert(
   '解绑后 getAgentSkillBindings 不再返回该 Skill',
-  !(await getAgentSkillBindings('general-chat')).includes(COMPATIBLE_SKILL_ID),
+  !(await getAgentSkillBindings(TEST_WS, 'general-chat')).includes(COMPATIBLE_SKILL_ID),
 );
 
 // 解绑一个本就不存在的 binding：DELETE 仍然算一次，但不应抛错，不应产生
 // 新的 bindings 行。
 const bindingsSizeBefore = Array.from(skillMap.keys()).length;
-await unbindSkillFromAgent('general-chat', 'integration-never-bound-skill');
+await unbindSkillFromAgent(TEST_WS, 'general-chat', 'integration-never-bound-skill');
 assert(
   '解绑不存在的 binding 不抛错',
   true,
@@ -363,7 +373,7 @@ assert(
 // 因此 knowledge-base 的 getAgentSkillBindings 应为空数组。
 assert(
   '未绑定任何 Skill 的 Agent 返回空数组',
-  (await getAgentSkillBindings(SECOND_AGENT)).length === 0,
+  (await getAgentSkillBindings(TEST_WS, SECOND_AGENT)).length === 0,
 );
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -373,7 +383,7 @@ assert(
 console.log('\n[scenario 6] resolveSkillsForAgent 必须与 binding 路径使用相同规则');
 
 // 把 compatible Skill 重新绑一次，让 knowledge-base 域里也能命中。
-await bindSkillToAgent(SECOND_AGENT, COMPATIBLE_SKILL_ID);
+await bindSkillToAgent(TEST_WS, SECOND_AGENT, COMPATIBLE_SKILL_ID);
 const resolvedKb = resolveSkillsForAgent(SECOND_AGENT, [
   COMPATIBLE_SKILL_ID,
   SCRIPT_SKILL_ID,
@@ -395,7 +405,7 @@ assert(
 );
 
 // 清理：把兼容 Skill 从 knowledge-base 解绑，避免污染其它场景的统计。
-await unbindSkillFromAgent(SECOND_AGENT, COMPATIBLE_SKILL_ID);
+await unbindSkillFromAgent(TEST_WS, SECOND_AGENT, COMPATIBLE_SKILL_ID);
 
 // ─────────────────────────────────────────────────────────────────────────
 // 收尾：恢复生产 loader 与 production pool，避免污染其它测试 / 模块
@@ -404,4 +414,8 @@ _setSkillRegistryLoaderForTesting(null);
 _setBindingsPoolForTesting(null);
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+if (failed > 0) {
+  // 不调 process.exit —— 让 npm run test:integration 继续 import 后续 fixture；
+  // 失败向上 throw，由 runner 接住 → 进程 exit 1。
+  throw new Error(`skill-binding-contract 失败 ${failed} 项断言`);
+}

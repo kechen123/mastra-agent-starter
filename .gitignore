@@ -127,6 +127,10 @@ dist
 
 # pnpm
 .pnpm-store
+frontend/pnpm-lock.yaml
+
+# Playwright MCP server runtime output
+.playwright-mcp/
 
 # yarn v3
 .pnp.*

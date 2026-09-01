@@ -227,6 +227,11 @@ export async function finalizeAfterStreamError(
 export async function sweepRunningToolExecutions(
   workspaceId: string,
   assistantMessageId: string,
+  // PR-1.2 关闭审查整改：上游调用方（ask-driver）按 ask-driver:172 传入语义化
+  // 字符串（如 'stream_finalized' / 'stream_error'），用于日志与排错阅读连续性；
+  // 当前实现收敛分支（'converged' / 'cancelled'）固定写死，不再消费该参数。
+  // 显式保留以免破坏 ask-driver 的 finally 块形状 —— 调用方仍在传语义字符串。
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _reason: string,
 ): Promise<void> {
   try {

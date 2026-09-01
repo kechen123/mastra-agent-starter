@@ -1,4 +1,4 @@
-import { getApiBaseUrl, request } from './api';
+import { getApiBaseUrl, request, UnauthenticatedError } from './api';
 import type { ConversationDetail, ConversationSummary, Message, AgentDefinition } from '../types/conversation';
 
 export function listAgents(): Promise<AgentDefinition[]> {
@@ -17,8 +17,35 @@ export function createConversation(input: { agentId: string; knowledgeBaseId?: s
   });
 }
 
-export function getConversation(id: string): Promise<{ conversation: ConversationDetail; messages: Message[] }> {
-  return request<{ conversation: ConversationDetail; messages: Message[] }>(`/conversations/${id}`);
+/**
+ * 区分 401 与 404 的会话读取错误：401 仍走 UnauthenticatedError；其它非 2xx
+ * （包括跨 Workspace 的 404）以 ConversationAccessError 抛出，附带 HTTP 状态。
+ * 前端用它把"会话不存在 / 无权访问"映射成"清理 URL + 友好提示"。
+ */
+export class ConversationAccessError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ConversationAccessError';
+    this.status = status;
+  }
+}
+
+export async function getConversation(id: string): Promise<{ conversation: ConversationDetail; messages: Message[] }> {
+  const baseUrl = getApiBaseUrl();
+  const response = await fetch(`${baseUrl}/conversations/${id}`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (response.status === 401) {
+    throw new UnauthenticatedError();
+  }
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { message?: string; error?: string } | null;
+    const message = data?.message ?? data?.error ?? '加载会话失败。';
+    throw new ConversationAccessError(message, response.status);
+  }
+  return response.json() as Promise<{ conversation: ConversationDetail; messages: Message[] }>;
 }
 
 export function updateConversation(id: string, input: { title?: string; agentId?: string; knowledgeBaseId?: string | null }): Promise<ConversationDetail> {

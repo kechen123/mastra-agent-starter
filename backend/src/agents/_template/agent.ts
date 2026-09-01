@@ -1,6 +1,5 @@
 import { Agent } from '@mastra/core/agent';
 import type { AgentDefinition } from '../../core/agent/types.js';
-import { config } from '../../config.js';
 import { resolveDefaultChatModel } from '../../infrastructure/llm/registry.js';
 import { templateInstructions } from './instructions.js';
 

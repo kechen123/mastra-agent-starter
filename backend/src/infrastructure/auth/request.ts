@@ -4,7 +4,6 @@
  * 这些函数只解析字符串、拼装 Set-Cookie 值；不写日志、不抛出含敏感信息
  * 的异常。`MastraAuthProvider` 与登录路由均复用这些函数。
  */
-import { config } from '../../config.js';
 import type { HonoRequestLike } from '@mastra/core/auth';
 
 export const SESSION_COOKIE_NAME = 'mastra_session';

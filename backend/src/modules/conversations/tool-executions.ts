@@ -51,9 +51,13 @@ export async function finalizeToolExecution(
   error?: string,
 ): Promise<void> {
   const pool = getDatabasePool();
+  // 参数位顺序：$1=execId（WHERE id），$2=workspaceId（WHERE workspace_id），
+  // $3=result（SET result），$4=status（SET status），$5=error（SET error）。
+  // 历史回归（PR-1.2 关闭审查发现）：原 SQL 用 $2/$3/$4 映射到 result/status/
+  // error，导致 UUID 落到 JSONB 列上直接报 type cast 错。已按 Codex 整改。
   const updateResult = await pool.query<{ id: string }>(
     `UPDATE tool_executions
-        SET result = $2, status = $3, error = $4, finished_at = now()
+        SET result = $3, status = $4, error = $5, finished_at = now()
       WHERE id = $1 AND workspace_id = $2
       RETURNING id`,
     [execId, workspaceId, result ? JSON.stringify(result) : null, status, error ?? null],

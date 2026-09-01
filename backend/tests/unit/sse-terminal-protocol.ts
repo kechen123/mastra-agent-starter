@@ -87,14 +87,16 @@ function captureSse(): {
 /** 内存假 finalizer。记录所有调用并返回可预测的 Message 对象。 */
 function makeInMemoryFinalizer(): MessageFinalizer & {
   finalizeCalls: Array<{ id: string; content: string; citations: unknown[]; terminal: string }>;
-  convergeCalls: Array<{ messageId: string; terminal: string; reason?: string }>;
+  convergeCalls: Array<{ messageId: string }>;
 } {
   const finalizeCalls: Array<{ id: string; content: string; citations: unknown[]; terminal: string }> = [];
-  const convergeCalls: Array<{ messageId: string; terminal: string; reason?: string }> = [];
+  const convergeCalls: Array<{ messageId: string }> = [];
   return {
     finalizeCalls,
     convergeCalls,
-    async finalizeAssistant(id, content, citations, terminal) {
+    async finalizeAssistant(_workspaceId, id, content, citations, terminal) {
+      // PR-1.2/1.3/1.5 整改：1d1f487 把签名改成 (workspaceId, id, content,
+      // citations, terminal) 五参。本测试不依赖真实 workspace，把首参忽略。
       finalizeCalls.push({ id, content, citations, terminal });
       return {
         id,
@@ -106,8 +108,9 @@ function makeInMemoryFinalizer(): MessageFinalizer & {
         createdAt: '2026-08-26T00:00:00.000Z',
       };
     },
-    async convergeRunningToolExecutions(messageId, terminal, reason) {
-      convergeCalls.push({ messageId, terminal, reason });
+    async convergeRunningToolExecutions(_workspaceId, messageId) {
+      // PR-1.2/1.3/1.5 整改：1d1f487 简化为 (workspaceId, messageId) 两参。
+      convergeCalls.push({ messageId });
       return 0;
     },
   };
@@ -115,26 +118,36 @@ function makeInMemoryFinalizer(): MessageFinalizer & {
 
 /** 内存假 tool sink。 */
 function makeInMemoryToolSink(): ToolExecutionSink & {
-  createCalls: Array<{ conversationId: string; messageId: string; toolName: string }>;
+  createCalls: Array<{ workspaceId: string; messageId: string; toolName: string }>;
   finalizeCalls: Array<{ id: string; status: string; errorCode?: string }>;
 } {
-  const createCalls: Array<{ conversationId: string; messageId: string; toolName: string }> = [];
+  const createCalls: Array<{ workspaceId: string; messageId: string; toolName: string }> = [];
   const finalizeCalls: Array<{ id: string; status: string; errorCode?: string }> = [];
   let nextId = 1;
   return {
     createCalls,
     finalizeCalls,
-    async createToolExecution(conversationId, messageId, toolName) {
-      createCalls.push({ conversationId, messageId, toolName });
+    async createToolExecution(workspaceId, messageId, toolName, _input) {
+      // PR-1.2/1.3/1.5 整改：1d1f487 把签名改成
+      // (workspaceId, messageId, toolName, input) 四参。本测试不依赖真实
+      // workspace，把首参与旧 `conversationId` 字段统一改为 `workspaceId`。
+      createCalls.push({ workspaceId, messageId, toolName });
       return `exec-${nextId++}`;
     },
-    async finalizeToolExecution(id, _output, status, errorCode) {
+    async finalizeToolExecution(_workspaceId, id, _output, status, errorCode) {
+      // PR-1.2/1.3/1.5 整改：1d1f487 把签名改成
+      // (workspaceId, id, output, status, errorCode?) 五参；首参忽略。
       finalizeCalls.push({ id, status, errorCode });
     },
   };
 }
 
 console.log('[sse] 帧格式与 UUID');
+
+// PR-1.2/1.3/1.5 整改：1d1f487 把 finalizeMessage / finalizeAfterStreamError /
+// sweepRunningToolExecutions / handleToolEvent 的首参改成 workspaceId（V2.3.6 §5.1）。
+// 本测试不依赖真实 workspace —— 用常量代替，避免每个 case 重复写字面量。
+const TEST_WS = 'test-workspace';
 
 // C6 / C7 / isUuid sanity
 {
@@ -156,7 +169,7 @@ console.log('\n[sse] C1 — 正常完成');
   const finalizer = makeInMemoryFinalizer();
   _setMessageFinalizerForTesting(finalizer);
   const { sse, parseEvents } = captureSse();
-  await finalizeMessage('m1', {
+  await finalizeMessage(TEST_WS, 'm1', {
     terminal: 'completed',
     content: 'done',
     citations: [{ source: 'doc', snippet: 'x' } as never],
@@ -165,11 +178,11 @@ console.log('\n[sse] C1 — 正常完成');
   const events = parseEvents();
   assert('C1: emit `message-complete`',
     events.some((e) => e.name === 'message-complete'));
-  const complete = events.find((e) => e.name === 'message-complete')!;
+  const complete = events.find((e) => e.name === 'message-complete');
   assert('C1: message-complete.status === "completed"',
-    (complete.data as { status: string }).status === 'completed');
+    complete !== undefined && (complete.data as { status: string }).status === 'completed');
   assert('C1: message-complete.content 透传',
-    (complete.data as { content: string }).content === 'done');
+    complete !== undefined && (complete.data as { content: string }).content === 'done');
   assert('C1: finalizeAssistant 被以 completed 调用一次',
     finalizer.finalizeCalls.length === 1 && finalizer.finalizeCalls[0].terminal === 'completed');
   assert('C1: citations 透传到 finalizeAssistant',
@@ -184,18 +197,18 @@ console.log('\n[sse] C2 — 用户停止');
   const finalizer = makeInMemoryFinalizer();
   _setMessageFinalizerForTesting(finalizer);
   const { sse, parseEvents } = captureSse();
-  await finalizeMessage('m2', {
+  await finalizeMessage(TEST_WS, 'm2', {
     terminal: 'stopped',
     content: 'partial',
     citations: [],
     fullText: 'partial-so-far',
   }, sse);
   const events = parseEvents();
-  const complete = events.find((e) => e.name === 'message-complete')!;
+  const complete = events.find((e) => e.name === 'message-complete');
   assert('C2: 停止路径 emit `message-complete`（不是 message-error）',
-    events.length === 1 && complete.name === 'message-complete');
+    events.length === 1 && complete?.name === 'message-complete');
   assert('C2: status === "stopped"',
-    (complete.data as { status: string }).status === 'stopped');
+    complete !== undefined && (complete.data as { status: string }).status === 'stopped');
   assert('C2: finalizeAssistant 以 stopped 终态落库',
     finalizer.finalizeCalls[0].terminal === 'stopped');
   assert('C2: citations 强制为空数组',
@@ -210,19 +223,19 @@ console.log('\n[sse] C3 — 异常失败');
   const finalizer = makeInMemoryFinalizer();
   _setMessageFinalizerForTesting(finalizer);
   const { sse, parseEvents } = captureSse();
-  await finalizeMessage('m3', {
+  await finalizeMessage(TEST_WS, 'm3', {
     terminal: 'failed',
     fullText: 'partial',
     errorMessage: '上游 LLM 超时',
   }, sse);
   const events = parseEvents();
-  const error = events.find((e) => e.name === 'message-error')!;
+  const error = events.find((e) => e.name === 'message-error');
   assert('C3: 失败路径 emit `message-error`',
-    events.length === 1 && error.name === 'message-error');
+    events.length === 1 && error?.name === 'message-error');
   assert('C3: status === "failed"',
-    (error.data as { status: string }).status === 'failed');
+    error !== undefined && (error.data as { status: string }).status === 'failed');
   assert('C3: error.message 透传给客户端',
-    (error.data as { error: { message: string } }).error.message === '上游 LLM 超时');
+    error !== undefined && (error.data as { error: { message: string } }).error.message === '上游 LLM 超时');
   assert('C3: finalizeAssistant 以 failed 终态落库',
     finalizer.finalizeCalls[0].terminal === 'failed');
   _setMessageFinalizerForTesting(null);
@@ -236,20 +249,20 @@ console.log('\n[sse] C4 — 流循环抛出（Abort vs 真错误）');
   _setMessageFinalizerForTesting(finalizer);
 
   const { sse: sse1, parseEvents: parse1 } = captureSse();
-  await finalizeAfterStreamError('m4a', 'partial-text', true, sse1);
+  await finalizeAfterStreamError(TEST_WS, 'm4a', 'partial-text', true, sse1);
   const e1 = parse1();
-  const stopped = e1.find((e) => e.name === 'message-complete')!;
+  const stopped = e1.find((e) => e.name === 'message-complete');
   assert('C4a: AbortError 走 stopped 分支，emit message-complete (status=stopped)',
     stopped !== undefined && (stopped.data as { status: string }).status === 'stopped');
   assert('C4a: 终态落库为 stopped',
     finalizer.finalizeCalls[0].terminal === 'stopped');
   assert('C4a: 触发 convergeRunningToolExecutions',
-    finalizer.convergeCalls.length === 1 && finalizer.convergeCalls[0].terminal === 'stopped');
+    finalizer.convergeCalls.length === 1 && finalizer.convergeCalls[0].messageId === 'm4a');
 
   const { sse: sse2, parseEvents: parse2 } = captureSse();
-  await finalizeAfterStreamError('m4b', 'partial-text', false, sse2);
+  await finalizeAfterStreamError(TEST_WS, 'm4b', 'partial-text', false, sse2);
   const e2 = parse2();
-  const failed = e2.find((e) => e.name === 'message-error')!;
+  const failed = e2.find((e) => e.name === 'message-error');
   assert('C4b: 真错误走 failed 分支，emit message-error (status=failed)',
     failed !== undefined && (failed.data as { status: string }).status === 'failed');
   assert('C4b: 终态落库为 failed',
@@ -263,11 +276,9 @@ console.log('\n[sse] C5 — sweep 兜底');
 {
   const finalizer = makeInMemoryFinalizer();
   _setMessageFinalizerForTesting(finalizer);
-  await sweepRunningToolExecutions('m5', 'test');
+  await sweepRunningToolExecutions(TEST_WS, 'm5', 'test');
   assert('C5: sweepRunningToolExecutions 触发 convergeRunningToolExecutions',
     finalizer.convergeCalls.length === 1 && finalizer.convergeCalls[0].messageId === 'm5');
-  assert('C5: sweep 总是以 stopped 收敛（不会改写成 failed）',
-    finalizer.convergeCalls[0].terminal === 'stopped');
   _setMessageFinalizerForTesting(null);
 }
 
@@ -284,7 +295,7 @@ console.log('\n[sse] C8 — 工具错误 errorCode');
     toolCallId: 'tc-1',
     toolName: 'lookup',
     input: { q: 'secret-payload' },
-  }, 'conv-1', 'm6', toolMap, captureSse().sse);
+  }, TEST_WS, 'm6', toolMap, captureSse().sse);
   // 然后 error
   const { sse, parseEvents } = captureSse();
   await handleToolEvent({
@@ -292,7 +303,7 @@ console.log('\n[sse] C8 — 工具错误 errorCode');
     toolCallId: 'tc-1',
     toolName: 'lookup',
     error: '包含敏感信息的原始错误：api_key=xxx',
-  }, 'conv-1', 'm6', toolMap, sse);
+  }, TEST_WS, 'm6', toolMap, sse);
   const events = parseEvents();
   const errorEvent = events.find((e) => e.name === 'tool-call-error')!;
   assert('C8: emit `tool-call-error`',
@@ -313,4 +324,8 @@ console.log('\n[sse] C8 — 工具错误 errorCode');
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+if (failed > 0) {
+  // 不调 process.exit —— 让 npm run test:unit 继续跑后续 fixture；
+  // 失败向上 throw，由 runner 接住 → 进程 exit 1。
+  throw new Error(`sse-terminal-protocol 失败 ${failed} 项断言`);
+}
