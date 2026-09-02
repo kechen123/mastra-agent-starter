@@ -2,7 +2,7 @@
 
 > **文档定位**：本文描述 **当前已实现** 的系统架构（as-built）——文中出现的每个模块、表、路由都对应仓库里真实存在的代码。
 > 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
-> 本文与 V2 文档冲突时，**以本文为当前已验收代码事实**；阶段 1 的 `workspaces` 与 Skill 三表已经落地。阶段 2（`agent_runs`、`agent_run_events`、幂等 POST、SSE 断点续传）正在开发，未通过验证与合并前不得视为已实现；`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等仍未实现。
+> 本文与 V2 文档冲突时，**以本文为当前已验收代码事实**；阶段 1 的 `workspaces` 与 Skill 三表，以及阶段 2 的 `agent_runs`、`agent_run_events`、幂等 POST、SSE 断点续传与双通道实时流均已实现并通过验证；`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等仍未实现。
 
 ## 概述
 

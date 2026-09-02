@@ -406,7 +406,7 @@ CREATE TABLE skill_packages (
 
 **目标**：把「POST 即响应」改成「POST 创建幂等命令 + SSE 订阅事件」；SSE 可在断线后通过 `Last-Event-ID` 续传；`agent_runs` 持久化整个 Agent 生命周期。
 
-> **状态（2026-09-02）**：实现完成、待最终浏览器验收、待合并。`backend npm run typecheck`、`backend npm run test:unit`、`frontend npm run build` 及 Phase 2 新增合约测试均已通过；当前待验证项仅为真实浏览器 + PostgreSQL 链路，重点是流式文字逐字显示、刷新续接与聊天视口在终态“重新生成”按钮出现后仍持续跟随到底部。在该手工验收完成前，不得把阶段标为“已验收”。
+> **状态（2026-09-02）**：已验收、已合并。`backend npm run typecheck`、`backend npm run test:unit`、`frontend npm run build` 与 Phase 2 新增合约测试均已通过；真实浏览器 + PostgreSQL 链路也已人工验收，确认逐字流式显示、刷新续接，以及终态“重新生成”按钮出现后聊天视口仍跟随到底部。
 >
 > 旧 `users`、`pending/succeeded`、`(run_id, seq)`、POST 返回 200 等契约不再使用。
 
@@ -498,12 +498,12 @@ CREATE TABLE skill_packages (
 
 ### 阶段 2 验收（映射 V2 §6.6）
 
-- [ ] 同一 `Idempotency-Key` 重 POST 不会产生多个 run（合约：`tests/unit/idempotency-concurrency.ts`）
-- [ ] SSE 中断后续传不丢、不重（合约：`tests/unit/sse-replay.ts`，覆盖 R1-R5、R7）
-- [ ] `agent_runs` 与 `agent_run_events` 完成生命周期持久化，且 sweeper 同事务（合约：`tests/unit/sweeper-transactional.ts`，覆盖 S1-S4）
-- [ ] `/chat/new` 服务端创建 draft，`/chat/:conversationId` 可恢复历史与进行中的 Run
-- [ ] 旧根路径兼容且带弃用响应头；新前端走 `/v1/v2alpha`
-- [ ] 后端 `npm run typecheck`、前端 `npm run build` 与上述合约测试全部通过
+- [x] 同一 `Idempotency-Key` 重 POST 不会产生多个 run（合约：`tests/unit/idempotency-concurrency.ts`）
+- [x] SSE 中断后续传不丢、不重（合约：`tests/unit/sse-replay.ts`，覆盖 R1-R5、R7）
+- [x] `agent_runs` 与 `agent_run_events` 完成生命周期持久化，且 sweeper 同事务（合约：`tests/unit/sweeper-transactional.ts`，覆盖 S1-S4）
+- [x] `/chat/new` 服务端创建 draft，`/chat/:conversationId` 可恢复历史与进行中的 Run
+- [x] 旧根路径兼容且带弃用响应头；新前端走 `/v1/v2alpha`
+- [x] 后端 `npm run typecheck`、前端 `npm run build` 与上述合约测试全部通过
 
 ---
 
