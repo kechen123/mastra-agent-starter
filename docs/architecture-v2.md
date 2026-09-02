@@ -6,6 +6,8 @@
 >
 > 适用边界：本文是面向 **Core / Full / Production** 三档部署的统一设计语言。三档之间通过 `DEPLOYMENT_PROFILE` 与模块迁移而非运行时开关区分。
 
+> **Mastra 路由约束（2026-09-02）**：Mastra 将 `/api` 保留给内置路由，应用通过 `registerApiRoute()` 注册的本地端点必须使用 `/v1/*` 与 `/v1/v2alpha/*`，不能直接使用 `/api/v1/*`。若部署环境需要公开 `/api/v1/*`，仅可由反向代理映射到对应的 `/v1/*`；本地开发和前端直连始终使用 `/v1/*`。
+
 ## 修订记录
 
 | 版本 | 日期 | 主要修订 |
@@ -19,6 +21,8 @@
 | V2.3.3 | 2026-08-27 | 4 个故障恢复窗口闭合：DocumentStorage 新增 `listStagingOlderThan(cutoff)` 让 TTL GC 发现事务前孤儿（putStaging 成功但 DB 事务提交前的崩溃）；任何 DB 失败 best-effort `abortStaging`（不仅唯一冲突）；finalize 抢占只设 Lease 不消耗 attempts（worker 抢占后崩溃不再留下永久卡死记录）；finalize 落库 SQL 补齐成功 / 失败 / 耗尽三条，受 `lease_owner + status='pending'` 保护；删除改为单事务串联软删除 + Outbox 入队 + 终止未完成 finalize job + 终止未完成 ingestion job；`storage_finalize_jobs.status` CHECK 新增 `'cancelled'` |
 | V2.3.4 | 2026-08-27 | 4 处 SQL 级冲突修正（纯 SQL 定向）：`storage_finalize_jobs` 补 `processed_at TIMESTAMPTZ` 列（成功 / 失败 / 取消 终态时刻）；失败与耗尽合并为受 Lease 保护的单一事务（`CASE WHEN attempts+1 >= max_attempts THEN 'failed' ELSE 'pending' END`），消除旧 Step C 清 Lease 后 Step D 因 `lease_owner=NULL` 影响 0 行的死锁；`abortStaging` 仅在已确认 ROLLBACK（唯一索引冲突 / 显式 ROLLBACK / 可重试死锁）时调用，连接断开 / 超时 / 不确定提交改由 TTL GC 兜底（避免误删已成功落库的 staging 对象）；`storage_deletion_outbox.document_id` 由 `ON DELETE CASCADE` 改为 `ON DELETE SET NULL`（硬删 document 前必须先确认 outbox 已清零），同步新增 finalize-竞态补偿删除：旧 worker 在删除事务把 job 置 `cancelled` 之前已完成 finalize 时，Step B 影响 0 行后 best-effort `deleteObject(finalKey)` 兜底 |
 | V2.3.5 | 2026-08-27 | 3 处 SQL 可执行性修正（纯 SQL 二次确认）：Step C/D 删除"概念 SQL + 应用层推荐实现"双轨描述，改为单条多 CTE SQL（`updated` + `failed_document` + `security_event` + 外层 SELECT），确保 CTE 同语句可见且 `attempts` 只递增一次；`security_events.event_type` CHECK 补 `'storage_finalize_exhausted'`，避免耗尽事务因 CHECK 违例整语句回滚；Step B 补偿删除：失败时必须 `INSERT INTO storage_deletion_outbox` 持久重试（TTL GC 只能枚举 staging，无法兜底 finalKey 对象） |
+| V2.3.6 | 2026-09-02 | 修正 Mastra 自定义路由前缀：本地 V2 实现由 `/api/v1/*` 改为 `/v1/*`，`/api/v1/*` 仅作为可选反向代理公开映射；前端、SSE `eventsUrl` 与弃用 Link 同步。 |
+| V2.3.7 | 2026-09-02 | SSE 双通道：持久化 `content-checkpoint` 仍按 400ms / 512 字符节流（断线恢复 / 跨实例兜底），新增 PostgreSQL LISTEN/NOTIFY `agent_run_live_deltas_channel` 推送实时增量 `content-delta`（不带 SSE id、不进 lastEventId、允许丢失）；运行时先将 Provider 的累计快照统一归一化为纯增量，前端再把网络接收缓冲与视觉显示游标分离、每个动画帧只推进一个 Unicode code point；聊天视口使用 assistant-ui 原生 ResizeObserver 自动跟随器，在流式文本及终态操作区改变高度时保持底部可见、用户上滑后才暂停，checkpoint 是权威完整快照；详情见 §6.4 / 决策 4。 |
 
 ### V2.2 与 V2.1 的差异速览
 
@@ -44,7 +48,7 @@
 | Worker 抢占 SQL | `(lease_owner IS NULL OR lease_expires_at < now())` | 补 `lease_expires_at IS NULL` 兜底，防止 lease_owner 非空但 expires_at 为空时 Run 不可回收 |
 | 事务顺序（POST /messages） | step 3 写 assistant message 时直接 `current_run_id=...`、step 4 才建 Run（FK 风险） | 先建 assistant message（`current_run_id=NULL`）→ 建 Run（`assistant_message_id` 反向指向 message）→ 回填 `messages.current_run_id` |
 | 事件与状态对齐 | Run INSERT 时写 `run-started`，但 status='queued | Run INSERT 时写 `run-queued`（与状态一致）；`run-started` 留到 worker 抢占、status 转 `'running'` 时再发 |
-| eventsUrl 示例 | 写 `"GET /api/v1/runs/:runId/events"` 模板 | 返回已渲染真实路径，形如 `"/api/v1/runs/<actual-runId>/events"` |
+| eventsUrl 示例 | 写 `"GET /v1/runs/:runId/events"` 模板 | 返回已渲染真实路径，形如 `"/v1/runs/<actual-runId>/events"` |
 | 幂等键冲突码 | 正文 422 / 附录 D 409（分裂） | 正文与附录 D 一律 `409 IDEMPOTENCY_KEY_REUSED` |
 | §0 差异表"前端统一 pnpm" | V2.0 行写"统一 pnpm"，易被误解为当前规范 | 改为"前后端统一 npm ci"；V2.0 的 pnpm 决议被显式覆盖 |
 | 阶段验收 /ask | 仍出现 `/ask`、`pending/streaming Run 2 分钟后 failed` 旧表述 | 验收全部替换为 `/conversations/:id/messages`；超时模型改写为 Lease 过期失败扫描 + 审批超时另算 |
@@ -132,14 +136,14 @@
 | 错误码 `424` | 列在错误码表 | **移除**；审批等待走 SSE `approval-requested` 事件，424 仅适用于同步依赖失败 |
 | DocumentStorage | 未设计 | 新增接口：Core/Full 用受控本地数据目录，Production 用 S3-compatible；DB 只存 `storage_key` / `sha256` / `size` / `mime_type`；删除走 Outbox |
 | `document_ingestion_jobs` | 缺外键、缺 lease | 加 `document_id` 外键（带 cascade）、`lease_expires_at`、`next_attempt_at`、`attempts`、`(document_id) UNIQUE WHERE status IN (active)` |
-| Draft 启动 | `POST /conversations/:id/activate` + `POST /conversations/:id/messages` 双入口 | 统一为 `POST /api/v1/conversations/:id/messages`；阶段 2 引入 `Idempotency-Key`（不能拖到阶段 5）；`POST /conversations` 也支持幂等 |
+| Draft 启动 | `POST /conversations/:id/activate` + `POST /conversations/:id/messages` 双入口 | 统一为 `POST /v1/conversations/:id/messages`；阶段 2 引入 `Idempotency-Key`（不能拖到阶段 5）；`POST /conversations` 也支持幂等 |
 | 包管理器 | "统一 npm" 但前端用 pnpm | **前后端统一 npm**；删除未跟踪的 `frontend/pnpm-lock.yaml`；CI 全部 `npm ci` |
 | `security_events` | 阶段 1 引用但无 schema | 阶段 1 增加 schema 与写入路径 |
 | `messages.status` ↔ run.status | 未映射 | `queued→pending`、`running/waiting_approval→streaming`、其余镜像 |
 | `AbortSignal.timeout()` | 未提组合 | 必须 `AbortSignal.any([userSignal, timeoutSignal])`，不能覆盖用户停止 |
 | Provider 切换 | 每次 pre-flight | 改**被动熔断**：连续失败 → unhealthy；只在首 token 前且确定无输出时 fallback |
 | `evaluation_cases` | `expected_citations?`、`tags[]` 伪 schema | 标注"伪 schema，未在 V2 中落地"，阶段 7 实现时再敲定 |
-| `/api/v1` 上线 | 直接替换 | 设兼容窗口：`/api/v1/v2alpha` + `/api/v1` 并行；前端先迁 `/api/v1/v2alpha`；稳定后删 `/api/v1/v2alpha` |
+| `/v1` 上线 | 直接替换 | 设兼容窗口：`/v1/v2alpha` + `/v1` 并行；前端先迁 `/v1/v2alpha`；稳定后删 `/v1/v2alpha`；公开 `/api/v1` 仅由代理映射 |
 | RAG 模块迁移 | 跳过编号 | 模块迁移清单 + 每文件 sha256 checksum；module migrations 目录与编号独立 |
 | `is_active` 归属 | 每条向量 | 在 Workspace 的 Embedding Profile 上 |
 
@@ -606,11 +610,11 @@ LEGACY_WORKSPACE_OWNER_USER_ID=<uuid> npm run migrate:workspaces
 **Draft 与激活（统一 `POST .../messages`）**：
 
 ```text
-POST /api/v1/conversations
+POST /v1/conversations
 Body: { agentId, knowledgeBaseId? }
 201 → { id, status: 'draft', agentId, knowledgeBaseId, createdAt }
 
-POST /api/v1/conversations/:id/messages
+POST /v1/conversations/:id/messages
 Idempotency-Key: <client-generated>
 Body: { content }
 Effect:
@@ -619,14 +623,14 @@ Effect:
   - 创建 agent_run（status=queued → running），由 lease worker 抢占执行
   - 写 assistant_message.status='streaming'
 Response (always): 202 Accepted
-  { userMessageId, assistantMessageId, runId, eventsUrl: "/api/v1/runs/<actual-runId>/events" }
+  { userMessageId, assistantMessageId, runId, eventsUrl: "/v1/runs/<actual-runId>/events" }
   （eventsUrl 由服务端在 POST 事务内拼好后随 202 返回；客户端不需再做任何模板替换）
 ```
 
 **SSE 订阅**（不与命令耦合，命令成功即可立即开始订阅）：
 
 ```text
-GET /api/v1/runs/:runId/events
+GET /v1/runs/:runId/events
 Headers: Last-Event-ID: <last seq from previous subscription>
 Response: text/event-stream
   event: <type>
@@ -778,7 +782,7 @@ UPDATE messages SET status = 'stopped' WHERE current_run_id = :runId;
 - SSE 重连协议：
 
   ```text
-  GET /api/v1/runs/:runId/events
+  GET /v1/runs/:runId/events
   Headers:
     Last-Event-ID: <event_id>     -- 标准 SSE 重连头
   Response: text/event-stream
@@ -810,7 +814,7 @@ UPDATE messages SET status = 'stopped' WHERE current_run_id = :runId;
 **文本增量合并**：
 
 - 模型每个 Token **不**单独写入 `agent_run_events`。
-- `content-checkpoint` 触发条件：**距上次 checkpoint 满 250-500ms** 或 **累积满 ~512 字符**。
+- `content-checkpoint` 触发条件：**距上次 checkpoint 满 250-500ms** 或 **累积满 ~512 字符**；Run 进入 `completed` 或 `stopped` 前，若最终文本尚未发出，必须在同一终态事务内补写最终 checkpoint。
 - checkpoint payload：`{ text, accumulatedLength }`；前端用 `accumulatedLength` 重建当前文本。
 
 **断线恢复协议**：
@@ -873,7 +877,7 @@ SSE 推送 'approval-requested' 事件给前端
 
 用户批准：
   ↓
-POST /api/v1/approvals/:id/resolve { decision: 'approve' | 'decline' }
+POST /v1/approvals/:id/resolve { decision: 'approve' | 'decline' }
   ↓
 服务端事务：
   1. UPDATE tool_approval_requests SET status=...
@@ -1175,12 +1179,12 @@ npm run migrate
 V2.1 让 POST 返回 SSE 流，导致 Idempotency-Key 无法可靠缓存持续流。V2.2 拆分为**POST 是命令；SSE 是订阅**：
 
 ```text
-POST /api/v1/conversations
+POST /v1/conversations
   Headers: Idempotency-Key: <uuid>     ← 必须
   Body: { agentId, knowledgeBaseId? }
   201 → { id, status: 'draft', agentId, knowledgeBaseId, createdAt }
 
-POST /api/v1/conversations/:id/messages
+POST /v1/conversations/:id/messages
   Headers: Idempotency-Key: <uuid>     ← 必须
   Body: { content }
   202 Accepted →
@@ -1188,10 +1192,10 @@ POST /api/v1/conversations/:id/messages
       userMessageId:      string,
       assistantMessageId: string,
       runId:              string,
-      eventsUrl:          string     ← 已渲染路径，形如 "/api/v1/runs/8d2c.../events"，客户端可直接订阅
+      eventsUrl:          string     ← 已渲染路径，形如 "/v1/runs/8d2c.../events"，客户端可直接订阅
     }
 
-GET /api/v1/runs/:runId/events
+GET /v1/runs/:runId/events
   Headers: Last-Event-ID: <event_id>     ← 可选；重连恢复时必带
   Response: text/event-stream
     id: <event_id>                        ← BIGINT IDENTITY
@@ -1256,8 +1260,8 @@ CREATE INDEX idempotency_keys_expires_idx ON idempotency_keys(expires_at);
 
 刷新页面时，前端根据 URL `/chat/:id` 走下列流程：
 
-1. `GET /api/v1/conversations/:id` → 拿到 `messages` 列表与每条的 `currentRunId`。
-2. 若消息 `status='streaming'` → `GET /api/v1/runs/:currentRunId/events` with `Last-Event-ID: <最近事件 id>`。
+1. `GET /v1/conversations/:id` → 拿到 `messages` 列表与每条的 `currentRunId`。
+2. 若消息 `status='streaming'` → `GET /v1/runs/:currentRunId/events` with `Last-Event-ID: <最近事件 id>`。
 3. 若消息 `status IN ('completed','stopped','failed')` → 直接展示终态。
 4. 若消息 `status='pending'` 且 `currentRunId=NULL` → 显示"准备中"占位，1s 轮询。
 5. **重连只走 GET，不重发 POST**；会话上下文已经从 `GET /conversations/:id` 取回。
@@ -1280,21 +1284,60 @@ CREATE INDEX idempotency_keys_expires_idx ON idempotency_keys(expires_at);
 - 每次 `agent_runs.status` 进入终态（completed/stopped/failed）写对应事件。
 - 文本增量按决策 4 合并策略写 `content-checkpoint` 事件。
 
-### 6.4 SSE 断点续传
+### 6.4 SSE 断点续传 + 实时增量通道
 
 ```text
-GET /api/v1/runs/:runId/events
+GET /v1/runs/:runId/events
 Headers:
   Last-Event-ID: <last event_id from previous subscription>   # 可选；首次订阅不发送
   Accept: text/event-stream
 Response:
-  id:    <event_id>           # 服务端 agent_run_events.id（全局 BIGINT）
+  id:    <event_id>           # 服务端 agent_run_events.id（全局 BIGINT）；仅持久化事件携带
   event: <type>                ← run-queued / run-started / content-checkpoint / tool-call-* / approval-* / run-completed / run-stopped / run-failed
+                                ← content-delta（实时增量；不带 id 行，见 §6.4.1）
   data:  <json>
   \n
 ```
 
-事件流先回放 `agent_run_events.id > Last-Event-ID AND run_id = :runId` 的历史，再继续跟踪新事件。客户端重连时若没有 Last-Event-ID，从 `runId` 创建时的首个事件开始；如未结束，回放可能较长，因此**前端必须**在关闭 SSE 前持久化最后收到的 `id` 到 sessionStorage（key: `mastra:lastEventId:<runId>`）。
+持久化事件先回放 `agent_run_events.id > Last-Event-ID AND run_id = :runId` 的历史，再继续跟踪新事件。客户端重连时若没有 Last-Event-ID，从 `runId` 创建时的首个事件开始；如未结束，回放可能较长，因此**前端必须**在关闭 SSE 前持久化最后收到的 `id` 到 sessionStorage（key: `mastra:lastEventId:<runId>`）。
+
+#### 6.4.1 实时增量通道（PR-2.4 双通道 SSE）
+
+持久化 `content-checkpoint` 受 400ms / 512 字符节流，仅用于断线恢复 / 跨实例兜底，无法满足在线聊天的低延迟体验。PR-2.4 新增**实时增量通道**，把模型每个 token（或小批次）即时推到前端；持久化与实时增量完全分离：
+
+| 维度 | 持久化通道 `agent_run_events_channel` | 实时增量通道 `agent_run_live_deltas_channel` |
+|---|---|---|
+| 数据落点 | 写入 `agent_run_events`（BIGINT IDENTITY） | 仅通过 `pg_notify` 广播，**不**写任何表 |
+| SSE `id:` 行 | 必须携带（断线恢复锚点） | **不**携带（EventSource 不会更新 `lastEventId`） |
+| `Last-Event-ID` 回放 | 是（`id > lastEventId AND run_id = :runId`） | 否（仅运行时推送，重连时**不**回放） |
+| 多实例扇出 | LISTEN 后从 DB 读 | LISTEN 后直接 fan-out |
+| 节流 | 每 400ms 或累计 512 字符；终态前补最终 checkpoint | 每 ~30ms 或累计 ≤256 字符 |
+| Payload 大小限制 | 无（DB 行） | 严格小于 8KB（pg_notify 第二参上限）；超限需在调用方分批 |
+| 丢失容忍 | 不允许（幂等键不缓存；事件是 SSE 重连唯一来源） | 允许（缺增量由下一次 checkpoint 兜底） |
+
+**协议不变性**：
+
+- `content-delta` 不得进入 `agent_run_events`、不得写入 `idempotency_keys` 响应体；
+- `content-delta` SSE 帧不带 `id:` 行；前端不应据此推进 `lastEventId`；
+- 持久化事件发送保持**严格串行**（单一 in-flight + lastDeliveredId 守卫），多次并发 bus 回调不会导致 id 回退或重发；
+- 持久化事件与实时增量在 bus 层**完全独立**：两个 LISTEN 通道、两个 fan-out hub，断开 / 重连各自释放，互不干扰。
+
+**前端合并策略**（`frontend/src/app/App.tsx`）：
+
+- `content-delta` 经 `requestAnimationFrame` 合并到当前 streaming 文本；缺失允许——下一次 checkpoint 会通过 `applyCheckpoint` 校正；
+- `content-checkpoint` 是权威完整快照：若比当前文本更长或非前缀，直接覆盖；当前实时文本已更长则保留（避免旧 checkpoint 回退）；
+- 终态事件（`run-completed` / `run-stopped` / `run-failed`）到达时，最后一次 checkpoint 已经把终态文本完整落库，message `status` 切换为终态；
+- 刷新 / 断线重连只通过 `Last-Event-ID` 回放持久化 checkpoint；**不**试图回放实时 delta。
+
+#### 6.4.2 验收
+
+- 正常在线生成时，浏览器持续平滑显示，不再每 400ms 跳一大段；
+- Network 中能看到 `content-delta` SSE 事件；它没有 SSE `id`；
+- `content-checkpoint` 仍按节流写入并带 id，可用于 `Last-Event-ID` 回放；
+- 手动刷新生成中的页面后，能从 checkpoint 恢复并继续接收新实时 delta；
+- 多个浏览器标签订阅同一 Run 时都能实时收到增量；
+- 完成后页面正文与数据库 `messages.content` 完全一致；
+- 后端 `npm run typecheck`、前端 `npm run build`、SSE 合约测试（含 `tests/unit/sse-replay.ts` 新增 D1–D4 用例）全部通过。
 
 ### 6.5 Request ID + 结构化日志
 
@@ -1354,8 +1397,8 @@ risk(def, inputs) →
 ### 7.3 Approval API
 
 ```text
-GET    /api/v1/approvals?status=pending          （当前 Workspace 待审批列表）
-POST   /api/v1/approvals/:id/resolve            { decision: 'approve' | 'decline', reason? }
+GET    /v1/approvals?status=pending          （当前 Workspace 待审批列表）
+POST   /v1/approvals/:id/resolve            { decision: 'approve' | 'decline', reason? }
 ```
 
 resolve 必须在同一事务内更新 `tool_approval_requests.status` 并写 `agent_run_events(type='approval-resolved')`。
@@ -1861,7 +1904,7 @@ RETURNING j.*;
 ### 8.3 文档上传接口（HTTP）
 
 ```text
-POST /api/v1/knowledge-bases/:kbId/documents
+POST /v1/knowledge-bases/:kbId/documents
 Headers:
   Content-Type: multipart/form-data
   Idempotency-Key: <uuid>          ← 推荐
@@ -1878,7 +1921,7 @@ HTTP 流程（V2.3.2 与 §8.1 完全对齐：DB 预存 finalKey + `storage_stat
 5. 事务：`INSERT INTO documents (id=:documentId, storage_key=finalKey, sha256, storage_status='storage_pending', ...)` + `INSERT INTO document_ingestion_jobs (document_id=:documentId, status='queued', ...)`（V2.3.2：与 §8.2 schema CHECK 一致）+ `INSERT INTO storage_finalize_jobs (document_id, staging_key, final_key, status='pending', ...)`（V2.3.2 新增）。**DB 直接落 finalKey**，与 §8.1 写入流程一致。
 6. 事务成功 → 调 `storage.finalize(stagingKey, finalKey)`；成功后 `UPDATE documents SET storage_status='ready' WHERE id=:documentId` + `UPDATE storage_finalize_jobs SET status='done' WHERE document_id=:documentId`，ingestion worker 此时才拾取。
 7. finalize 失败 → `documents.storage_status` 与 `storage_finalize_jobs.status` 都保持 pending，由 §8.1 后台 finalize 重试 worker 接管；HTTP 端已返回 202。
-7. 返回 202 + `Location: /api/v1/documents/:documentId`。
+7. 返回 202 + `Location: /v1/documents/:documentId`。
 
 ### 8.4 Embedding 独立表
 
@@ -2099,7 +2142,7 @@ V2.0 提议"每次请求前执行 pre-flight ping 探测 primary Provider"——
 ### 9.3 用户反馈
 
 ```text
-POST /api/v1/messages/:messageId/feedback
+POST /v1/messages/:messageId/feedback
 Body: { rating: 'up' | 'down', reason?: string, customFields?: Record<string, string> }
 ```
 
@@ -2169,24 +2212,24 @@ CREATE TABLE evaluation_results (
 - 分页：`?cursor=&limit=`。
 - 幂等键：`Idempotency-Key` header；服务端用 `idempotency_keys` 表 + TTL 24h（阶段 2 已落地，详见 §6.2）。
 
-### 9.5.1 `/api/v1` 上线兼容窗口（V2.1）
+### 9.5.1 `/v1` 上线兼容窗口（V2.3.6）
 
-Phase 0 当前所有路由挂在根路径（`/ask`、`/auth/login`、`/conversations` 等）。阶段 2 引入 `/api/v1` 前缀时不能直接替换——前端、SDK、可能存在的外部调用都会同时失效。
+Phase 0 当前所有路由挂在根路径（`/ask`、`/auth/login`、`/conversations` 等）。阶段 2 引入 `/v1` 前缀时不能直接替换——前端、SDK、可能存在的外部调用都会同时失效。Mastra 不允许 custom route 以 `/api` 开头，因此本地运行时不能直挂 `/api/v1`。
 
 **策略**：
 
-1. 阶段 2 部署时同时挂两个前缀：
-   - `/api/v1/v2alpha`（新前端主用入口，本地环境默认）；
-   - `/api/v1`（正式入口，对外文档）；
+1. 阶段 2 部署时同时挂两个本地前缀：
+   - `/v1/v2alpha`（新前端主用入口，本地环境默认）；
+   - `/v1`（正式入口）；
    - **保留**旧的 `/ask` / `/auth/*` / `/conversations` 等 Phase 0 路由，加 deprecation header `Deprecation: true; Sunset="2027-02-01"`。
-2. 前端先切到 `/api/v1/v2alpha`：验证 URL 恢复、idempotency、SSE 续传等新行为。
-3. 稳定后（至少 1 个 minor 周期）前端切到 `/api/v1`。
-4. 删除 `/api/v1/v2alpha` 与 Phase 0 旧路由（按 Sunset 日期）。
-5. 反向代理（nginx / cloud LB）层做 rewrite：外部传入 `/api/v1/*` 时去掉前缀；本地开发也支持 `/api/v1/*` 直连。
+2. 前端先切到 `/v1/v2alpha`：验证 URL 恢复、idempotency、SSE 续传等新行为。
+3. 稳定后（至少 1 个 minor 周期）前端切到 `/v1`。
+4. 删除 `/v1/v2alpha` 与 Phase 0 旧路由（按 Sunset 日期）。
+5. 如需对外公开 `/api/v1/*`，反向代理（nginx / cloud LB）必须将其映射到 `/v1/*`；本地开发不支持 `/api/v1/*` 直连。
 
 **兼容矩阵**：
 
-| 阶段 | 阶段 0 旧路由 | `/api/v1/v2alpha` | `/api/v1` |
+| 阶段 | 阶段 0 旧路由 | `/v1/v2alpha` | `/v1` |
 |---|---|---|---|
 | 2 启动期 | ✓ + deprecation 头 | ✓ | ✓（空实现或 404） |
 | 2 验证期 | ✓ | ✓（前端主用） | ✓ |
@@ -2224,7 +2267,7 @@ Phase 0 当前所有路由挂在根路径（`/ask`、`/auth/login`、`/conversat
 - [ ] 每次 Prompt / RAG / Tool 改动可运行回归评测集。
 - [ ] OpenAPI 文档与实现一致（用 `schemathesis` / `dredd` 校验）。
 - [ ] `DEPLOYMENT_PROFILE=production` 启动时 readiness 报告全绿。
-- [ ] `/api/v1/v2alpha` 兼容入口已删除；旧 Phase 0 路由已按 Sunset 日期下线。
+- [ ] `/v1/v2alpha` 兼容入口已删除；旧 Phase 0 路由已按 Sunset 日期下线。
 
 ---
 
@@ -2324,64 +2367,64 @@ frontend/src/
 ## 附录 C：API 路由表
 
 ```text
-POST   /api/v1/auth/login
-POST   /api/v1/auth/logout
-GET    /api/v1/auth/me
+POST   /v1/auth/login
+POST   /v1/auth/logout
+GET    /v1/auth/me
 
-GET    /api/v1/workspaces
-POST   /api/v1/workspaces              （阶段 1 末，共享 Workspace；当前仅 Personal）
-GET    /api/v1/workspaces/:id
-GET    /api/v1/workspaces/:id/members
+GET    /v1/workspaces
+POST   /v1/workspaces              （阶段 1 末，共享 Workspace；当前仅 Personal）
+GET    /v1/workspaces/:id
+GET    /v1/workspaces/:id/members
 
-POST   /api/v1/conversations
-GET    /api/v1/conversations?status=active
-GET    /api/v1/conversations/:id
-PATCH  /api/v1/conversations/:id
-DELETE /api/v1/conversations/:id
-POST   /api/v1/conversations/:id/messages   （draft 上首条触发 status→active；同 §6.2 V2.3 事务顺序）
-POST   /api/v1/messages/:id/stop
-POST   /api/v1/messages/:id/regenerate
-POST   /api/v1/messages/:id/feedback
-GET    /api/v1/runs/:runId/events           （SSE；重连通过 Last-Event-ID header）
+POST   /v1/conversations
+GET    /v1/conversations?status=active
+GET    /v1/conversations/:id
+PATCH  /v1/conversations/:id
+DELETE /v1/conversations/:id
+POST   /v1/conversations/:id/messages   （draft 上首条触发 status→active；同 §6.2 V2.3 事务顺序）
+POST   /v1/messages/:id/stop
+POST   /v1/messages/:id/regenerate
+POST   /v1/messages/:id/feedback
+GET    /v1/runs/:runId/events           （SSE；重连通过 Last-Event-ID header）
 
-GET    /api/v1/agents
-GET    /api/v1/tools
-GET    /api/v1/capabilities
+GET    /v1/agents
+GET    /v1/tools
+GET    /v1/capabilities
 
-GET    /api/v1/skills
-GET    /api/v1/skills/:id
-DELETE /api/v1/skills/:id
-GET    /api/v1/skills/market/search
-GET    /api/v1/skills/market/popular
-POST   /api/v1/skills/market/preview
-POST   /api/v1/skills/market/install
-POST   /api/v1/skills/:id/update
-POST   /api/v1/skills/:id/bind
-POST   /api/v1/skills/:id/unbind
+GET    /v1/skills
+GET    /v1/skills/:id
+DELETE /v1/skills/:id
+GET    /v1/skills/market/search
+GET    /v1/skills/market/popular
+POST   /v1/skills/market/preview
+POST   /v1/skills/market/install
+POST   /v1/skills/:id/update
+POST   /v1/skills/:id/bind
+POST   /v1/skills/:id/unbind
 
-GET    /api/v1/knowledge-bases
-POST   /api/v1/knowledge-bases
-GET    /api/v1/knowledge-bases/:id
-PATCH  /api/v1/knowledge-bases/:id
-DELETE /api/v1/knowledge-bases/:id
-POST   /api/v1/knowledge-bases/:id/documents
-GET    /api/v1/knowledge-bases/:id/documents
-GET    /api/v1/documents/:id
-DELETE /api/v1/documents/:id
+GET    /v1/knowledge-bases
+POST   /v1/knowledge-bases
+GET    /v1/knowledge-bases/:id
+PATCH  /v1/knowledge-bases/:id
+DELETE /v1/knowledge-bases/:id
+POST   /v1/knowledge-bases/:id/documents
+GET    /v1/knowledge-bases/:id/documents
+GET    /v1/documents/:id
+DELETE /v1/documents/:id
 
-GET    /api/v1/approvals?status=pending
-POST   /api/v1/approvals/:id/resolve
+GET    /v1/approvals?status=pending
+POST   /v1/approvals/:id/resolve
 
-GET    /api/v1/feedback
+GET    /v1/feedback
 
-GET    /api/v1/evaluations/datasets
-POST   /api/v1/evaluations/datasets
-GET    /api/v1/evaluations/runs
-POST   /api/v1/evaluations/runs
+GET    /v1/evaluations/datasets
+POST   /v1/evaluations/datasets
+GET    /v1/evaluations/runs
+POST   /v1/evaluations/runs
 
-GET    /api/v1/healthz
-GET    /api/v1/readyz
-GET    /api/v1/livez
+GET    /v1/healthz
+GET    /v1/readyz
+GET    /v1/livez
 ```
 
 ## 附录 D：错误码约定
@@ -2420,20 +2463,20 @@ PROVIDER_TIMEOUT                 504
 
 ```text
 客户端：window.location = '/chat/new'
-  ↓ POST /api/v1/conversations    Headers: Idempotency-Key: <uuid>
+  ↓ POST /v1/conversations    Headers: Idempotency-Key: <uuid>
 服务端：status='draft' → 201 { id }
 客户端：replace('/chat/:id')
-  ↓ GET /api/v1/conversations/:id   （含 message 列表）
+  ↓ GET /v1/conversations/:id   （含 message 列表）
   ↓ 找到 status='streaming' 的消息 → 进入恢复流程
 
 恢复流程：
-  1. GET /api/v1/runs/:currentRunId/events   Headers: Last-Event-ID: <event_id>
+  1. GET /v1/runs/:currentRunId/events   Headers: Last-Event-ID: <event_id>
   2. 服务端回放 id > lastEventId 的事件
   3. 切换到 LISTEN/NOTIFY 实时跟踪
   4. 客户端按 id 单调递增 + accumulatedLength 重建 message 流
 
 激活流程（draft → active，统一 messages 端点；V2.3 修正）：
-  POST /api/v1/conversations/:id/messages
+  POST /v1/conversations/:id/messages
     Headers:
       Idempotency-Key: <uuid>
     Body: { content: firstMessage }
@@ -2446,7 +2489,7 @@ PROVIDER_TIMEOUT                 504
     UPDATE messages SET current_run_id=:runId WHERE id=:assistantMessageId  ← Run 已存在，FK 安全
     NOTIFY agent_run_events_channel
     INSERT INTO idempotency_keys (key, workspace_id, user_id, request_fingerprint, response_status=202, response_body={userMessageId, assistantMessageId, runId, eventsUrl})
-  返回 202 JSON（含已渲染的 eventsUrl，形如 "/api/v1/runs/<actual-runId>/events"）
+  返回 202 JSON（含已渲染的 eventsUrl，形如 "/v1/runs/<actual-runId>/events"）
   客户端随后通过 GET eventsUrl 订阅 SSE（SSE 与命令解耦；事务内不再返回 SSE 流）
   失败回滚：Draft 状态保留；客户端可用同 Idempotency-Key 重试
   状态语义（V2.3 明确）：

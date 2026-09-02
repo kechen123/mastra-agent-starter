@@ -18,6 +18,12 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
+      // V2 的 SSE eventsUrl 由后端返回真实路由 `/v1/...`。该路径不能走
+      // `/api` rewrite，开发服务器必须原样转发到 Mastra 后端。
+      '/v1': {
+        target: 'http://localhost:4111',
+        changeOrigin: true,
+      },
     },
   },
 })

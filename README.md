@@ -1,6 +1,6 @@
 # Mastra Agent Starter
 
-> **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / `LEGACY_WORKSPACE_OWNER_USER_ID` ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。PR-1.2 / PR-1.3 / PR-1.4 / PR-1.5 已合并落地；归属列 `workspace_id` 已加到 6 张业务表，Skill 已拆为全局包、Workspace 启用与 Agent 绑定三层。
+> **当前进度（2026-09-01）**：阶段 1（Workspace 隔离与 Skill 三层模型）已合并落地；阶段 2（持久化 Run、幂等 POST、SSE 断点续传与服务端 Draft）正在开发，尚未验收或合并。协议与目标以 [`docs/architecture-v2.md`](docs/architecture-v2.md) 为准，已实现事实以 [`docs/architecture.md`](docs/architecture.md) 为准。
 
 Mastra Agent Starter 是一个基于 [Mastra](https://mastra.ai/) 框架的智能对话平台，支持通用对话与知识库问答两种模式，具备可扩展的 Tool Registry、Skill Registry 和 Agent 能力绑定系统。
 
@@ -12,7 +12,7 @@ Mastra Agent Starter 是一个基于 [Mastra](https://mastra.ai/) 框架的智�
 - Tool 注册表与执行审计（每次 Tool 调用持久化到 `tool_executions`）
 - Skill 注册表（内置 / 本地 / skills.sh 市场）与 Skill → Agent 绑定
 - 会话持久化、历史管理
-- 本地账号密码登录（Phase 1，所有已登录账号共享数据）
+- 本地账号密码登录，以及按个人 Workspace 隔离的业务数据
 
 ## 功能特性
 
@@ -202,7 +202,8 @@ Conversation → AgentDefinition → Tool Registry + DB Bindings → Skill Regis
 - 账号通过 `cd backend && npm run users:create -- --username <username>` 创建，密码通过交互式终端两次输入。
 - 浏览器自动携带 HttpOnly Cookie（`mastra_session`）；前端 JavaScript 不可读、不可写。
 - 同一账号允许多设备同时登录；退出只吊销当前会话，其它设备不受影响。
-- 所有已登录账号共享当前全部业务数据（不实现角色、租户、资源级权限）。
+- 每个已登录账号拥有个人 Workspace；会话、知识库、文档、分块、工具执行与 Agent-Skill 绑定按 Workspace 隔离，跨 Workspace 访问统一隐藏为 404。
+- 当前不实现组织共享 Workspace、角色授权、资源级 ACL 或公开注册。
 - 不引入第三方认证依赖；密码哈希使用 Node 内置 `crypto.scrypt`，会话 token 仅存 SHA-256。
 - `DEPLOYMENT_PROFILE=production` 仍拒绝启动：限流、租户隔离、Tool 风险治理等生产条件尚未完成。
 
@@ -218,12 +219,12 @@ Conversation → AgentDefinition → Tool Registry + DB Bindings → Skill Regis
 
 ## 当前安全边界（必读）
 
-当前版本定位为 **单租户、本地开发或受信任网络中的匿名演示 Starter**。
+当前版本定位为 **本地开发或受信任网络中的已认证 Starter**；每个账号使用自己的个人 Workspace，但尚未具备完整的组织租户、角色与生产级治理能力。
 
 `DEPLOYMENT_PROFILE=production` 当前会明确拒绝启动。这是防止误部署的保护措施，不是认证实现；待认证、租户隔离和限流完成后才会开放生产档位。
 
-- 不适用于公网直接部署——所有路由都是匿名访问，没有任何身份校验或速率限制。
-- 不适用于多用户、多租户、私有知识库隔离场景——归属列 `workspace_id` 已加到 6 张业务表（`conversations` / `knowledge_bases` / `documents` / `document_chunks` / `tool_executions` / `agent_skill_bindings`）；跨 workspace 访问统一返回 404（详见 §5.4 隔离合约测试）。
+- 不适用于公网直接部署——虽然本地账号认证与 Workspace 隔离已实现，但速率限制、组织级租户治理、Tool 风险治理和审批流尚未完成。
+- 不适用于组织级多租户或精细资源授权场景——当前仅提供个人 Workspace 隔离；归属列 `workspace_id` 已加到 6 张业务表（`conversations` / `knowledge_bases` / `documents` / `document_chunks` / `tool_executions` / `agent_skill_bindings`）。
 - 后续接入审批、限流、审计时，必须复用现成的 `withAuthenticatedWorkspace(handler)` 包装器与 `authCtx.workspaceId` 上下文——不要另起一套身份/租户机制。归属列的目标形态与隔离语义见 [`docs/architecture-v2.md`](docs/architecture-v2.md) §5 与 [`docs/implementation-plan.md`](docs/implementation-plan.md)。
 - `ToolDefinition.metadata`（`readOnly` / `destructive` / `idempotent` / `openWorld` / `requiresRuntime`）当前只是能力声明与 UI 展示信息，不是生产级授权系统。任何自定义 Tool 不得返回密码、Token、Cookie、Authorization Header 或其他 secret。`destructive: true` 或 `openWorld: true` 的 Tool 在引入生产业务前必须接入身份认证、租户/资源归属校验、用户确认或策略审批，以及输入输出脱敏与审计。
 - 在没有真实身份提供方之前，**禁止** 把 `requiresAuth: false` 批量替换为 `true`——那会造成伪安全或系统不可用。

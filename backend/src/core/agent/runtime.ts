@@ -10,6 +10,7 @@ import {
 } from '../skill/registry.js';
 import { getAgentDefinition } from './registry.js';
 import type { StreamEvent } from '../execution/stream-events.js';
+import { normalizeTextChunk } from '../execution/stream-text-normalizer.js';
 export type {
   StreamChunk,
   StreamResult,
@@ -145,9 +146,11 @@ export async function* streamAgent(
         }
         if (chunk.type === 'text-delta') {
           const c = chunk as unknown as { payload?: { text?: string }; textDelta?: string };
-          const text = c.payload?.text ?? c.textDelta ?? '';
-          content += text;
-          yield { type: 'delta', text };
+          const incomingText = c.payload?.text ?? c.textDelta ?? '';
+          const normalized = normalizeTextChunk(content, incomingText);
+          content = normalized.accumulatedText;
+          // SSE / executor 对外只有纯增量；累计快照的无变化帧不应产生事件。
+          if (normalized.delta) yield { type: 'delta', text: normalized.delta };
         }
         if (chunk.type === 'tool-call') {
           const payload = (chunk as unknown as { payload?: { toolCallId?: string; toolName?: string; args?: unknown } }).payload;

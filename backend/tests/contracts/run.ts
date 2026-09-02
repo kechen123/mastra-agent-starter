@@ -1032,8 +1032,8 @@ const PROTECTED_COUNT = PROTECTED_BUSINESS_ROUTE_KEYS.size;
 const WRAPPED_COUNT = WRAPPED_ROUTE_KEYS.size;
 
 record(
-  '[Auth ↔ Wrapper] §7 鉴权扫描器识别到 31 条业务受保护路由（权威基准）',
-  PROTECTED_COUNT === 31,
+  '[Auth ↔ Wrapper] §7 鉴权扫描器识别到 39 条业务受保护路由（阶段 2 V2 + 兼容入口）',
+  PROTECTED_COUNT === 39,
   `实际 ${PROTECTED_COUNT} 条：${[...PROTECTED_BUSINESS_ROUTE_KEYS].sort().join(', ')}`,
 );
 

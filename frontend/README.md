@@ -40,7 +40,8 @@ src/
 ## 与后端的契约
 
 - 全部请求携带 HttpOnly Cookie `mastra_session`；前端 JS 不可读、不可写。
-- 流式生成走 `POST /ask`（当前实现）；V2 阶段 2 会切到 `POST /api/v1/conversations/:id/messages` + `GET /api/v1/runs/:runId/events`。
+- 流式生成走 `POST /ask`（当前实现）；V2 阶段 2 会切到 `POST /v1/conversations/:id/messages` + `GET /v1/runs/:runId/events`。Mastra 的自定义路由不能使用其保留的 `/api` 前缀；若需对外提供 `/api/v1`，由反向代理映射到 `/v1`。
+- 本地 Vite 同时代理 `/api/*`（去掉 `/api` 后转发旧接口）与 `/v1/*`（原样转发 V2/SSE）；修改 `vite.config.ts` 后必须重启前端开发服务器。
 - 鉴权失败统一跳到 `/login`。
 - LLM Provider / API Key **不**出现在前端代码或环境变量中，由 `GET /capabilities` 返回展示信息。
 

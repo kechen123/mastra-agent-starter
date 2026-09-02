@@ -1,6 +1,12 @@
 -- PR-1.2/1.3/1.5 合并段：单一 init.sql 是 Schema 唯一来源。
 -- 项目不维护迁移链；删库重建是接受路径。
 -- 重复执行必须显式失败（除 pgcrypto 外全部不带 IF NOT EXISTS）。
+--
+-- ────────────────────────────────────────────────────────────────────
+-- 阶段 2 追加段（architecture-v2.md §6.2/§6.3/§6.5）
+-- 开发阶段每次 schema 变更均删库重建；本文件只描述全新数据库的目标结构，
+-- 不维护旧库兼容、数据回填或迁移路径。除非用户明确要求，不得在此加入兼容分支。
+-- ────────────────────────────────────────────────────────────────────
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -204,3 +210,135 @@ CREATE TABLE workspace_skills (
   PRIMARY KEY (workspace_id, skill_id)
 );
 CREATE INDEX workspace_skills_skill_idx ON workspace_skills(skill_id);
+
+-- ════════════════════════════════════════════════════════════════════
+-- 阶段 2 追加段：服务端 Draft Conversation + 持久化 Run + SSE 事件
+-- 协议依据：docs/architecture-v2.md §6.2 / §6.3 / §6.4 / §6.5
+-- 本段与前文一致：仅面向全新初始化数据库，重复执行应显式失败。
+-- ════════════════════════════════════════════════════════════════════
+
+-- 1. conversations：增加 draft/active 状态、创建人、标题占位。
+ALTER TABLE conversations
+  ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('draft', 'active'));
+ALTER TABLE conversations
+  ADD COLUMN created_by UUID REFERENCES app_users(id) ON DELETE SET NULL;
+CREATE INDEX conversations_status_updated_idx
+  ON conversations(workspace_id, status, updated_at DESC);
+
+-- 2. messages：增加 current_run_id，允许初始 NULL（draft 上首条消息后
+-- 由 POST /conversations/:id/messages 在单事务内回填）。
+ALTER TABLE messages
+  ADD COLUMN current_run_id UUID;
+
+-- 3. agent_runs：阶段 2 核心表。按 architecture-v2.md §决策 4 落地：
+--    - status 仅允许 queued / running / waiting_approval /
+--      completed / stopped / failed；
+--    - created_by FK → app_users(id)；assistant_message_id → messages(id)；
+--    - lease_owner / lease_expires_at / heartbeat_at：60s Lease + 15s
+--      心跳协议；
+--    - request_id 与每条 API 请求的 X-Request-ID 对齐；
+--    - 部分唯一索引：同会话同一时刻仅 1 个活跃 Run。
+CREATE TABLE agent_runs (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id      UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  assistant_message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  agent_id             TEXT NOT NULL,
+  provider             TEXT NOT NULL,
+  model                TEXT NOT NULL,
+  status               TEXT NOT NULL CHECK (status IN (
+                          'queued', 'running', 'waiting_approval',
+                          'completed', 'stopped', 'failed'
+                        )),
+  input_tokens         INTEGER NOT NULL DEFAULT 0,
+  output_tokens        INTEGER NOT NULL DEFAULT 0,
+  estimated_cost_usd   NUMERIC(10,6) NOT NULL DEFAULT 0,
+  started_at           TIMESTAMPTZ,
+  completed_at         TIMESTAMPTZ,
+  error_code           TEXT,
+  parent_run_id        UUID REFERENCES agent_runs(id) ON DELETE SET NULL,
+  request_id           TEXT NOT NULL,
+  lease_owner          TEXT,
+  lease_expires_at     TIMESTAMPTZ,
+  heartbeat_at         TIMESTAMPTZ,
+  created_by           UUID NOT NULL REFERENCES app_users(id),
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX one_active_run_per_conversation
+  ON agent_runs(conversation_id)
+  WHERE status IN ('queued', 'running', 'waiting_approval');
+CREATE INDEX agent_runs_workspace_idx
+  ON agent_runs(workspace_id, created_at DESC);
+CREATE INDEX agent_runs_message_idx
+  ON agent_runs(assistant_message_id);
+CREATE INDEX agent_runs_status_idx
+  ON agent_runs(status)
+  WHERE status IN ('queued', 'running', 'waiting_approval');
+CREATE INDEX agent_runs_lease_expiry_idx
+  ON agent_runs(lease_expires_at)
+  WHERE status IN ('queued', 'running');
+
+-- messages 先于 agent_runs 建表，因此在此追加反向外键。
+ALTER TABLE messages
+  ADD CONSTRAINT messages_current_run_id_fk
+  FOREIGN KEY (current_run_id) REFERENCES agent_runs(id) ON DELETE SET NULL;
+CREATE INDEX messages_current_run_id_idx
+  ON messages(current_run_id) WHERE current_run_id IS NOT NULL;
+
+-- 4. agent_run_events：事件 IDENTITY 全局 BIGINT，run 内按 id 升序；
+--    阶段 2 事件类型以 architecture-v2.md §决策 4 表为准，至少覆盖
+--    run-queued / run-started / content-checkpoint / run-completed /
+--    run-failed / run-stopped（其余类型允许预声明但本阶段不主动写）。
+CREATE TABLE agent_run_events (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_id       UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  type         TEXT NOT NULL CHECK (type IN (
+                 'run-queued',
+                 'run-started',
+                 'content-checkpoint',
+                 'tool-call-started',
+                 'tool-call-completed',
+                 'approval-requested',
+                 'approval-resolved',
+                 'run-completed',
+                 'run-stopped',
+                 'run-failed'
+               )),
+  payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX agent_run_events_run_idx
+  ON agent_run_events(run_id, id);
+CREATE INDEX agent_run_events_workspace_idx
+  ON agent_run_events(workspace_id, id);
+
+-- 5. idempotency_keys：POST 命令的稳定响应缓存。
+--    - TTL 24h，V2 §6.2；
+--    - PK = (workspace_id, user_id, key)；同一 Workspace / 用户 / key 的
+--      重复 POST 必须返回原始 201/202 JSON，不重新触发副作用；
+--    - request_fingerprint = sha256(canonical_json(method + path + body))；
+--      同一 key 不同 fingerprint → 409 IDEMPOTENCY_KEY_REUSED。
+CREATE TABLE idempotency_keys (
+  key                  TEXT NOT NULL,
+  workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id              UUID NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+  request_fingerprint  TEXT NOT NULL,
+  -- 阶段 2 §6.2：占位行（response_status/response_body 为 NULL）作为并发 claim
+  -- 的 token；只有最终 commit 后才 UPDATE 写入实际响应。允许 NULL 是因为占位
+  -- 行的语义是"我正在生成响应"，不是"响应已就绪"。
+  response_status      INTEGER NULL,
+  response_body        JSONB NULL,
+  expires_at           TIMESTAMPTZ NOT NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at         TIMESTAMPTZ NULL,
+  PRIMARY KEY (workspace_id, user_id, key)
+);
+-- 仅响应已写入（completed_at NOT NULL）的行视为已就绪；占位行不进索引。
+CREATE INDEX idempotency_keys_completed_idx
+  ON idempotency_keys(workspace_id, user_id, key)
+  WHERE completed_at IS NOT NULL;
+CREATE INDEX idempotency_keys_expires_idx
+  ON idempotency_keys(expires_at);

@@ -118,7 +118,6 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
   } = props;
 
   const messageScrollRef = useRef<HTMLDivElement>(null);
-  const followsLatestRef = useRef(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [isAgentPickerOpen, setIsAgentPickerOpen] = useState(false);
   const [isKnowledgeBasePickerOpen, setIsKnowledgeBasePickerOpen] = useState(false);
@@ -137,7 +136,6 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
   function scrollToLatest(behavior: ScrollBehavior = 'smooth') {
     const element = messageScrollRef.current;
     if (!element) return;
-    followsLatestRef.current = true;
     setShowJumpToLatest(false);
     element.scrollTo({ top: element.scrollHeight, behavior });
   }
@@ -146,22 +144,8 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
     const element = messageScrollRef.current;
     if (!element) return;
     const isAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
-    followsLatestRef.current = isAtBottom;
     setShowJumpToLatest(!isAtBottom);
   }
-
-  useEffect(() => {
-    // 仅当用户本来就在底部时，才跟随新的流式内容；浏览历史时绝不强制跳走。
-    if (!followsLatestRef.current) {
-      setShowJumpToLatest(true);
-      return;
-    }
-    const frame = requestAnimationFrame(() => {
-      const element = messageScrollRef.current;
-      element?.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [messages, isAsking, isStreaming]);
 
   const currentAgent = chatAgents.find((agent) => agent.id === selectedAgentId);
   const isKnowledgeAgent = currentAgent?.requiresKnowledgeBase ?? false;
@@ -232,8 +216,11 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
         <ThreadPrimitive.Viewport
           ref={messageScrollRef}
           onScroll={handleMessageScroll}
-          autoScroll={false}
-          scrollToBottomOnRunStart={false}
+          // 使用 assistant-ui 原生的 ResizeObserver 自动跟随器：内容流式增长、
+          // Markdown 排版变化、终态按钮出现都会再次定位到底部；仅用户主动上滑
+          // 时暂停，避免自定义 scrollHeight 时序与内部 viewport 状态相互打架。
+          autoScroll
+          scrollToBottomOnRunStart
           style={scrollbarStyle}
           className="h-full overflow-y-auto px-4 sm:px-8"
         >

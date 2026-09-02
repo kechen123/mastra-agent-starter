@@ -33,6 +33,7 @@ import '../tools/index.js';
 
 import { initializeApp } from './init.js';
 import { preloadSkillRegistry } from '../core/skill/registry.js';
+import { startRunExecutor } from '../core/execution/run-executor.js';
 
 import { askRoute, stopMessageRoute, regenerateMessageRoute } from './routes/messages/index.js';
 import {
@@ -72,11 +73,84 @@ import {
   updateConversationRoute,
 } from './routes/conversations.js';
 import { loginRoute, meRoute, logoutRoute } from './routes/auth.js';
+import {
+  createConversationV2AlphaRoute,
+  createMessageV2AlphaRoute,
+  getConversationV2AlphaRoute,
+  streamRunEventsV2AlphaRoute,
+  stopMessageV2AlphaRoute,
+  createConversationV1Route,
+  createMessageV1Route,
+  getConversationV1Route,
+  streamRunEventsV1Route,
+  stopMessageV1Route,
+} from './routes/v2alpha/index.js';
 
 preloadSkillRegistry();
 initializeApp().catch((err) => {
   console.error('initializeApp() rejected:', err);
 });
+
+// Run executor 单进程启动；模块级 globalThis flag 保证幂等。
+startRunExecutor().catch((err) => {
+  console.error('startRunExecutor() rejected:', err);
+});
+
+/**
+ * 给旧根路径响应（/ask、/conversations*、/messages/*）附加 V2 §9.5.1
+ * 兼容窗口所需的 Deprecation / Sunset / Link 头。新 API 路由
+ * （/v1/v2alpha、/v1）不携带这些头。
+ */
+const LEGACY_DEPRECATION_HEADERS: ReadonlyArray<readonly [string, string]> = [
+  ['Deprecation', 'true'],
+  ['Sunset', '2027-02-01'],
+  ['Link', '</v1/v2alpha>; rel="successor-version"'],
+];
+
+// 给旧根路径响应附加 V2 §9.5.1 兼容窗口所需的弃用响应头。
+// 直接走 registerApiRoute 重新挂一个 path/method 完全相同、handler 包裹
+// 的路由；这样既保留原 Hono Handler 签名、requiresAuth、middleware 等
+// 元数据，又不会被错误的泛型擦除。
+import { registerApiRoute } from '@mastra/core/server';
+import type { ApiRoute } from '@mastra/core/server';
+
+function withDeprecationHeaders(route: ApiRoute): ApiRoute {
+  // ApiRoute 是 HonoApiRoute | SchemaApiRoute；这里只读本项目实际用到的字段。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = route as any;
+  const originalHandler: (c: unknown, ...rest: unknown[]) => Promise<Response> | Response =
+    typeof r.handler === 'function' ? r.handler : () => Promise.resolve(new Response(null, { status: 500 }));
+  const wrappedHandler: typeof originalHandler = async (context, ...rest) => {
+    const response = await Promise.resolve(originalHandler(context, ...rest));
+    try {
+      for (const [name, value] of LEGACY_DEPRECATION_HEADERS) {
+        response.headers.append(name, value);
+      }
+    } catch {
+      // immutable / locked headers: ignore — Mastra 在 setupHeaders 已下发过 header。
+    }
+    return response;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return registerApiRoute(r.path as any, {
+    method: r.method,
+    handler: wrappedHandler as unknown as (c: any) => Response | Promise<Response>,
+    ...(r.requiresAuth === true ? { requiresAuth: true } : {}),
+    ...(r.requiresAuth === false ? { requiresAuth: false } : {}),
+    ...(r.middleware !== undefined && r.middleware !== null ? { middleware: r.middleware } : {}),
+    ...(r.openapi !== undefined && r.openapi !== null ? { openapi: r.openapi } : {}),
+    ...(r.cors !== undefined && r.cors !== null ? { cors: r.cors } : {}),
+  }) as ApiRoute;
+}
+
+const askRouteDeprecated = withDeprecationHeaders(askRoute);
+const stopMessageRouteDeprecated = withDeprecationHeaders(stopMessageRoute);
+const regenerateMessageRouteDeprecated = withDeprecationHeaders(regenerateMessageRoute);
+const createConversationRouteDeprecated = withDeprecationHeaders(createConversationRoute);
+const deleteConversationRouteDeprecated = withDeprecationHeaders(deleteConversationRoute);
+const getConversationRouteDeprecated = withDeprecationHeaders(getConversationRoute);
+const listConversationsRouteDeprecated = withDeprecationHeaders(listConversationsRoute);
+const updateConversationRouteDeprecated = withDeprecationHeaders(updateConversationRoute);
 
 export const apiRoutes = [
   healthRoute,
@@ -84,9 +158,9 @@ export const apiRoutes = [
   loginRoute,
   meRoute,
   logoutRoute,
-  askRoute,
-  stopMessageRoute,
-  regenerateMessageRoute,
+  askRouteDeprecated,
+  stopMessageRouteDeprecated,
+  regenerateMessageRouteDeprecated,
   agentsRoute,
   toolsRoute,
   listSkillsRoute,
@@ -99,11 +173,11 @@ export const apiRoutes = [
   removeSkillRoute,
   bindSkillRoute,
   unbindSkillRoute,
-  listConversationsRoute,
-  createConversationRoute,
-  getConversationRoute,
-  updateConversationRoute,
-  deleteConversationRoute,
+  listConversationsRouteDeprecated,
+  createConversationRouteDeprecated,
+  getConversationRouteDeprecated,
+  updateConversationRouteDeprecated,
+  deleteConversationRouteDeprecated,
   listKnowledgeBasesRoute,
   createKnowledgeBaseRoute,
   getKnowledgeBaseRoute,
@@ -114,4 +188,15 @@ export const apiRoutes = [
   getDocumentRoute,
   deleteDocumentRoute,
   capabilitiesRoute,
+  // V2 入口（阶段 2 主用；阶段 3 之后切 v1，v2alpha 删除）
+  createConversationV2AlphaRoute,
+  createMessageV2AlphaRoute,
+  getConversationV2AlphaRoute,
+  streamRunEventsV2AlphaRoute,
+  stopMessageV2AlphaRoute,
+  createConversationV1Route,
+  createMessageV1Route,
+  getConversationV1Route,
+  streamRunEventsV1Route,
+  stopMessageV1Route,
 ];

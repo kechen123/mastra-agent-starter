@@ -396,9 +396,9 @@ CREATE TABLE skill_packages (
 
 ### 阶段 1 验收（映射 V2 §5.4）
 
-- [ ] 所有 6 张归属表都具备 `workspace_id` 且隔离合约测试通过（**含 `document_chunks`**）
+- [x] 所有 6 张归属表都具备 `workspace_id`（**含 `document_chunks`**）
 - [x] `skill_packages` 是全局目录表，绑定表归属 workspace
-- [ ] 行级 soft delete 与 partial unique index 不破坏
+- [ ] 真实 PostgreSQL 隔离合约与 soft delete / partial unique index 回归仍待配置独立测试库后执行
 
 ---
 
@@ -406,73 +406,104 @@ CREATE TABLE skill_packages (
 
 **目标**：把「POST 即响应」改成「POST 创建幂等命令 + SSE 订阅事件」；SSE 可在断线后通过 `Last-Event-ID` 续传；`agent_runs` 持久化整个 Agent 生命周期。
 
-### PR-2.1：`agent_runs` / `agent_run_events` Schema
+> **状态（2026-09-02）**：实现完成、待最终浏览器验收、待合并。`backend npm run typecheck`、`backend npm run test:unit`、`frontend npm run build` 及 Phase 2 新增合约测试均已通过；当前待验证项仅为真实浏览器 + PostgreSQL 链路，重点是流式文字逐字显示、刷新续接与聊天视口在终态“重新生成”按钮出现后仍持续跟随到底部。在该手工验收完成前，不得把阶段标为“已验收”。
+>
+> 旧 `users`、`pending/succeeded`、`(run_id, seq)`、POST 返回 200 等契约不再使用。
+
+### 实施范围（以 V2 为准）
+
+1. Schema 唯一维护在 `backend/database/init.sql`：补齐 conversations draft/active、`messages.current_run_id`、`agent_runs`、全局 BIGINT identity 的 `agent_run_events` 与 `idempotency_keys`。外键使用 `app_users`；Run 状态为 `queued` / `running` / `waiting_approval` / `completed` / `stopped` / `failed`。
+2. 新协议同时提供 `/v1/v2alpha` 和 `/v1`：`POST` 创建幂等命令并返回稳定 JSON；`GET /runs/:runId/events` 负责 SSE 订阅与 `Last-Event-ID` 回放。Mastra 的自定义路由保留 `/api` 给内置能力，若对外需要 `/api/v1`，由反向代理映射到 `/v1`。旧根路径继续保留，并带弃用响应头。
+   本地前端的 Vite 代理同时覆盖 `/api/*`（旧接口 rewrite）和 `/v1/*`（V2/SSE 原样转发），否则服务端返回的 `eventsUrl` 会落在 5173 并 404。
+3. 发送消息的单事务依次创建 user message、pending assistant message、queued Run、`run-queued` 事件、`current_run_id` 回填与幂等响应缓存；同会话活跃 Run 冲突返回 409。
+4. 前端采用 `/chat/new`、`/chat/:conversationId` 的服务端 Draft 与历史恢复；SSE 最后事件 ID 写入 `sessionStorage["mastra:lastEventId:<runId>"]`，重连只 GET 订阅、不重复 POST。
+5. Run 执行具备持久化状态、文本 checkpoint、最小 lease/heartbeat/orphan 回收，以及 `X-Request-ID` 与安全结构化日志。
+
+### PR-2.1：阶段 2 Schema 补齐
 
 **Files**
-- Create: `backend/database/migrations/0006-agent-runs.sql`
+- Modify: `backend/database/init.sql`
+  - `conversations`：补 `status draft/active`、`created_by` FK → `app_users(id) ON DELETE SET NULL`。
+  - `messages`：补 `current_run_id UUID NULL`（与 `agent_runs.id` 关联；FK 在 `agent_runs` 建表后再加）。
+  - 新增 `agent_runs` 表（`lease_owner` / `lease_expires_at` / `heartbeat_at` / `request_id` / `parent_run_id` / `error_code`）；partial unique `(conversation_id) WHERE status IN ('queued','running','waiting_approval')`。
+  - 新增 `agent_run_events`：BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY，`type` CHECK 含 10 个事件，`payload JSONB`、`workspace_id`、必要的索引。
+  - 新增 `idempotency_keys`：PK `(workspace_id, user_id, key)`，`fingerprint TEXT NOT NULL`、`response_status`、`response_body JSONB`、`expires_at`（24h TTL）。
+- 开发阶段 schema 以删库重建后的 `init.sql` 为唯一事实来源；不维护旧库兼容、数据回填或迁移路径，除非用户明确要求。
 
-> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
-
-**Schema**
-```sql
-CREATE TABLE agent_runs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id),
-  conversation_id UUID NOT NULL REFERENCES conversations(id),
-  user_id UUID NOT NULL REFERENCES users(id),
-  parent_run_id UUID REFERENCES agent_runs(id),
-  status TEXT NOT NULL CHECK (status IN ('pending','running','awaiting_approval','succeeded','failed','cancelled')),
-  idempotency_key TEXT,
-  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at TIMESTAMPTZ
-);
-CREATE UNIQUE INDEX uniq_run_idem ON agent_runs(workspace_id, idempotency_key)
-  WHERE idempotency_key IS NOT NULL;
-CREATE TABLE agent_run_events (
-  run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
-  seq BIGINT NOT NULL,
-  event_type TEXT NOT NULL,
-  payload JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (run_id, seq)
-);
-```
-
-**注意**：阶段 1 已有 `workspaces`，本 PR 仅追加 run 表；不要重复创建 workspaces。
-
-**测试**：迁移双向；`uniq_run_idem` 部分索引可命中。
-
-### PR-2.2：POST `Idempotency-Key` + SSE `Last-Event-ID` 续传
+### PR-2.2：V2 路由 + 共享 Handler
 
 **Files**
-- Create: `backend/src/server/middleware/idempotency.ts`
-- Create: `backend/src/server/middleware/sse-resume.ts`
-- Modify: `backend/src/server/routes/conversations.ts`（POST 改幂等）
-- Modify: `backend/src/server/routes/agent-runs.ts`（SSE 续传）
+- Create: `backend/src/modules/idempotency/repository.ts`
+- Create: `backend/src/modules/runs/repository.ts`
+- Create: `backend/src/modules/runs/run-events-bus.ts`
+- Create: `backend/src/modules/runs/service.ts`
+- Create: `backend/src/modules/runs/sse.ts`
+- Create: `backend/src/server/routes/v2alpha/{index.ts,shared-handlers.ts}`
+- Modify: `backend/src/server/bootstrap.ts`
+  - 注册 8 个 V2 路由（v2alpha + v1 × conversations / messages / SSE）；
+  - 旧 `/ask`、`/conversations*`、`/messages/*` 走 `withDeprecationHeaders()` 包一层（Deprecation / Sunset / Link）；
+  - 进程启动调一次 `startRunExecutor()`（幂等）。
 
 **契约**
-- POST `Idempotency-Key`：命中已存在 run → 返回原 `run_id`，不创建新 run；响应状态 `200`（非 `201`）。
-- SSE `Last-Event-ID`：从 `agent_run_events.seq` 起订阅；订阅失败 → 客户端重试 + `Last-Event-ID`。
+- `POST /v1/v2alpha/conversations` — 创建 draft conversation，校验 agentId/knowledgeBaseId 归属；写 idempotency。
+- `POST /v1/v2alpha/conversations/:id/messages` — 单事务 7 步（V2 §6.2）；同会话活跃 Run 冲突返回 409。
+- `GET /v1/v2alpha/runs/:runId/events` — SSE 订阅 + `Last-Event-ID` 回放；workspace 隔离校验。
 
-**测试**：
-- `idempotency.test.ts`：同一 key 二次 POST → 同一 `run_id`，事件流不重复。
-- `sse-resume.test.ts`：第 5 个事件后断线 → 续传 → 不丢、不重。
-
-### PR-2.3：前端 `AssistantChatWorkspace` 切到新协议
+### PR-2.3：Run Executor + 前端 SSE 重连 + draft 流
 
 **Files**
-- Modify: `frontend/src/features/assistant/`（用 `LastEventId` 头 + `EventSource`）
-- Create: `frontend/src/lib/run-client.ts`（封装幂等 POST + SSE 订阅）
+- Create: `backend/src/core/execution/run-executor.ts`
+- Modify: `frontend/src/lib/conversations.ts`
+- Modify: `frontend/src/app/App.tsx`
 
-**注意**：前端路由从零搭（README「新增 Agent/Tool/Skill 不动前端」，但阶段 2 必动前端）。本 PR 不引入新依赖（仅原生 `EventSource` + `fetch`）。
+**后端**
+- 每 1s poll 抢占（`FOR UPDATE SKIP LOCKED`），60s lease / 15s heartbeat；
+- 文本 checkpoint 节流（每 400ms 或累计 512 字符），且 `completed` / `stopped` 终态事务在需要时补写最终文本 checkpoint，避免实时 UI 落后于落库正文；
+- lease 过期由 sweeper（30s）转 `failed` + `LEASE_EXPIRED` + `run-failed` 事件；
+- `run-queued` / `run-started` / `run-completed` / `run-stopped` / `run-failed` 在同一事务写入 `agent_runs` 与 `agent_run_events`，确保 SSE 重放完整。
 
-**测试**：Playwright 冒烟（手动标注非阻塞，阶段 5 才补 CI）。
+**前端**
+- `/chat/new`、`/chat/:conversationId` 路径式 History API（兼容旧 `?conversation=`）；
+- 首条消息 → `createDraftConversation` → `replaceState(/chat/<id>)`；再次发问 → `postMessage` 拿到 `runId` + `eventsUrl`；
+- 加载会话时若最后一条 assistant message 携带 `currentRunId`，立即 EventSource 重连，lastEventId 优先取 sessionStorage；
+- run 终态关闭 EventSource + 清 sessionStorage 缓存。
+
+### PR-2.4：SSE 双通道实时增量升级（PR-2.4）
+
+**Files**
+- Modify: `backend/src/core/execution/run-executor.ts`（新增 `liveBuffer` / `liveLastFlushAt` + `flushLiveDelta`；delta 事件累积到 ~30ms / ≤256 字符触发 `publishLiveDelta`；终态路径前补一次 flush）
+- Modify: `backend/src/modules/runs/repository.ts`（新增 `LIVE_DELTA_CHANNEL` 常量与 `publishLiveDelta` 帮助函数；payload 受 8KB 限制保护）
+- Create: `backend/src/modules/runs/live-delta-bus.ts`（独立 LISTEN client + fan-out hub；与持久化 bus 互不耦合）
+- Modify: `backend/src/modules/runs/sse.ts`（subscribe 双 bus；`content-delta` SSE 帧不带 id；持久化事件发送严格串行化 in-flight + lastDeliveredId 守卫；cancel 时释放两个订阅）
+- Modify: `frontend/src/lib/conversations.ts`（`V2RunEvent` 增 `content-delta`；监听 `content-delta` 事件；`dispatch` 永不推进 lastEventId 给无 id 帧）
+- Modify: `backend/src/core/agent/runtime.ts`、`backend/src/core/execution/stream-text-normalizer.ts`（将 Provider 的累计 `text-delta` 快照归一化为纯增量，禁止 `1 / 12 / 123` 重复累计）
+- Modify: `frontend/src/app/App.tsx`、`frontend/src/lib/streaming-renderer.ts`（网络接收缓冲与视觉显示游标分离；每个 `requestAnimationFrame` 只推进一个 Unicode code point；checkpoint 作为权威快照收敛，绝不把累计快照当增量追加）
+- Modify: `frontend/src/features/chat/components/AssistantChatWorkspace.tsx`（启用 assistant-ui 原生 ResizeObserver 自动跟随器；流式文本、Markdown 排版和终态操作区改变高度时跟随到底部，用户主动上滑后暂停）
+- Modify: `backend/tests/unit/sse-replay.ts`（新增 D1–D4 用例：delta 不带 id、不进持久化、双订阅各自释放、并发回调不重发不回退）
+
+**Schema**：不变（PR-2.4 不动 `init.sql`）。
+
+**API**：不变（同一个 `GET /v1/runs/:runId/events` 端点；增加事件类型 `content-delta`）。
+
+**前端**：双通道协议对外接口已落地；详情见 `architecture-v2.md` §6.4.1。
+
+**协议不变性**
+- `content-delta` 不进 `agent_run_events`、不进 `idempotency_keys` 响应；
+- 持久化事件帧 id = `agent_run_events.id`（BIGINT IDENTITY），仍可 `Last-Event-ID` 重连；
+- SSE 连接取消时持久化 + 实时增量两个订阅都被释放；
+- workspace / 用户归属校验路径与 PR-2.3 完全一致；
+- 不得引入新生产依赖、不得改 SQL、不得做旧库兼容。
+
+**验收**：详见 `architecture-v2.md` §6.4.2；与 PR-2.3 阶段 2 验收并列。
 
 ### 阶段 2 验收（映射 V2 §6.6）
 
-- [ ] 同一 `Idempotency-Key` 重 POST 不会产生多个 run
-- [ ] SSE 中断后续传不丢、不重
-- [ ] `agent_runs` 与 `agent_run_events` 完成生命周期持久化
+- [ ] 同一 `Idempotency-Key` 重 POST 不会产生多个 run（合约：`tests/unit/idempotency-concurrency.ts`）
+- [ ] SSE 中断后续传不丢、不重（合约：`tests/unit/sse-replay.ts`，覆盖 R1-R5、R7）
+- [ ] `agent_runs` 与 `agent_run_events` 完成生命周期持久化，且 sweeper 同事务（合约：`tests/unit/sweeper-transactional.ts`，覆盖 S1-S4）
+- [ ] `/chat/new` 服务端创建 draft，`/chat/:conversationId` 可恢复历史与进行中的 Run
+- [ ] 旧根路径兼容且带弃用响应头；新前端走 `/v1/v2alpha`
+- [ ] 后端 `npm run typecheck`、前端 `npm run build` 与上述合约测试全部通过
 
 ---
 

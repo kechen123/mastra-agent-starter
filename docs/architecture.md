@@ -2,7 +2,7 @@
 
 > **文档定位**：本文描述 **当前已实现** 的系统架构（as-built）——文中出现的每个模块、表、路由都对应仓库里真实存在的代码。
 > 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
-> 本文与 V2 文档冲突时，**以本文为当前代码事实**；当前已落地 `workspaces` 与 Skill 三表，`agent_runs`、`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等仍未实现。
+> 本文与 V2 文档冲突时，**以本文为当前已验收代码事实**；阶段 1 的 `workspaces` 与 Skill 三表已经落地。阶段 2（`agent_runs`、`agent_run_events`、幂等 POST、SSE 断点续传）正在开发，未通过验证与合并前不得视为已实现；`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等仍未实现。
 
 ## 概述
 
@@ -328,7 +328,7 @@ infrastructure/llm/
 
 ## 当前安全边界（必读）
 
-当前版本定位为 **单租户、本地开发或受信任网络中的匿名演示 Starter**。
+当前版本定位为 **本地开发或受信任网络中的已认证 Starter**。本地账号拥有个人 Workspace；当前尚未提供组织级租户、角色授权和生产级治理能力。
 
 `DEPLOYMENT_PROFILE=production` 当前会在配置加载时拒绝启动。它是防误部署保护，不替代认证；只有完成身份、租户隔离与限流后才允许开放生产档位。
 
@@ -337,7 +337,7 @@ infrastructure/llm/
 - **不** 适用于公网直接部署——速率限制、租户隔离、Tool 风险治理都未实现。
 - Workspace 隔离已覆盖会话、知识库、文档、分块、工具执行与 Agent-Skill 绑定；跨 Workspace 资源访问统一隐藏为 404。公开生产部署仍不适用，因为速率限制、Tool 风险治理和审批流尚未实现。
 - **不** 实现审批流——`ToolDefinition.metadata` 中的 `destructive` / `openWorld` 字段仅作为能力声明与 UI 展示，**不是** 运行时授权策略。
-- **Phase 1 认证范围**——本地用户名 / 密码登录已落地，但仅保证"可登录、可吊销当前会话"，未实现密码找回 / 多因素 / 风控锁定 / 公开注册；多账号共享数据。
+- **Phase 1 认证范围**——本地用户名 / 密码登录与个人 Workspace 已落地；会话、知识库、文档、分块、工具执行与 Agent-Skill 绑定按 Workspace 隔离。未实现密码找回 / 多因素 / 风控锁定 / 公开注册，以及组织共享 Workspace、角色与资源级授权。
 
 ### Tool Metadata 的真实定位
 

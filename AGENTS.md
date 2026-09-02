@@ -4,6 +4,8 @@
 
 `backend/src/mastra/` contains the application runtime. Keep agents in `agents/`, callable capabilities in `tools/`, and retrieval code in `rag/`. Scripts used for one-off checks live in `backend/src/scripts/`. PostgreSQL schema lives in `backend/database/init.sql`. `frontend/` contains the React knowledge-workbench UI and must not import Mastra runtime code directly.
 
+During development, schema changes target a freshly initialized database: when `backend/database/init.sql` changes, the database is deleted and initialized again. Do not add compatibility DDL, data backfills, or migration paths for an old database unless the user explicitly requests backward compatibility.
+
 ## Build, Test, and Development Commands
 
 - In `backend/`, `npm install` installs the locked dependencies and `npm run typecheck` runs the required static check.
@@ -23,6 +25,8 @@ No automated test runner is configured yet. Every code change must pass `npm run
 ## Commit & Pull Request Guidelines
 
 The repository history currently contains only the initial commit, so no established commit convention exists. Use concise imperative messages, for example `feat: add knowledge base retrieval tool`. Keep each commit scoped. PRs should describe the user-facing behavior, list schema/configuration changes, include validation commands and results, and call out any unverified provider or database behavior.
+
+Before every commit or push, update the documentation progress in the same change set. Keep `README.md`, `docs/architecture.md`, and `docs/implementation-plan.md` aligned with the verified implementation state; work in progress must be marked as unverified and must not be presented as completed.
 
 ## Security & Configuration
 
