@@ -1,29 +1,29 @@
 # Mastra Agent Starter
 
-一个基于 [Mastra](https://mastra.ai/) 的可扩展智能对话与知识库平台模板。它提供可登录、可隔离的个人 Workspace，让业务项目可以在此基础上快速组合 Agent、知识库、Tool 和 Skill，而不必从对话流、检索链路或工具审计重新搭建。
+面向业务团队的 [Mastra](https://mastra.ai/) 智能应用起步模板。它把对话、知识库、工具调用、技能编排和 Workspace 数据隔离整合为一套可直接运行的基础平台，帮助团队把精力放在业务 Agent 和业务能力本身，而不是重复搭建底层链路。
 
 > 当前仅适合本地开发或受信任网络中的已认证演示环境；生产级租户治理、Tool 审批等能力仍在演进中。详细边界见 [架构文档](docs/architecture.md)。
 
-## 有哪些功能
+## 开箱即用
 
-- 通用对话与流式输出：支持 SSE 流式生成、停止生成和重新生成。
-- 知识库问答：文档入库后基于 PostgreSQL + pgvector 检索，并在回答中附带引用来源。
-- 多 Agent 能力组合：可为不同 Agent 按需绑定知识库、Tool 和 Skill。
-- Tool Registry：统一注册内置或自定义工具，记录每次执行的输入、输出、状态与耗时。
-- Skill Registry：支持内置 Skill、本地业务 Skill 以及从 skills.sh 市场安装的 Skill。
-- 本地登录与数据隔离：账号拥有独立 Workspace；会话、文档、知识库、Tool 执行和 Agent-Skill 绑定均按 Workspace 隔离。
-- 可持续演进的运行时：已具备持久化 Run、断点续传与 Tool 策略的基础能力；具体实现状态以 [当前架构](docs/architecture.md) 为准。
+- **可追溯的智能对话**：支持通用问答、SSE 流式输出、停止生成与重新生成。
+- **带引用的知识库问答**：文档经 PostgreSQL + pgvector 检索后生成回答，并保留来源引用。
+- **可组合的 Agent 能力**：按 Agent 组合知识库、Tool 和 Skill，避免为不同业务复制运行时。
+- **受控的工具与技能体系**：Tool 统一注册、执行留痕；Skill 支持内置、本地业务和 skills.sh 市场来源。
+- **开箱即用的个人工作区**：本地账号登录后自动拥有独立 Workspace，业务数据按 Workspace 隔离。
 
-## 如何运行
+运行时已经具备持久化 Run、断点续传和 Tool 策略的基础能力；完整实现范围与仍在演进的能力请以 [当前架构](docs/architecture.md) 为准。
 
-### 前置要求
+## 快速开始
+
+开始前请准备：
 
 - Node.js 22+
 - PostgreSQL 15+
 - Docker（可选；用于启动本地 PostgreSQL）
 - DeepSeek API Key 和 Embedding Provider 凭据
 
-### 1. 配置并启动数据库
+### 配置本地环境
 
 PowerShell：
 
@@ -35,7 +35,7 @@ docker compose up -d
 
 首次创建数据库数据卷时会执行 `backend/database/init.sql`。如需手动初始化或重建本地数据库，请先阅读 [开发指南](docs/development.md)，避免对共享数据库执行初始化。
 
-### 2. 启动后端并创建账号
+### 启动服务
 
 ```powershell
 Set-Location backend
@@ -47,8 +47,6 @@ npm run dev
 
 创建账号时，密码会在交互式终端中输入，不会作为命令行参数保存。
 
-### 3. 启动前端
-
 在另一个终端执行：
 
 ```powershell
@@ -59,7 +57,7 @@ npm run dev
 
 打开 [http://localhost:5173](http://localhost:5173)，使用刚创建的账号登录。
 
-### 常用验证
+### 提交前检查
 
 ```powershell
 Set-Location backend
@@ -72,9 +70,9 @@ npm run build
 
 服务可用性可通过 `GET /healthz` 检查进程，通过 `GET /readyz` 检查数据库、LLM 与 Embedding 基础配置；后者在依赖未就绪时会返回 `503`，且不会泄露凭据。
 
-## 如何继续开发业务
+## 在此基础上扩展
 
-优先在既有扩展点中增加业务能力，不要直接把业务逻辑耦合到 Mastra Runtime：
+业务实现应落在既有扩展点中，避免直接耦合 Mastra Runtime：
 
 | 目标 | 入口 |
 | --- | --- |
@@ -86,9 +84,9 @@ npm run build
 | 新增 HTTP API | `backend/src/server/routes/`：并在 `backend/src/server/bootstrap.ts` 的 `apiRoutes` 注册 |
 | 修改品牌或默认模型 | `backend/src/config.ts` 与环境变量 `APP_NAME`、`APP_SHORT_NAME`、`LLM_PROVIDER`、`LLM_MODEL` |
 
-开发约束与完整示例见 [扩展指南](docs/extending.md)。后端代码改动至少执行 `npm run typecheck`，前端代码改动至少执行 `npm run build`；不要把真实密钥、Token 或共享数据库配置提交到仓库。
+新增 Agent、Tool 或 Skill 的常规路径是“复制模板 → 填写业务定义 → 在唯一入口注册”。开发约束与完整示例见 [扩展指南](docs/extending.md)。后端代码改动至少执行 `npm run typecheck`，前端代码改动至少执行 `npm run build`；不要把真实密钥、Token 或共享数据库配置提交到仓库。
 
-## 项目文档
+## 深入了解
 
 - [当前实现架构](docs/architecture.md)：已落地能力、数据流、安全边界和已知未验证项。
 - [目标架构（V2）](docs/architecture-v2.md)：后续演进设计，不代表当前已经实现。
