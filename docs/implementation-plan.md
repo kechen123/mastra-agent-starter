@@ -509,14 +509,60 @@ CREATE TABLE skill_packages (
 
 ## 阶段 3：Tool Policy 与审批
 
-**目标**：Tool 的 `metadata` 不再只是 UI 提示，而是接入身份 + 租户校验 + 审批工作流；高风险 Tool 调用在 `awaiting_approval` 状态暂停。
+**状态（2026-09-02）**：阶段 3.0（Durable Agent Runtime）进行中；阶段 3 的 Tool Policy / 审批 UI / 续 Run 仍**未**开始。
 
-### PR-3.1：`tool_approvals` / `tool_policy_rules` Schema
+阶段 3.0 仅作为前置条件——storage、Tool 公共注册和 ID 参数透传已实现：把 `@mastra/pg` 的 `PostgresStore` 接到了独立 schema `mastra_runtime`，并把全部 Agent 经公开 `new Mastra({ agents })` 注册路径绑定同一 storage；`streamOptions.runId / memory.thread / memory.resource` 已在 stream 调用中真实透传。**跨重启恢复审批 Run 未完成真实 PostgreSQL 端到端验证**。阶段 3.0 **不**实现审批表、审批 API、审批 UI，也不新增演示性高风险 Tool。
+
+### PR-3.0（进行中）—— Durable Agent Runtime 前置
 
 **Files**
-- Create: `backend/database/migrations/0007-tool-policy.sql`
+- Create: `backend/src/infrastructure/mastra/storage.ts`
+- Create: `backend/src/infrastructure/mastra/instance.ts`（薄工厂，承载 `Mastra({...})` 装配）
+- Modify: `backend/src/mastra/index.ts`（薄包装，委托 `instance.ts` 工厂）
+- Modify: `backend/src/core/agent/runtime.ts`（`streamAgent` 内通过 `getMastraInstance()` 取实例；新增 `_setMastraInstanceForTesting` 测试钩子）
+- Modify: `backend/src/core/agent/registry.ts`（`resolvePerRequestAgent` + 测试钩子 `_setPerRequestFactoryOverrideForTesting` / `_clearAgentRegistryForTesting`）
+- Modify: `backend/src/core/tool/registry.ts`（`buildGlobalToolMap()`）
+- Modify: `backend/src/core/execution/run-executor.ts`（把 `r.id / r.conversation_id / r.workspace_id` 透传到 `streamAgent`）
+- Modify: `backend/src/core/skill/discovery.ts`（Skill 名非法时一次性警告 + 跳过）
+- Modify: `backend/src/agents/general-chat/agent.ts`、`backend/src/agents/knowledge-base/agent.ts`、`backend/src/agents/_template/agent.ts`（透传 `mastra` 到 `new Agent({..., mastra})`；不再 inline 持有 tools）
+- Create: `backend/tests/unit/mastra-storage-config.ts`
+- Create: `backend/tests/unit/mastra-bootstrap.ts`
+- Create: `backend/tests/unit/stream-agent-identity-mapping.ts`
+- Create: `backend/tests/unit/dynamic-tool-resolution.ts`
 
-> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+**架构**
+- `infrastructure/mastra/storage.ts` 提供 `createMastraStorage()`，使用 `new PostgresStore({ id: 'mastra-runtime-storage', schemaName: 'mastra_runtime', connectionString })`；Mastra 框架内部表 DDL 由 `@mastra/pg` 官方机制落到独立 schema，与业务 `init.sql` 完全隔离。
+- `mastra/index.ts` 与 `infrastructure/mastra/instance.ts` 协作：`createMastraInstance({ storage, agents, tools, withServer, server })` 装配 `new Mastra({...})`；生产路径默认注入 `buildGlobalToolMap()`。`mastra.getStorage()` 返回注入的 PostgresStore；`mastra.getAgent(id)` 命中；`mastra.listTools()` 列出全局 Tool。
+- 静态 Agent 构造期（`mastra/index.ts` → `createMastraInstance`）：`definition.factory` 的第三个参数 `mastraInstance` **当前是 `undefined`**——同一进程内的 `mastra` 单例虽存在，但本路径下未被传给 factory。这些静态 Agent 通过 v1 公开 `new Mastra({ agents })` 路径接入同一 storage，**不**依赖 per-request `mastraInstance`。
+- per-request Agent（`streamAgent` 内通过 `definition.factory(tools, skills, mastra)` 调用）：`mastraInstance` 由 `runtime.getMastraInstance()` 解析——生产路径走 lazy `await import('mastra/index.js')`；单元测试通过 `_setMastraInstanceForTesting(fake)` 注入 fake，**不**触发 `server/bootstrap.ts` 的副作用（`startRunExecutor()` / `preloadSkillRegistry()` / PG LISTEN 句柄 / Skill 文件系统扫描）。
+- 业务 ↔ Mastra 标识映射：`streamAgent` 入参的 `runId / threadId / resourceId` 在 streamOptions 上透传给 v1 公开字段 `runId`（`AgentExecutionOptionsBase.runId`）与 `memory: { thread, resource }`（`AgentMemoryOption`）；参数全缺时跳过对应字段。
+- 测试钩子：`_setStaticAgentBuilderForTesting`、`_setStorageFactoryForTesting`、`_resetMastraStorageForTesting`、`_setMastraInstanceForTesting`、`_resetMastraInstanceCacheForTesting`、`_setPerRequestFactoryOverrideForTesting`、`_clearAgentRegistryForTesting`。仅测试可用，生产路径不调。
+
+**约束**
+- 不复制、手写、迁移 `@mastra/pg` 内部表 DDL；schema 隔离完全交给官方 `schemaName`。
+- 不调用 `__registerMastra` 等 internal API。
+- 不引入内存 Map / 前端伪恢复兼容补丁。
+- 不升级依赖；不改与本阶段无关模块。
+- 单元测试 fixture 必须保持单一进程自然退出（exit 0）；不允许 `process.exit()` 掩盖句柄泄漏。
+
+**阶段 3.0 验收**
+- [ ] 后端启动不再出现 "No storage configured on Mastra" 警告——Mastra 装配层已通过 `createMastraStorage()` 把 PostgresStore 注入；缺 `DATABASE_URL` 时**显式抛错**，绝不静默降级到内存替代。
+- [ ] `mastra.getStorage()` 返回 `mastra_runtime` schema 上的 PostgresStore（unit 替身注入验证）。
+- [ ] 静态 Agent 经 v1 公开 `new Mastra({ agents })` 路径注册；per-request Agent 通过 `streamOptions.runId / memory.thread / memory.resource` 携带业务 ↔ Mastra 标识；**不**调用 `__registerMastra`。
+- [ ] `backend npm run typecheck` + `backend npm run test:unit` 通过；`mastra-storage-config.ts` / `mastra-bootstrap.ts` / `stream-agent-identity-mapping.ts` / `dynamic-tool-resolution.ts` 全部合约用例通过。
+- [ ] 不启动服务、不连真实 DB；缺 DB 时仅声明未验证项。
+
+**未验证项**（必须保留为「未验证」直至端到端跑通）
+- 真实 PostgreSQL 上 `mastra_runtime` schema 的内部 DDL 形态（由 `@mastra/pg` 决定，未启动服务观察）。
+- 跨重启恢复：参数已透传不等于"跨重启恢复已实现"；本阶段**未**实际触发"重启 → 列出 suspended runs → 续 Run"流程；属于阶段 3.1+ 验收范围。
+- `agent_runs.id / conversations.id / workspaces.id` 与 Mastra snapshot 的同源校验未在真实 PG 上验证。
+
+### PR-3.1（仍未开始）—— `tool_approval_requests` / `tool_policy_rules` Schema
+
+**Files**
+- 修改 `backend/database/init.sql`（**不**新开 migration 文件；G-2 约束）
+
+> TODO：阶段 3.0 落地后才动此 PR；具体 Schema 仍按 V2 §7 设计。
 
 **Schema**
 ```sql
@@ -528,7 +574,7 @@ CREATE TABLE tool_policy_rules (
   conditions JSONB NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE tool_approvals (
+CREATE TABLE tool_approval_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
   tool_call_id UUID NOT NULL,
@@ -541,7 +587,7 @@ CREATE TABLE tool_approvals (
 );
 ```
 
-### PR-3.2：Tool 执行网关接入身份 + 策略评估
+### PR-3.2（仍未开始）—— Tool 执行网关接入身份 + 策略评估
 
 **Files**
 - Modify: `backend/src/core/runtime/tool-executor.ts`（注入 `workspaceId` 与 `userId`）
@@ -549,7 +595,7 @@ CREATE TABLE tool_approvals (
 
 **测试**：destructive / openWorld / requiresRuntime 三类 Tool 的策略路径。
 
-### PR-3.3：审批 UI + 续 Run
+### PR-3.3（仍未开始）—— 审批 UI + 续 Run
 
 **Files**
 - Create: `frontend/src/features/tool-approvals/`
@@ -557,9 +603,11 @@ CREATE TABLE tool_approvals (
 
 ### 阶段 3 验收（映射 V2 §7.4）
 
+- [ ] PR-3.0 完成
 - [ ] Tool 网关不依赖 `metadata` 自报字段
-- [ ] 审批超时自动 reject + Run 进入 `failed`
+- [ ] 审批超时自动 reject + Run 进入 `stopped` + `error_code='APPROVAL_EXPIRED'`（V2.3 裁决；不再归类 failed）
 - [ ] 跨 workspace Tool 调用一律 404
+- [ ] 跨重启 Run 恢复：Mastra `listSuspendedRuns` + `approveToolCall` / `declineToolCall` / `resumeStream` 路径打通；审批状态落 `tool_approval_requests` 表，SSE `approval-requested` 事件可续
 
 ---
 

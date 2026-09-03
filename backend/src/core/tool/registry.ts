@@ -67,6 +67,29 @@ export function resolveTools(ids: string[]): Record<string, unknown> {
 }
 
 /**
+ * 把当前已注册的全部 Tool 拍平成 `{ id → tool }` 字典。
+ *
+ * Phase 3.0 起该字典作为 `Mastra({ tools })` 的输入：所有可恢复 Tool
+ * 走 Mastra 公共注册路径，不再仅存在于 per-request 临时 Agent 的
+ * `tools` 字段。具体 Agent 工厂不再 inline 传 `tools`；Agent 通过
+ * `mastraInstance.tools` 拿同一份字典，由 `streamOptions.activeTools`
+ * 在每次 stream 时按 workspace / Agent 声明的子集过滤。
+ *
+ * 关键约束：
+ *   - 只读，不修改内部状态；调用方不应通过返回值反向注册新 Tool；
+ *   - 返回的是浅拷贝（每个 entry 引用同一个 `ToolDefinition.tool`），
+ *     防止 v1 在构造期把它存入索引后我们再修改 `toolMap` 出现幻象；
+ *   - 不区分 workspace / user——这一层只表达"已注册 Tool 集合"。
+ */
+export function buildGlobalToolMap(): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [id, def] of toolMap.entries()) {
+    out[id] = def.tool;
+  }
+  return out;
+}
+
+/**
  * 取 Agent 实际可用的 tool id 列表。
  *
  * - 若未提供 allowedTools，则返回所有"Agent 声明 & 已注册"的 id（宽松模式）。

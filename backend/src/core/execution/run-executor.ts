@@ -249,6 +249,14 @@ async function executeRun(row: Record<string, unknown>): Promise<void> {
   let exitContent = '';
   let exitError: string | undefined;
   try {
+    // Phase 3.0：把业务 ↔ Mastra 标识映射透传给 streamAgent。
+    // - runId     ←  r.id             (agent_runs.id)
+    // - threadId  ←  r.conversation_id(conversations.id)
+    // - resourceId←  r.workspace_id   (workspaces.id)
+    // 这三个字段在 agent.stream() 时由 Runtime 透传到 Mastra 公开
+    // streamOptions，使框架的 workflow snapshot 与我们的业务表走同一组
+    // 标识。缺一不可；任何一个缺失都会让"跨重启恢复审批 Run"的入口失
+    // 效（v1 stable 的 snapshot key = runId + memory.{thread,resource}）。
     for await (const event of streamAgent({
       workspaceId: r.workspace_id,
       agentId: r.agent_id,
@@ -257,6 +265,9 @@ async function executeRun(row: Record<string, unknown>): Promise<void> {
       knowledgeBaseId: null,
       history,
       abortSignal: abortController.signal,
+      runId: r.id,
+      threadId: r.conversation_id,
+      resourceId: r.workspace_id,
     })) {
       await handleStreamEvent(event, execution);
       if (event.type === 'done') { exitType = 'done'; exitContent = event.content; break; }

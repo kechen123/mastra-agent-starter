@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import type { Mastra } from '@mastra/core';
 import type { AgentDefinition } from '../../core/agent/types.js';
 import { config } from '../../config.js';
 import { resolveDefaultChatModel } from '../../infrastructure/llm/registry.js';
@@ -13,15 +14,24 @@ import { knowledgeBaseInstructions } from './instructions.js';
  *
  * 模型通过 `infrastructure/llm/registry.ts:resolveDefaultChatModel()` 解析，
  * 本工厂不直接读取 Provider 环境变量、不拼接 `provider/model` 字符串。
+ *
+ * Phase 3.0 修订：工具来源变更（详见 `agents/general-chat/agent.ts`
+ * 的注释）。`mastraInstance` 透传给 `new Agent({...})`，让 Agent 通过
+ * public Mastra 注册路径同时拿到 tools 与 storage。
  */
-export function createKnowledgeBaseAgent(tools?: Record<string, unknown>, skills?: unknown[]): Agent {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createKnowledgeBaseAgent(
+  _tools?: Record<string, unknown>,
+  skills?: unknown[],
+  mastraInstance?: Mastra,
+): Agent {
   return new Agent({
     id: 'knowledge-base',
     name: `${config.appShortName} 知识库问答 Agent`,
     model: resolveDefaultChatModel(),
     instructions: knowledgeBaseInstructions,
-    ...(tools && Object.keys(tools).length > 0 ? { tools: tools as any } : {}),
     ...(skills && skills.length > 0 ? { skills: skills as any } : {}),
+    ...(mastraInstance ? { mastra: mastraInstance } : {}),
   });
 }
 

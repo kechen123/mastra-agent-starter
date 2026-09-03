@@ -8,9 +8,10 @@ import {
   getAgentSkillBindings,
   ensureSkillRegistryLoaded,
 } from '../skill/registry.js';
-import { getAgentDefinition } from './registry.js';
+import { getAgentDefinition, resolvePerRequestAgent } from './registry.js';
 import type { StreamEvent } from '../execution/stream-events.js';
 import { normalizeTextChunk } from '../execution/stream-text-normalizer.js';
+import type { Mastra } from '@mastra/core';
 export type {
   StreamChunk,
   StreamResult,
@@ -21,6 +22,72 @@ export type {
   StreamToolCallError,
   StreamEvent,
 } from '../execution/stream-events.js';
+
+/**
+ * Phase 3.0 修订：Mastra 实例获取的依赖注入点。
+ *
+ * 默认行为：`getMastraInstance()` 在首次调用时通过
+ * `await import('../../mastra/index.js')` 动态加载生产单例。
+ * 该 import 会触发 `server/bootstrap.ts` 的副作用
+ * （`startRunExecutor()` / `preloadSkillRegistry()` / PG LISTEN 句柄），
+ * 适合在主进程启动后使用。
+ *
+ * 测试行为：单元测试在**首次** `streamAgent` 调用之前通过
+ * `_setMastraInstanceForTesting(fakeInstance)` 注入一个最小 fake；
+ * runtime 优先返回 override，绝不触发动态 import；测试收尾时
+ * 调用 `_setMastraInstanceForTesting(null)` 清理。
+ *
+ * 注意：本钩子只控制 runtime 传给 `definition.factory` 的第三个参数；
+ * `Mastra({ agents })` 单例构造仍由 `mastra/index.ts` 内部完成（生产
+ * 路径不变）。生产代码绝不调用 `_setMastraInstanceForTesting`。
+ *
+ * 当前实现真实状态（按代码事实）：
+ *   - 静态 Agent 构造期（`mastra/index.ts` → `createMastraInstance`）：
+ *     factory 第三参数 `mastraInstance` 是 **undefined**（同一进程内
+ *     `mastra` 单例虽已存在但本函数未提供；构造函数拿不到实例）。
+ *     这些静态 Agent 通过 v1 公开 `new Mastra({ agents })` 路径接入
+ *     同一 storage，**不**依赖 per-request `mastraInstance`。
+ *   - per-request Agent（`streamAgent` 内通过 `definition.factory(...)`
+ *     调用）：factory 第三参数可以拿到 `mastraInstance`（由本函数提供）。
+ *     v1 当前并未通过该参数把 storage 强制绑定给 per-request Agent；
+ *     per-request Agent 通过 `new Agent({..., mastra })` 同样拿到
+ *     公共 `mastra.getStorage()`。本阶段的"已实现"= 公共参数已透传；
+ *     "跨重启恢复审批 Run"在真实 PostgreSQL 上的端到端验证**未**完成。
+ */
+let _mastraInstanceOverride: unknown = undefined;
+let _productionMastraCache: unknown = undefined;
+let _productionMastraLoadingPromise: Promise<unknown> | null = null;
+async function _loadProductionMastra(): Promise<unknown> {
+  if (_productionMastraCache !== undefined) return _productionMastraCache;
+  if (_productionMastraLoadingPromise) return _productionMastraLoadingPromise;
+  _productionMastraLoadingPromise = (async () => {
+    const mod = (await import('../../mastra/index.js')) as { mastra: unknown };
+    _productionMastraCache = mod.mastra;
+    return _productionMastraCache;
+  })();
+  return _productionMastraLoadingPromise;
+}
+
+export function _setMastraInstanceForTesting(
+  instance: unknown | null,
+): void {
+  _mastraInstanceOverride = instance === null ? undefined : instance;
+}
+
+async function getMastraInstance(): Promise<unknown> {
+  if (_mastraInstanceOverride !== undefined) return _mastraInstanceOverride;
+  return _loadProductionMastra();
+}
+
+/**
+ * 测试钩子：清空 production 单例缓存与 override。**仅供需要在进程
+ * 内重新解析 Mastra 单例的测试使用**；生产代码绝不调用。
+ */
+export function _resetMastraInstanceCacheForTesting(): void {
+  _productionMastraCache = undefined;
+  _productionMastraLoadingPromise = null;
+  _mastraInstanceOverride = undefined;
+}
 
 /**
  * `streamAgent` 的入参契约（V2.3.6 §5.1）。
@@ -42,6 +109,19 @@ export interface StreamAgentInput {
   knowledgeBaseId?: string | null;
   history?: Message[];
   abortSignal: AbortSignal;
+  /**
+   * Phase 3.0 — 标识映射字段（业务 ↔ Mastra）。
+   * - `runId`：业务 `agent_runs.id`，透传到 Mastra `streamOptions.runId`；
+   * - `threadId`：业务 `conversations.id`，透传到 Mastra
+   *   `streamOptions.memory.thread.id`；
+   * - `resourceId`：业务 `workspaces.id`，透传到 Mastra
+   *   `streamOptions.memory.resource.id`。
+   * 三个字段同时缺失时，Runtime 仍允许运行（向后兼容），但业务 ↔ Mastra
+   * 标识不再持久——与 Phase 3.0 文档要求"必须真实携带"相对应。
+   */
+  runId?: string;
+  threadId?: string;
+  resourceId?: string;
 }
 
 /**
@@ -80,11 +160,23 @@ export async function* streamAgent(
     // 共享同一个 resolved Promise，开销可忽略。
     await ensureSkillRegistryLoaded();
 
-    // 按能力解析：tools=false 的 Agent 不会得到 tools Map；
-    // skills=false 的 Agent 不会去读 DB 绑定。空对象/数组让工厂内的 spread
+    // 按能力解析：tools=false 的 Agent 不会计算 activeTools；
+    // skills=false 的 Agent 不会去读 DB 绑定。空数组让工厂内的 spread
     // 直接跳过对应字段，序列化更干净。
-    const tools: Record<string, unknown> = definition.capabilities.tools
-      ? resolveTools(resolveToolIds(definition.toolIds ?? [], undefined))
+    //
+    // Phase 3.0 修订：Tool 来源变更。
+    //   - 全部 Tool 在 `Mastra({ tools })` 全局注册（详见
+    //     `infrastructure/mastra/instance.ts`）；
+    //   - per-request **不**再 inline 构造 tools Map；
+    //   - 当前 Agent 可用的子集通过 `streamOptions.activeTools`
+    //     传给 `agent.stream()`，由 v1 在执行期按白名单过滤。
+    //   - `resolveTools()` 在本路径仅作为"按 ID 取 tool 对象"被复用，
+    //     保留以兼容上层把 tools 重新 inline 装配的调用方（如单测）。
+    const activeToolIds: string[] = definition.capabilities.tools
+      ? resolveToolIds(definition.toolIds ?? [], undefined)
+      : [];
+    const inlineTools: Record<string, unknown> = activeToolIds.length > 0
+      ? resolveTools(activeToolIds)
       : {};
     const skills: unknown[] = definition.capabilities.skills
       ? resolveSkillsForAgent(agentId, await getAgentSkillBindings(workspaceId, agentId))
@@ -131,8 +223,62 @@ export async function* streamAgent(
       resolvedPrompt = buildPrompt(historyOrEmpty, prompt);
     }
 
-    const agent = definition.factory(tools, skills);
-    const stream = await agent.stream(resolvedPrompt, { abortSignal });
+    // Phase 3.0：把 Mastra 实例透传给 definition.factory。
+    // 具体 Agent 工厂会把它注入 `new Agent({..., mastra })`，从而
+    // per-request 创建的 Agent 通过 public Mastra 注册路径访问 storage，
+    // 不依赖 `__registerMastra` 等 internal API。
+    //
+    // 通过 `getMastraInstance()` 解析（而非直接动态 import）：
+    //   - 避免循环依赖：
+    //     runtime.ts ←─→  mastra/index.ts ←─→  server/bootstrap.ts
+    //   - 单元测试可在首次调用前通过 `_setMastraInstanceForTesting(...)`
+    //     注入 fake，**不**触发 `server/bootstrap.ts` 的副作用
+    //     （`startRunExecutor()` / `preloadSkillRegistry()` /
+    //     PG LISTEN 句柄）；生产路径仍按 `_loadProductionMastra()`
+    //     的 lazy dynamic import 行为。
+    //
+    // 注意：本路径仅是为了把 `mastra` 实例传给 per-request Agent；
+    // 业务 ↔ Mastra 标识映射（runId / threadId / resourceId）**不**
+    // 依赖本引用——标识由调用方通过 `StreamAgentInput` 显式提供，
+    // 并在下面的 `agent.stream()` 选项里透传给 Mastra 公开 API。
+    const mastra = (await getMastraInstance()) as Mastra;
+    // Phase 3.0：把 Mastra 实例透传给 definition.factory。
+    // 具体 Agent 工厂会把它注入 `new Agent({..., mastra })`，让 per-request
+    // Agent 通过 public Mastra 注册路径同时拿到全局 tool 字典与 storage。
+    // 这里把 `inlineTools` 作为兼容参数透传：具体工厂在 Phase 3.0 修订后
+    // 不再读取 tools，但仍保留位置以不破坏 `AgentFactory` 签名。
+    //
+    // 优先走 `resolvePerRequestAgent`：单元测试用 `_setPerRequestFactoryOverrideForTesting`
+    // 注入 stub Agent 拦截 `agent.stream()` 选项，stub 不会被写进
+    // Agent 注册表，也不会污染生产 `Mastra({ agents })` 的构造。
+    const agent =
+      resolvePerRequestAgent(agentId, inlineTools, skills, mastra) ??
+      definition.factory(inlineTools, skills, mastra);
+    const stream = await agent.stream(resolvedPrompt, {
+      abortSignal,
+      // Phase 3.0：Tool 子集过滤走 v1 公开 streamOptions。
+      // v1 在执行期按 `activeTools` 白名单过滤；不传时该 Agent 可用
+      // 其注册的全部 tool。
+      ...(activeToolIds.length > 0 ? { activeTools: activeToolIds } : {}),
+      // Phase 3.0：标识映射通过 Mastra 公开 streamOptions 携带。
+      // - `runId`：Mastra `AgentExecutionOptionsBase.runId`（参见
+      //   `@mastra/core/agent.types.d.ts`），用于让框架把 snapshot 与
+      //   我们的 `agent_runs.id` 同源；
+      // - `memory`：v1 公开 API（`AgentMemoryOption`）的字段是
+      //   `thread: string | { id: string }` 与 `resource: string`（注意
+      //   resource 字段是字符串，不是对象）。当 `threadId` / `resourceId`
+      //   同时具备时构造 `memory` 选项；缺一不可，否则仅作为概念层
+      //   映射，不进入 Mastra snapshot。
+      ...(input.runId !== undefined ? { runId: input.runId } : {}),
+      ...(input.threadId !== undefined && input.resourceId !== undefined
+        ? {
+            memory: {
+              thread: input.threadId,
+              resource: input.resourceId,
+            },
+          }
+        : {}),
+    });
     if (abortSignal.aborted) {
       yield { type: 'stopped', content: '' };
       return;

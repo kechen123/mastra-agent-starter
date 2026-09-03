@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import type { Mastra } from '@mastra/core';
 import type { AgentDefinition } from '../../core/agent/types.js';
 import { resolveDefaultChatModel } from '../../infrastructure/llm/registry.js';
 import { templateInstructions } from './instructions.js';
@@ -12,20 +13,32 @@ import { templateInstructions } from './instructions.js';
  *   - 真正需要的 `toolIds`（空数组请直接删掉字段）。
  *
  * 工厂签名由 `core/agent/types.ts` 固定，并由 `core/agent/runtime.ts` 调用。
- * 它接收本次请求已解析好的 tools/skills，必须返回一个可运行的 Mastra Agent。
+ * 它接收本次请求已解析好的 skills 与 Mastra 实例，必须返回一个可运行
+ * 的 Mastra Agent。Phase 3.0 修订后，工具不再 inline 传入；Agent 通过
+ * `mastraInstance.tools`（来自 `Mastra({ tools })` 全局注册表）+ per-request
+ * `streamOptions.activeTools` 拿到本 Agent 可用的子集。
  *
  * 模型通过 `infrastructure/llm/registry.ts:resolveDefaultChatModel()` 解析：
  * 不要直接读取 Provider 环境变量，也不要拼接 `provider/model` 字符串；
  * 所有 Provider 相关的逻辑都收敛在 `infrastructure/llm/` 内。
+ *
+ * Phase 3.0 起第三参数 `mastraInstance` 必须透传给 `new Agent({...})`，
+ * 让新 Agent 通过 public Mastra API 访问持久化 storage；否则违反
+ * "Agent 必须通过正式公开的 Mastra 注册路径获得 storage" 约束。
  */
-export function createTemplateAgent(tools?: Record<string, unknown>, skills?: unknown[]): Agent {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createTemplateAgent(
+  _tools?: Record<string, unknown>,
+  skills?: unknown[],
+  mastraInstance?: Mastra,
+): Agent {
   return new Agent({
     id: 'template-agent',
     name: '模板 Agent',
     model: resolveDefaultChatModel(),
     instructions: templateInstructions,
-    ...(tools && Object.keys(tools).length > 0 ? { tools: tools as any } : {}),
     ...(skills && skills.length > 0 ? { skills: skills as any } : {}),
+    ...(mastraInstance ? { mastra: mastraInstance } : {}),
   });
 }
 

@@ -1,4 +1,5 @@
 import type { Agent } from '@mastra/core/agent';
+import type { Mastra } from '@mastra/core';
 
 /**
  * Agent 的能力矩阵。Runtime 在每次请求时检查：
@@ -21,13 +22,23 @@ export interface AgentCapabilities {
  * 把 tools/skills 装配成可运行 Mastra Agent 的工厂。
  * 每个具体 Agent 放在 `backend/src/agents/<id>/`，导出此签名的工厂。
  *
- * Core Runtime 故意不耦合 Mastra：
- * - tools/skills 在此签名里是 `any`，由各 Agent 的工厂自行收敛成 Mastra 的
- *   `ToolsInput` / `Agent['skills']` 等窄类型。
- * - 这样 Core 层不依赖具体框架细节，便于替换或测试。
+ * 第三参数 `mastraInstance`：
+ *  - 由 `core/agent/runtime.ts` 在 per-request 调用时传入当前 Mastra
+ *    实例；具体 Agent 工厂可选择把它注入 `new Agent({..., mastra})`，
+ *    从而让 Agent 通过 public Mastra 注册路径访问持久化 storage；
+ *  - 启动期 `new Mastra({ agents })` 也走本工厂，但当前实例尚未构造，
+ *    因此 `mastraInstance` 为 undefined；v1 框架仍会把 storage 通过
+ *    `agents` 配置注入等价效果。
+ *
+ * 约束：Core 层不直接依赖 Mastra SDK 的具体类型，第三个参数声明为
+ * `Mastra`（来自 `@mastra/core` 顶层）以便共享类型而无需拉取 `mastra`。
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type AgentFactory = (tools?: any, skills?: any[]) => Agent;
+export type AgentFactory = (
+  tools?: any,
+  skills?: unknown[],
+  mastraInstance?: Mastra,
+) => Agent;
 
 export interface AgentDefinition {
   id: string;

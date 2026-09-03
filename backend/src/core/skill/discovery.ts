@@ -18,6 +18,40 @@ import { createSkill, type InlineSkill } from '@mastra/core/skills';
 import { parseAllowedToolsFromFrontmatter, parseSkillMdMeta } from './parser.js';
 import { analyzeCompatibility, classifyFromFiles } from './compatibility.js';
 
+/**
+ * Phase 3.0 修订——结构化摘要 / 中文 Skill 名称隔离：
+ *
+ * `createSkill` 对 `name` 字段执行严格校验（仅允许 lowercase / 数字 /
+ * 连字符）。当 Skill 仓库里某个 SKILL.md 的 frontmatter.name 含中文或
+ * 含空格（例如内置模板里的"结构化摘要"），构造期会抛错并让整个
+ * `loadBuiltinSkills` 失败，进而让 `ensureSkillRegistryLoaded()` 抛错、
+ * `streamAgent()` 的 `try/catch` 把控制流强行带去 `error` 事件——
+ * 既污染单元测试日志，也阻塞了真实的 stream 调用。
+ *
+ * 这里用一个 module-level Set 去重警告：相同 id 的重复失败只输出一次，
+ * 后续失败静默丢弃。这样行为对调用方是"该 Skill 跳过、其它 Skill 正常"，
+ * 既不阻塞 streamAgent，也不淹没日志。
+ */
+const _warnedSkillIds = new Set<string>();
+function warnSkillLoadOnce(id: string, err: unknown): void {
+  if (_warnedSkillIds.has(id)) return;
+  _warnedSkillIds.add(id);
+  // 仅一次性输出；不抛错。
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[skill] 跳过非法 Skill "${id}"：${err instanceof Error ? err.message : String(err)}`,
+  );
+}
+
+/**
+ * 测试钩子：清空警告去重 Set。
+ * 仅供 unit 测试在期望"非法 Skill 不应在日志出现"时重置；生产路径
+ * 不调本函数。
+ */
+export function _resetWarnedSkillIdsForTesting(): void {
+  _warnedSkillIds.clear();
+}
+
 export { classifyFromFiles, parseSkillMdMeta };
 
 export interface SkillDefinition {
@@ -146,14 +180,25 @@ function buildSkillFromDir(
   const meta = parseSkillMdMeta(content);
   let skill: InlineSkill | null = null;
   if (compatibility === 'compatible') {
-    skill = createSkill({
-      name: meta.name || id,
-      description: meta.description || `${id} (${source})`,
-      instructions: content,
-      compatibility: ['compatible'],
-      metadata: { source, ...(allowedTools.length > 0 ? { 'allowed-tools': allowedTools } : {}) },
-      ...(allowedTools.length > 0 ? { 'allowed-tools': allowedTools } : {}),
-    });
+    // `createSkill` 内部对 name 做严格校验（仅允许小写字母 / 数字 / 连字符）；
+    // 某些 SKILL.md 的 frontmatter.name 含中文 / 空格，会抛错。
+    // Phase 3.0 修订：捕获后**跳过该 Skill**并打印一次性警告，避免污染
+    // 整个 Skill 注册表；同时不再让一个非法 Skill 让 ensureSkillRegistryLoaded
+    // 整体抛错（导致 streamAgent 测试输出被淹没）。
+    try {
+      skill = createSkill({
+        name: meta.name || id,
+        description: meta.description || `${id} (${source})`,
+        instructions: content,
+        compatibility: ['compatible'],
+        metadata: { source, ...(allowedTools.length > 0 ? { 'allowed-tools': allowedTools } : {}) },
+        ...(allowedTools.length > 0 ? { 'allowed-tools': allowedTools } : {}),
+      });
+    } catch (err) {
+      // 只输出一次警告；后续相同 id 重复抛错时通过 module-level Set 去重。
+      warnSkillLoadOnce(id, err);
+      return null;
+    }
   }
   return {
     id,

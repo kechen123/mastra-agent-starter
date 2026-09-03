@@ -8,6 +8,8 @@
 
 > **Mastra 路由约束（2026-09-02）**：Mastra 将 `/api` 保留给内置路由，应用通过 `registerApiRoute()` 注册的本地端点必须使用 `/v1/*` 与 `/v1/v2alpha/*`，不能直接使用 `/api/v1/*`。若部署环境需要公开 `/api/v1/*`，仅可由反向代理映射到对应的 `/v1/*`；本地开发和前端直连始终使用 `/v1/*`。
 
+> **阶段 3.0 Durable Agent Runtime 状态（2026-09-02）**：本版本定义中 Tool Policy Gateway / Approval 仍属"未实现"目标；阶段 3.0 进行中——storage、Tool 公共注册和 ID 参数透传已实现（`@mastra/pg` 的 `PostgresStore` 接入独立 schema `mastra_runtime`，与业务 `init.sql` 完全隔离；Agent 经 public `new Mastra({ agents })` 注册路径绑定同一 storage；`streamOptions.runId / memory.thread / memory.resource` 已透传）。**跨重启恢复审批 Run 未完成真实 PostgreSQL 端到端验证**。阶段 3.0 **不**实现审批表 / 审批 API / 审批 UI，也不引入高风险 Tool；这些仍是后续阶段的工作。
+
 ## 修订记录
 
 | 版本 | 日期 | 主要修订 |

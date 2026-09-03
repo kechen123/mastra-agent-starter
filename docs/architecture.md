@@ -2,7 +2,7 @@
 
 > **文档定位**：本文描述 **当前已实现** 的系统架构（as-built）——文中出现的每个模块、表、路由都对应仓库里真实存在的代码。
 > 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
-> 本文与 V2 文档冲突时，**以本文为当前已验收代码事实**；阶段 1 的 `workspaces` 与 Skill 三表，以及阶段 2 的 `agent_runs`、`agent_run_events`、幂等 POST、SSE 断点续传与双通道实时流均已实现并通过验证；`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等仍未实现。
+> 本文与 V2 文档冲突时，**以本文为当前代码事实**；阶段 1 的 `workspaces` 与 Skill 三表、阶段 2 的 `agent_runs`、`agent_run_events`、幂等 POST、SSE 断点续传与双通道实时流均通过合约测试。**Phase 3.0（Durable Agent Runtime）进行中**：storage、Tool 公共注册和 ID 参数透传已实现；跨重启恢复审批 Run 未完成真实 PostgreSQL 端到端验证。`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings`、人工审批（`tool_approval_requests`）、Tool Policy 等仍**未**实现；本次仅为 Phase 3.x 的前置条件。
 
 ## 概述
 
@@ -146,18 +146,42 @@ Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持
 2. **`preloadSkillRegistry()`** — 非阻塞预热 Skill 注册表，让首次 `GET /skills` 命中缓存
 3. **`apiRoutes` 数组** — 把所有路由组装起来，最终由 `mastra/index.ts` 喂给 `new Mastra({ server: { apiRoutes } })`
 
-### 11. Mastra 薄适配器
+### 11. Mastra 装配（阶段 3.0 起承担 storage / Agent 注册）
 
-位于 `backend/src/mastra/index.ts`，**只有 ~25 行**：
+位于 `backend/src/mastra/index.ts`，主要责任：
 
-```typescript
-import { Mastra } from '@mastra/core';
-import { apiRoutes } from '../server/bootstrap.js';
+1. **PostgresStore 接入**：通过 `infrastructure/mastra/storage.ts` 的 `createMastraStorage()` 构造 `@mastra/pg` 的 `PostgresStore`，落到独立 schema `mastra_runtime`（由 `@mastra/pg` 的 `schemaName` 隔离；Mastra 框架自身的 DDL 由官方机制生成）。构造期不连真实 DB；缺 `DATABASE_URL` 时**显式抛错**，绝不静默降级到内存存储。
+2. **静态 Agent 注册**：以 `listAgentDefinitions()` 为权威列表，对每个 Agent 调用 `definition.factory()` 构造静态 Agent；**当前实现**下静态 Agent 构造期拿不到 `mastraInstance`（`definition.factory` 的第三个参数在静态构造路径下是 `undefined`），仅通过 v1 公开 `new Mastra({ agents })` 路径接入同一 storage。`mastra.getAgent(id)` 命中；`mastra.getStorage()` 返回阶段 3.0 注入的 PostgresStore。
+3. **`apiRoutes` / `LocalAuthProvider`** 沿用阶段 2 的实现，`server.bootstrap` 路径不变。
+4. **测试钩子**：`_setStaticAgentBuilderForTesting` / `_setStorageFactoryForTesting` / `_resetMastraStorageForTesting` / `_setMastraInstanceForTesting` / `_resetMastraInstanceCacheForTesting` 只用于离线单元测试，不入生产路径。
 
-export const mastra = new Mastra({ server: { apiRoutes } });
-```
+约束：
+- 不调用 `__registerMastra` 等 internal API；所有 Agent 走 public `new Mastra({ agents })` + public `mastra.getAgent()`。
+- 不引入内存 Map / 前端伪恢复兼容补丁顶替持久化。
+- `core/agent/runtime.ts` 在每次请求时按工作区解析 Skill / Tool / 知识库后调用 `definition.factory(tools, skills, mastra)`。per-request 路径下，`mastraInstance` 由 `runtime.getMastraInstance()` 解析（生产路径走 lazy dynamic import `await import('mastra/index.js')`；单元测试可通过 `_setMastraInstanceForTesting(fakeMastra)` 注入 fake，不触发 `server/bootstrap.ts` 的副作用）。具体 Agent 工厂把 `mastra` 注入 `new Agent({ ..., mastra })`，让 per-request Agent 也通过 public API 访问 storage。
 
 业务逻辑（Agent / Tool / Skill / Route / 业务模块）一概不进 `mastra/`，仅保留这一层最薄的胶水。
+
+**Phase 3.0 当前事实**（2026-09-02）：
+- 已实现：storage 注入、`Mastra({ agents })` 公共注册路径、`Mastra({ tools })` 全局 Tool 注册、`streamOptions.runId / memory.thread / memory.resource` 三个标识字段透传、Skill 名错误的 try/catch 隔离。
+- 未验证：`Mastra.storage` 在真实 PostgreSQL 上持久化 snapshot 后、跨重启从 snapshot 恢复挂起 Run 的端到端路径；`agent_runs` ↔ Mastra snapshot 的同源校验；高风险 Tool 审批链路仍属后续阶段。
+
+#### 11.1. `infrastructure/mastra/storage.ts`
+
+Mastra 持久化存储接入点：
+
+```ts
+export const MASTRA_RUNTIME_SCHEMA = 'mastra_runtime';
+export const MASTRA_STORAGE_ID = 'mastra-runtime-storage';
+
+export function createMastraStorage(opts?: { connectionString?: string }): unknown {
+  // 生产路径：new PostgresStore({ id, connectionString, schemaName })
+  // 缺 DATABASE_URL → 抛错；
+  // 测试钩子 _setStorageFactoryForTesting：仅测试期间注入 fake。
+}
+```
+
+存储的 schema 隔离与业务 `init.sql` 完全独立：业务表走 `public`，Mastra 内部表走 `mastra_runtime`；两个 schema 的 DDL 来源互不交叉。
 
 ### 12. LLM Provider 边界（DeepSeek-first）
 

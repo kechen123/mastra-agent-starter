@@ -1,6 +1,20 @@
 # Mastra Agent Starter
 
-> **当前进度（2026-09-01）**：阶段 1（Workspace 隔离与 Skill 三层模型）已合并落地；阶段 2（持久化 Run、幂等 POST、SSE 断点续传与服务端 Draft）正在开发，尚未验收或合并。协议与目标以 [`docs/architecture-v2.md`](docs/architecture-v2.md) 为准，已实现事实以 [`docs/architecture.md`](docs/architecture.md) 为准。
+> **当前进度（2026-09-02）**：
+> - 阶段 1（Workspace 隔离与 Skill 三层模型）已合并落地；
+> - 阶段 2（持久化 Run、幂等 POST、SSE 断点续传与服务端 Draft）已合并落地；
+> - **阶段 3.0（Durable Agent Runtime）进行中**：
+>   - 已落地：Mastra 接入 `@mastra/pg` PostgresStore（独立 schema `mastra_runtime`）；
+>     Tool 走 Mastra 公共注册路径（`Mastra({ tools })` + per-request `activeTools`）；
+>     业务 ↔ Mastra 标识映射（`agent_runs.id`→`runId`、`conversations.id`→`threadId`、
+>     `workspaces.id`→`resourceId`）已通过 `agent.stream()` 公开 streamOptions 透传；
+>     `infrastructure/mastra/instance.ts` 工厂隔离 server / Skill / run executor 副作用。
+>   - **未实测**："跨重启恢复审批 Run" 的端到端集成（v1.x 公开 API 已具备
+>     关键字段，但完整 snapshot 持久化与跨进程恢复未在本分支跑过真实
+>     PostgreSQL 集成测试）；`storage: false` 业务 ID 缺一即标识映射失效。
+> - 阶段 3.x 仍未实现：审批表、审批 API、审批 UI、Tool Policy；本次仅为前置条件。
+>
+> 协议与目标以 [`docs/architecture-v2.md`](docs/architecture-v2.md) 为准，已实现事实以 [`docs/architecture.md`](docs/architecture.md) 为准。
 
 Mastra Agent Starter 是一个基于 [Mastra](https://mastra.ai/) 框架的智能对话平台，支持通用对话与知识库问答两种模式，具备可扩展的 Tool Registry、Skill Registry 和 Agent 能力绑定系统。
 
@@ -13,6 +27,7 @@ Mastra Agent Starter 是一个基于 [Mastra](https://mastra.ai/) 框架的智�
 - Skill 注册表（内置 / 本地 / skills.sh 市场）与 Skill → Agent 绑定
 - 会话持久化、历史管理
 - 本地账号密码登录，以及按个人 Workspace 隔离的业务数据
+- **阶段 3.0（进行中）**：Mastra 持久化运行时（Mastra 公共注册路径 + PostgresStore schema 隔离 + Tool 全局注册 + 业务↔Mastra 标识映射），为后续 Tool Policy / 审批建立可恢复基础。跨重启恢复审批 Run 尚未做端到端实测；详见 `docs/architecture.md` § Phase 3.0 与 `docs/architecture-v2.md` §5。
 
 ## 功能特性
 
