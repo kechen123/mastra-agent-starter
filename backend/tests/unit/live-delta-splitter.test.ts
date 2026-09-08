@@ -35,7 +35,6 @@ function assert(label: string, cond: boolean, detail?: string): void {
 
 /** 标准 envelope 的 prefix/suffix 字节数；UUID 固定便于断言。 */
 const RUN_ID = '00000000-0000-4000-8000-000000000000';
-const ENVELOPE = JSON.stringify({ runId: RUN_ID });
 const { prefixBytes: PREFIX_BYTES, suffixBytes: SUFFIX_BYTES } = jsonEnvelopeSplitBytes({ runId: RUN_ID });
 const MAX_PAYLOAD = 7900;
 const MAX_TEXT = MAX_PAYLOAD - PREFIX_BYTES - SUFFIX_BYTES;
@@ -47,7 +46,8 @@ const MAX_TEXT = MAX_PAYLOAD - PREFIX_BYTES - SUFFIX_BYTES;
 function verifyChunks(r: SplitResult, original: string): void {
   for (let i = 0; i < r.chunks.length; i++) {
     const chunk = r.chunks[i]!;
-    const payload = `${ENVELOPE},"text":${JSON.stringify(chunk)}}`;
+    const payload = JSON.stringify({ runId: RUN_ID, text: chunk });
+    assert('payload 是可解析的 JSON', JSON.parse(payload).text === chunk);
     const bytes = Buffer.byteLength(payload, 'utf8');
     assert(`每个 chunk 拼 envelope 后 < ${MAX_PAYLOAD}B（chunk#${i}）`, bytes < MAX_PAYLOAD,
       `bytes=${bytes}, chunk=${JSON.stringify(chunk.slice(0, 30))}${chunk.length > 30 ? '…' : ''}`);
@@ -249,7 +249,7 @@ console.log('\n[splitter] S16 — envelope split bytes 自洽');
   // 用 envelope + 1 ASCII 拼一个完整 payload；
   // 字节长度 === prefixBytes + chunkJsonBytes(1 ASCII = 3) + suffixBytes。
   const text = 'x';
-  const payload = `${ENVELOPE},"text":${JSON.stringify(text)}}`;
+  const payload = JSON.stringify({ runId: RUN_ID, text });
   const expected = PREFIX_BYTES + 3 + SUFFIX_BYTES;
   const actual = Buffer.byteLength(payload, 'utf8');
   assert('S16: prefixBytes + chunkJsonBytes(3) + suffixBytes === 完整 payload 字节',

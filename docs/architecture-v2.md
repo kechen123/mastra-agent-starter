@@ -130,7 +130,7 @@
 | Embedding 写入时间 | 缺 `updated_at` | `document_embeddings` 加 `updated_at` |
 | 历史数据回填 | 按 `created_by` 推断（无该列） | 新建 `Legacy Shared Workspace`，显式指定 owner；现有账号作为 member；新用户才创建 Personal Workspace |
 | Personal Workspace 唯一性 | 仅应用层 `ensurePersonalWorkspace()` | DB 级：`workspaces(owner_user_id) UNIQUE WHERE kind='personal'` |
-| `agent_runs.approval_request_id` | 引用阶段 3 表 | **删除**；审批只走 `tool_approval_requests.run_id → agent_runs.id` 单向 |
+| `agent_runs.approval_request_id` | 引用阶段 3 表 | **删除**；审批只走 `(run_id, workspace_id) → agent_runs(id, workspace_id)` 单向复合外键 |
 | 事件 ID | UUID `agent_run_events.id` + `seq` + 查询参数 `lastEventSeq` | `BIGINT IDENTITY` 全局递增；SSE 使用标准 `Last-Event-ID`；服务端按 `id > lastEventId AND run_id = ?` 回放 |
 | 多实例 SSE | 仅描述"继续订阅"无方案 | 每后端实例一条 PG `LISTEN/NOTIFY` 共享连接，本地扇出；DB 是数据源，NOTIFY 仅做唤醒 |
 | Run 失败判定 | `started_at < now() - interval '2 minutes'` | 长任务友好：加 `lease_owner` / `lease_expires_at` / `heartbeat_at`；worker 每 15s 心跳；过期未续约才算失败 |
@@ -692,6 +692,11 @@ CREATE INDEX agent_runs_status_idx ON agent_runs(status)
 CREATE INDEX agent_runs_lease_expiry_idx ON agent_runs(lease_expires_at)
   WHERE status IN ('queued', 'running');
 
+-- 下游审批表以复合外键绑定 Run 与 Workspace，拒绝跨 Workspace 引用。
+ALTER TABLE agent_runs
+  ADD CONSTRAINT agent_runs_id_workspace_unique
+  UNIQUE (id, workspace_id);
+
 -- V2.1 事件 ID 改 BIGINT IDENTITY：全局递增，便于 Last-Event-ID 重连与多实例排序
 CREATE TABLE agent_run_events (
   id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -718,7 +723,7 @@ CREATE INDEX agent_run_events_run_idx ON agent_run_events(run_id, id);
 CREATE INDEX agent_run_events_workspace_idx ON agent_run_events(workspace_id, id);
 ```
 
-**`approval_request_id` 删除**（V2.1）：原 `agent_runs.approval_request_id` 引用阶段 3 才创建的 `tool_approval_requests`，导致阶段 2 迁移无法独立执行；且一个 Run 可能产生多次审批（多个 Tool 调用各自审批），单值外键在语义上不成立。审批关系改为 `tool_approval_requests.run_id → agent_runs.id` 单向外键，阶段 3 才创建该表。
+**`approval_request_id` 删除**（V2.1）：原 `agent_runs.approval_request_id` 引用阶段 3 才创建的 `tool_approval_requests`，导致阶段 2 迁移无法独立执行；且一个 Run 可能产生多次审批（多个 Tool 调用各自审批），单值外键在语义上不成立。审批关系改为 `tool_approval_requests` 的 `(run_id, workspace_id) → agent_runs(id, workspace_id)` 单向复合外键，阶段 3 才创建该表。
 
 **Lease / Heartbeat 协议**（V2.2 修订：执行 Lease 仅覆盖 `queued`/`running`）：
 
@@ -773,7 +778,7 @@ VALUES (:runId, :workspaceId, 'run-stopped', '{"error_code":"APPROVAL_EXPIRED"}'
 UPDATE messages SET status = 'stopped' WHERE current_run_id = :runId;
 ```
 
-调用 `Mastra SDK decline(suspensionToken, reason='APPROVAL_EXPIRED')` 让 Run 真正终止。
+调用 `Mastra SDK agent.declineToolCall({ runId, toolCallId, reason: 'APPROVAL_EXPIRED' })` 让 Run 真正终止——审批恢复键为 `(runId, toolCallId)`，不存在独立可持久化的 suspension token（Mastra 1.61 公开 API 实际形态）。
 
 **多实例 SSE 扇出**（V2.1）：
 
@@ -858,7 +863,7 @@ agent.stream(prompt, {
   ↓
 Mastra 内部：在 Tool.execute 触发前根据 requireToolApproval 决定
   - LOW/MEDIUM：直接调用 Tool.execute（即包装后的 execute）
-  - HIGH：挂起 Run，写入 Mastra 内部 suspension token，返回 tool-call-suspended
+  - HIGH：挂起 Run，发出 `tool-call-approval` 事件（payload 含 runId / toolCallId / toolName / args）等待调用方 resolve
   ↓
 包装后的 execute（即使 LOW/MEDIUM 也会进入）：
   ├── 校验 Workspace / 权限 / requiredScopes
@@ -872,7 +877,7 @@ Mastra 内部：在 Tool.execute 触发前根据 requireToolApproval 决定
 
 HIGH 挂起后：
   ↓
-服务端把 suspension 映射为持久化 tool_approval_requests + agent_run_events(type='approval-requested')
+服务端把 (runId, toolCallId) 作为恢复键落库为 tool_approval_requests + agent_run_events(type='approval-requested')
   + agent_runs.status='waiting_approval'
   ↓
 SSE 推送 'approval-requested' 事件给前端
@@ -885,20 +890,20 @@ POST /v1/approvals/:id/resolve { decision: 'approve' | 'decline' }
   1. UPDATE tool_approval_requests SET status=...
   2. INSERT INTO agent_run_events(type='approval-resolved')
   3. UPDATE agent_runs SET status='running'
-  4. 调用 Mastra SDK approve(suspensionToken, decision)  ← 关键：必须真正调用
+  4. 调用 Mastra SDK agent.approveToolCall({ runId, toolCallId })  ← 关键：必须真正调用
   5. Mastra 恢复 Run，重新进入包装后的 execute（inputs hash 必须再次校验）
 
 用户拒绝 / 过期：
   ↓
-调用 Mastra SDK decline(suspensionToken, reason)
+调用 Mastra SDK agent.declineToolCall({ runId, toolCallId, reason })
   ↓
 包装后的 execute 不再调用；audit 写 'failed'，events 写 'run-completed' status='declined'
 ```
 
 **关键约束**：
 
-- Approval resolve API **不能只更新 DB**——必须调用 Mastra 的 `approve/decline` 才能让 Run 继续；否则 Run 永远挂起。
-- 包装后的 execute 在恢复路径会被**二次调用**（Mastra 从 suspension 恢复后会重新执行）；第二次必须再次校验 inputs hash、权限、Workspace，避免"批准后再修改 inputs 绕过审核"。
+- Approval resolve API **不能只更新 DB**——必须调用 Mastra 的 `approveToolCall` / `declineToolCall` 才能让 Run 继续；否则 Run 永远挂起。审批恢复键为 `(runId, toolCallId)`——Mastra 1.61 公开 API 的 `agent.approveToolCall({ runId, toolCallId })` / `agent.declineToolCall({ runId, toolCallId, reason? })` 不接收、也不返回独立可持久化的 suspension token；`tool_approval_requests` 表也不存该字段。
+- 包装后的 execute 在恢复路径会被**二次调用**（Mastra 重新调度 Tool.execute）；第二次必须再次校验 inputs hash、权限、Workspace，避免"批准后再修改 inputs 绕过审核"。
 - `requireToolApproval` 参数传入 `agent.stream`，不是包在 Tool 注册里——风险是 dynamic 的（依赖 inputs）。
 - 用户停止信号：`AbortSignal.any([userSignal, timeoutSignal])`（V2.1 修正）；不能 `AbortSignal.timeout()` 直接覆盖原信号。
 
@@ -951,15 +956,15 @@ interface ToolDefinition {
 }
 ```
 
-**Approval 表**（V2.1 单向外键，不被 agent_runs 反向引用）：
+**Approval 表**（单向复合外键，不被 agent_runs 反向引用；审批恢复键为 `(run_id, tool_call_id)`——对齐 Mastra 1.61 `agent.approveToolCall` / `agent.declineToolCall` 入参；**不**存 suspension_id）：
 
 ```sql
 CREATE TABLE tool_approval_requests (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id   UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  run_id         UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+  run_id         UUID NOT NULL,
   tool_id        TEXT NOT NULL,
-  suspension_id  TEXT NOT NULL,         -- Mastra SDK 返回的 suspension token
+  tool_call_id   TEXT NOT NULL,          -- Mastra SDK toolCallId（不是 UUID）；与 run_id 共同构成审批恢复键
   inputs_hash    TEXT NOT NULL,         -- sha256(canonical_json(inputs))
   inputs_summary JSONB NOT NULL,        -- 脱敏后的输入摘要，用于 UI 展示
   status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'declined', 'expired')),
@@ -967,7 +972,13 @@ CREATE TABLE tool_approval_requests (
   resolver_id    UUID REFERENCES app_users(id),
   expires_at     TIMESTAMPTZ NOT NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  resolved_at    TIMESTAMPTZ
+  resolved_at    TIMESTAMPTZ,
+  CONSTRAINT tool_approval_requests_run_workspace_fk
+    FOREIGN KEY (run_id, workspace_id)
+    REFERENCES agent_runs(id, workspace_id)
+    ON DELETE CASCADE,
+  CONSTRAINT tool_approval_requests_run_tool_call_unique
+    UNIQUE (run_id, tool_call_id)
 );
 
 CREATE INDEX tool_approval_requests_workspace_pending_idx

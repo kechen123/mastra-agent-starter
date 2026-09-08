@@ -40,6 +40,13 @@ import { apiRoutes } from '../server/bootstrap.js';
 import { LocalAuthProvider } from '../infrastructure/auth/local-auth-provider.js';
 import { createMastraStorage } from '../infrastructure/mastra/storage.js';
 import { createMastraInstance } from '../infrastructure/mastra/instance.js';
+import { registerBuiltinAgents } from '../agents/index.js';
+import { registerBuiltinTools } from '../tools/index.js';
+
+// 显式初始化有返回引用的注册入口，防止打包器剔除 side-effect import，
+// 或异步 initializeApp 尚未完成时构造出缺工具的静态 Agent。
+registerBuiltinTools();
+registerBuiltinAgents();
 
 const authProvider = new LocalAuthProvider();
 

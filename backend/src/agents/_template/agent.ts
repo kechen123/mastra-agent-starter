@@ -14,9 +14,8 @@ import { templateInstructions } from './instructions.js';
  *
  * 工厂签名由 `core/agent/types.ts` 固定，并由 `core/agent/runtime.ts` 调用。
  * 它接收本次请求已解析好的 skills 与 Mastra 实例，必须返回一个可运行
- * 的 Mastra Agent。Phase 3.0 修订后，工具不再 inline 传入；Agent 通过
- * `mastraInstance.tools`（来自 `Mastra({ tools })` 全局注册表）+ per-request
- * `streamOptions.activeTools` 拿到本 Agent 可用的子集。
+ * 的 Mastra Agent。必须将解析后的工具传给 Agent 的 tools；全局注册表
+ * 不会自动为 Agent 注入工具。per-request activeTools 进一步限制可用子集。
  *
  * 模型通过 `infrastructure/llm/registry.ts:resolveDefaultChatModel()` 解析：
  * 不要直接读取 Provider 环境变量，也不要拼接 `provider/model` 字符串；
@@ -28,7 +27,7 @@ import { templateInstructions } from './instructions.js';
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createTemplateAgent(
-  _tools?: Record<string, unknown>,
+  tools?: Record<string, unknown>,
   skills?: unknown[],
   mastraInstance?: Mastra,
 ): Agent {
@@ -37,6 +36,7 @@ export function createTemplateAgent(
     name: '模板 Agent',
     model: resolveDefaultChatModel(),
     instructions: templateInstructions,
+    tools: tools as ConstructorParameters<typeof Agent>[0]['tools'],
     ...(skills && skills.length > 0 ? { skills: skills as any } : {}),
     ...(mastraInstance ? { mastra: mastraInstance } : {}),
   });

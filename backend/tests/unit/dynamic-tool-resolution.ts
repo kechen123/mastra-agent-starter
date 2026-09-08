@@ -205,6 +205,13 @@ agentRegistry._setPerRequestFactoryOverrideForTesting(() =>
   makeStubAgent(),
 );
 
+// Phase 3.2 注入：本次 fixture 不验证策略；用"按 ID 保留"的 stub resolver
+// 维持 calculator / get-current-time 原有 C2 语义。**不**让 streamAgent
+// 走真实 evaluator / repository——本 fixture 也不连 DB。
+runtimeModule._setPolicyResolverForTesting(
+  async (_workspaceId: string, toolIds: string[]) => toolIds,
+);
+
 const { streamAgent } = runtimeModule;
 
 function makeAbortSignal(): AbortSignal {
@@ -282,6 +289,7 @@ await import('../../src/agents/index.js');
 agentRegistry._setPerRequestFactoryOverrideForTesting(null);
 skillBindings._setBindingsPoolForTesting(null);
 runtimeModule._setMastraInstanceForTesting(null);
+runtimeModule._setPolicyResolverForTesting(null);
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exitCode = 1;

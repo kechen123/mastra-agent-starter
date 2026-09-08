@@ -56,6 +56,7 @@ import { AssistantChatWorkspace } from '../features/chat/components/AssistantCha
 import { KnowledgeBaseWorkspace } from '../features/knowledge/components/KnowledgeBaseWorkspace'
 import { SkillsWorkspace } from '../features/capabilities/components/SkillsWorkspace'
 import { LoginScreen } from '../features/auth/components/LoginScreen'
+import { useApprovals } from '../features/chat/useApprovals'
 import { Menu } from 'lucide-react'
 
 type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated'
@@ -192,6 +193,10 @@ function App() {
   const currentAgentId = conversationState.type === 'draft' ? conversationState.agentId : (conversations.find((c) => c.id === conversationState.id)?.agentId ?? 'general-chat')
   const currentKnowledgeBaseId = conversationState.type === 'draft' ? conversationState.knowledgeBaseId : (conversations.find((c) => c.id === conversationState.id)?.knowledgeBaseId ?? null)
   const activeKnowledgeBase = currentKnowledgeBaseId ? knowledgeBases.find((kb) => kb.id === currentKnowledgeBaseId) ?? null : null
+
+  const approvals = useApprovals({
+    sessionKey: authStatus === 'authenticated' ? currentUser?.id ?? null : null,
+  })
 
   // 绑定 renderer ops。`useCallback` 内访问的 setMessages 由 React 提供稳定引用。
   const rendererOpsRef = useRef<RendererOps | null>(null)
@@ -565,6 +570,7 @@ function App() {
   }
 
   function handleRunStreamEvent(event: V2RunEvent, runId: string) {
+    approvals.onRunEvent(event)
     // 终态事件 → 关闭 EventSource、清理 sessionStorage 缓存；
     // 不再尝试重连，避免重复消费同一事件。
     if (event.type === 'run-completed' || event.type === 'run-stopped' || event.type === 'run-failed') {
@@ -988,7 +994,7 @@ function App() {
       messages={messages}
       isAsking={isAsking}
       isStreaming={isStreaming}
-      error={chatError}
+      error={chatError ?? approvals.error}
       chatAgents={chatAgents}
       knowledgeBases={knowledgeBases}
       selectedAgentId={currentAgentId}
@@ -1001,6 +1007,10 @@ function App() {
       onSelectKnowledgeBase={selectKnowledgeBase}
       onClearKnowledgeBase={clearKnowledgeBase}
       onSelectCitation={setSelectedCitation}
+      pendingApprovals={approvals.pendingApprovals}
+      busyApprovalId={approvals.busyApprovalId}
+      onApproveApproval={(approval) => void approvals.approve(approval)}
+      onDeclineApproval={(approval) => void approvals.decline(approval)}
     />}
     {activeModule === '知识库' && <KnowledgeBaseWorkspace selectedKnowledgeBase={selectedKnowledgeBase} documents={documents} isLoading={isKnowledgeLoading} isUploading={isUploading} showCreate={showCreateKnowledgeBase} error={knowledgeError} capabilities={capabilities} onCreate={createKnowledgeBaseFromForm} onBack={() => { setSelectedKnowledgeBaseId(null); setShowCreateKnowledgeBase(false) }} onEnterChat={enterChatFromKnowledgeBase} onUpload={handleUpload} onDeleteDocument={handleDeleteDocument} onDeleteKnowledgeBase={handleDeleteKnowledgeBase} />}
     {activeModule === '能力' && <SkillsWorkspace onStartChat={startChatWithAgent} />}

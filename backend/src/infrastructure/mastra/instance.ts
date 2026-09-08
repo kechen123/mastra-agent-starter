@@ -27,7 +27,7 @@ import type { Config } from '@mastra/core';
 import type { ToolAction } from '@mastra/core/tools';
 import type { AgentDefinition } from '../../core/agent/types.js';
 import { listAgentDefinitions } from '../../core/agent/registry.js';
-import { buildGlobalToolMap } from '../../core/tool/registry.js';
+import { buildGlobalToolMap, resolveTools } from '../../core/tool/registry.js';
 import { createMastraStorage } from './storage.js';
 
 /**
@@ -81,7 +81,7 @@ function buildStaticAgents(): Record<string, unknown> {
   for (const def of listAgentDefinitions()) {
     out[def.id] = _staticAgentBuilderOverride
       ? _staticAgentBuilderOverride(def)
-      : def.factory(undefined, undefined, undefined);
+      : def.factory(resolveTools(def.toolIds ?? []), undefined, undefined);
   }
   return out;
 }

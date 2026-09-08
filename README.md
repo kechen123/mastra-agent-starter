@@ -12,7 +12,24 @@
 - **受控的工具与技能体系**：Tool 统一注册、执行留痕；Skill 支持内置、本地业务和 skills.sh 市场来源。
 - **开箱即用的个人工作区**：本地账号登录后自动拥有独立 Workspace，业务数据按 Workspace 隔离。
 
-运行时已经具备持久化 Run、断点续传和 Tool 策略的基础能力；完整实现范围与仍在演进的能力请以 [当前架构](docs/architecture.md) 为准。
+运行时已经具备持久化 Run、断点续传、Tool 策略（Workspace 隔离 + 三态评估 + activeTools 过滤）与 Tool 审批闭环（高风险 Tool 触发 `/v1/approvals` 收件箱；approve → Mastra `approveToolCall` 返回的 resume stream 接口、decline/expire → `declineToolCall` 返回的 resume stream 接口（代码通过 facade 调用 SDK，而**非** `streamAgent(prompt)` 重发）；超时 worker 仅做 DB-only `expired` 决策登记；Run Executor scheduler/reconciler 是唯一 SDK 调用与 stream 消费方）的能力；完整实现范围与仍在演进的能力请以 [当前架构](docs/architecture.md) 为准。
+
+> **PR-3.3.2 / 3.3.2.1 验证状态（2026-09-08）**：本仓库 `backend/tests/integration/tool-policy-pg.ts` 在真实 PostgreSQL + `FakeAgentFacade`（fake resume stream）下覆盖 (a) waiting_approval 保留、(b) approve 后真实消费 resume stream 推 Run → completed、(c) decline 终态、(c-2) expire 走 `system-approval-worker` 平台身份、(d) W2 SDK transient fail → approve 进入 `approved_resume_indeterminate` + Run 推回 `waiting_approval` 等 reconciler 接管、(e) scheduler 原子事务单飞、(f) `listSuspendedRuns` fail-closed、(g) 跨重启接管、(h) W2 attempts 耗尽 → `APPROVAL_RECONCILE_MANUAL_INTERVENTION_ATTEMPTS_EXHAUSTED` 收敛、(x) `created_by` NULL 拒绝创建审批，**107 passed, 0 failed**（Codex 于 2026-09-08 使用真实 PostgreSQL 本轮重跑通过；测试 facade / resume stream 为 fake）。
+>
+> 本轮（PR-3.3.2 / 3.3.2.1）：
+> - **生产代码修复**（Codex 2026-09-07 第一次 review 发现阻塞级 crash window；PR-3.3.2.1 第二次 review 指出跨聚合编排违反 + 跨实例并发竞态）：新增 `sweepExpiredApprovalResumeLeases`（`backend/src/core/execution/approval-resume-recovery.ts`——从 `modules/tool-policy/repository.ts` 拆分到 execution 层以消除跨聚合编排违反）按 Tool 元数据 + approval 状态分流恢复 worker 进程被直接杀死（JavaScript catch 不执行）的孤儿现场；新增事件类型 `run-resume-reclaimed`。普通 `sweepExpiredLeases` 的 SQL 增加 `NOT EXISTS` 子句**排除** approval-resume Run，跨进程下两个 sweeper 真并行也安全；写入时清 `lease_owner / lease_expires_at / heartbeat_at`。
+> - **测试已 Codex 实跑通过**：`approval-reconcile-safety.ts`（真实 PG + FakeAgentFacade）覆盖 reconciler lease fencing / backoff / **非幂等或未注册 Tool 拒绝自动重试** / 原子回滚 / 终态手工介入行退出扫描集；`executor-terminal-lease-fence.ts`（真实 PG + 真实 `runResumeSchedulerOnce` + deferred AsyncIterable stream，**`done / stopped / error` 三场景独立 seed**——`stopped` 用真实生产入口 `abortRunByMessage(assistantMessageId)` 触发、Settle 用 `listActiveExecutions()` 轮询、三场景均断言对应 `XxxRun 跳过：Run 已终态或当前 worker 已丢失 lease` 日志路径）覆盖执行器终态写入 `lease_owner = WORKER_ID` fence 在生产路径下生效；`multi-process-resume.ts` + `multi-process-resume-child.ts`（两个独立 Node 子进程 + IPC 同步屏障 + 共享 schema + 显式 tsx loader 注入 `backend/node_modules/tsx/dist/loader.mjs` 转 file URL 后 `--import` + 全 schema 生命周期 try/finally 兜底 + watchdog 仅在两个 child 都结束后清除 + ready 前 early-exit 兜底）覆盖跨进程 `approveToolCall` 单飞；`hard-crash-lease-recovery.ts`（真实 PG + 直接调生产 `runHardCrashApprovalResumeSweeperOnce`）覆盖 W4 hard-crash sweeper 7 项验收（含跨实例并发场景：hard-crash sweeper 与普通 `sweepExpiredLeases` 真并行时，approval-resume Run **不**变 `failed + LEASE_EXPIRED`）。
+>
+> **基线**（PR-3.3.1 / PR-3.3 / PR-3.3.2 / 3.3.2.1）：Backend `npm run typecheck` 通过；Backend unit fixtures 通过；`git diff --check` 通过；frontend production build 通过（保留既有 chunk-size warning 与 ineffective dynamic import；**仅**是 warning，**不**是 error / failure）。
+>
+> **Codex 实测结果（本轮 PR-3.3.2.1）**：
+> - `tool-policy-pg.ts`：**107 passed, 0 failed**（Codex 于 2026-09-08 使用真实 PostgreSQL 本轮重跑通过；测试 facade / resume stream 为 fake）；
+> - `hard-crash-lease-recovery.ts`：**32 passed, 0 failed**；
+> - `multi-process-resume.ts`：**9 passed, 0 failed**；
+> - `executor-terminal-lease-fence.ts`：`done` / `stopped` / `error` 三场景全部通过；
+> - `approval-reconcile-safety.ts`：通过。
+>
+> **验证边界（保留）**：涉及 Mastra resume SDK/stream 边界的 PG 集成测试（`tool-policy-pg.ts` / `multi-process-resume.ts` / `executor-terminal-lease-fence.ts` / `approval-reconcile-safety.ts`）使用 `FakeAgentFacade` / fake stream——验证的是 worker 抢占层 + SDK 边界协议 + lease fencing + 跨进程资源抢占；`hard-crash-lease-recovery.ts` 直接验证生产 sweeper 的 PostgreSQL 状态收敛（不依赖 facade）。已通过本机真实 Mastra Core 1.61.0 + DeepSeek 的 approve / decline / timeout HTTP/SSE 三条基础路径以及 pending 后进程重启再批准的工具结果校验。**完整容灾与多实例真实 SDK e2e 尚未验证**：真实网络故障、真实 SDK 多实例并发去重、真实 `listSuspendedRuns` 返回结构、SSE 跨实例扇出、真实浏览器 UI 联调、真实 staging 部署、PostgresStore 在多实例下的 lock 行为——这些属 PR-3.3 staging e2e 待办，**不是** PR-3.3.2 / 3.3.2.1 的功能缺口。详见 [实测记录](docs/runbooks/2026-09-04-approval-verification.md) 与 [架构](docs/architecture.md)。
 
 ## 快速开始
 

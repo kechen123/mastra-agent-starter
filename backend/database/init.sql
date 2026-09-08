@@ -279,6 +279,14 @@ CREATE INDEX agent_runs_status_idx
 CREATE INDEX agent_runs_lease_expiry_idx
   ON agent_runs(lease_expires_at)
   WHERE status IN ('queued', 'running');
+-- 阶段 3.1 追加（PR-3.1 完整性修复）：
+-- 让 agent_runs 同时按 (id, workspace_id) 唯一，便于下游表（典型如
+-- tool_approval_requests）走"复合外键 (run_id, workspace_id) →
+-- agent_runs(id, workspace_id)"在数据库层强制审批请求与所属 Run
+-- 同 Workspace；这条 UNIQUE 与 PK(id) 是两个独立的索引，互不冲突。
+ALTER TABLE agent_runs
+  ADD CONSTRAINT agent_runs_id_workspace_unique
+  UNIQUE (id, workspace_id);
 
 -- messages 先于 agent_runs 建表，因此在此追加反向外键。
 ALTER TABLE messages
@@ -303,6 +311,8 @@ CREATE TABLE agent_run_events (
                  'tool-call-completed',
                  'approval-requested',
                  'approval-resolved',
+                 'run-resumed',
+                 'run-resume-reclaimed',
                  'run-completed',
                  'run-stopped',
                  'run-failed'
@@ -342,3 +352,186 @@ CREATE INDEX idempotency_keys_completed_idx
   WHERE completed_at IS NOT NULL;
 CREATE INDEX idempotency_keys_expires_idx
   ON idempotency_keys(expires_at);
+
+-- ════════════════════════════════════════════════════════════════════
+-- 阶段 3.1 追加段：Tool Policy / Approval Schema
+-- 协议依据：docs/architecture-v2.md §7
+-- 本段仅创建 Schema 与基础约束；本阶段不实现 Tool Gateway、策略
+-- 评估器、审批 API、审批 UI、超时 worker 或跨重启恢复 Run。
+-- ────────────────────────────────────────────────────────────────────
+
+-- 1. tool_policy_rules：每个 (workspace_id, tool_id) 仅允许一条基础规则
+--    （effect='allow' / 'deny' / 'require_approval'）。
+--    created_by 必填（V2.3 决策：策略的来源可追溯，不允许 NULL）。
+CREATE TABLE tool_policy_rules (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  tool_id      TEXT NOT NULL,
+  effect       TEXT NOT NULL
+                 CHECK (effect IN ('allow', 'deny', 'require_approval')),
+  conditions   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by   UUID NOT NULL REFERENCES app_users(id),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT tool_policy_rules_workspace_tool_unique
+    UNIQUE (workspace_id, tool_id)
+);
+CREATE INDEX tool_policy_rules_workspace_idx
+  ON tool_policy_rules(workspace_id);
+
+-- 2. tool_approval_requests：单 Run 内同一 tool_call_id 仅一条请求
+--    （幂等重试同 tool_call）；审批恢复键为 (run_id, tool_call_id)，
+--    与 Mastra 1.61 公共 API 的 agent.approveToolCall / declineToolCall
+--    签名对齐——它们只接受 runId、可选 toolCallId、reason，**没有**
+--    独立可持久化的 suspension token。
+--
+--    PR-3.3.0 扩展：可恢复动作状态机。
+--    status 取值集合（PR-3.3 起）：
+--      - 'pending'      ：新建待审批；
+--      - 'approving'    ：已被 API / Worker 抢占，正在调用 Mastra
+--                          agent.approveToolCall（中间态，重复调用
+--                          仅取一个）；
+--      - 'declining'    ：已被 API / Worker 抢占，正在调用 Mastra
+--                          agent.declineToolCall（同上）；
+--      - 'approved'     ：Mastra approve 调用成功 + 恢复消费已启动；
+--      - 'declined'     ：Mastra decline 调用成功；
+--      - 'expired'      ：超时 Worker 收敛（同时停 Run 并写
+--                          run-stopped/run-failed）。
+--    requester_id 必填；resolver_id 由 resolve 时回填。
+--    inputs_summary 仅存"已脱敏"摘要；原始敏感输入不进库。
+--
+--    可恢复性字段：
+--      decision               ：抢占时写入 'approved' | 'declined'，
+--                                决定后续调用哪个 Mastra SDK；让重试路径
+--                                不依赖外部信号（避免 DB 与 Mastra 不一致）。
+--      resolver_id            ：抢占时同时回填（API 抢占时为当前用户；
+--                                超时收敛时为 NULL——以 resolver_error
+--                                'APPROVAL_EXPIRED' 区分）。
+--      resolver_error         ：SDK 调用失败时写，最后一次失败的 reason；
+--                                让重试路径可读上次失败原因。
+--      mastra_call_started_at / mastra_call_completed_at
+--                              ：SDK 调用的边界时间戳——started_at 与
+--                                completed_at 用于发现"调用挂起"（两
+--                                者差超过阈值时由超时 worker 强制收敛）。
+--      lease_owner / lease_expires_at
+--                              ：抢占 lease，与 agent_runs 同款 60s +
+--                                心跳协议；抢占动作带 lease 后才允许
+--                                进行 Mastra SDK 调用。
+CREATE TABLE tool_approval_requests (
+  id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id              UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  -- run_id 保留单列索引用途；跨 Workspace 完整性靠下面的
+  -- tool_approval_requests_run_workspace_fk 复合外键强制。
+  run_id                    UUID NOT NULL,
+  tool_id                   TEXT NOT NULL,
+  tool_call_id              TEXT NOT NULL,
+  inputs_hash               TEXT NOT NULL,
+  inputs_summary            JSONB NOT NULL,
+  status                    TEXT NOT NULL
+                              CHECK (status IN (
+                                'pending', 'approving', 'declining',
+                                'approved', 'approved_resume_indeterminate',
+                                'declined', 'expired'
+                              )),
+  -- PR-3.3 修订：requester_id / resolver_id 恢复为 NOT NULL FK。
+  -- 真实审计可追溯：每条审批请求的发起者 / 终结者必须对应一个
+  -- app_users 行；系统发起（超时 / 续 Run）使用 app_users 中预设的
+  -- `system-approval-worker` 用户（disabled_at NOT NULL，禁止登录），
+  -- 不允许写 NULL 来跳过审计。
+  requester_id              UUID NOT NULL REFERENCES app_users(id),
+  resolver_id               UUID NOT NULL REFERENCES app_users(id),
+  mastra_resume_started_at  TIMESTAMPTZ,
+  -- PR-3.3 Replay Fix：approve SDK 调用结果不确定时进入 reconciliation
+  -- 重试计数；reconciler 扫描条件包含 `resume_attempts < MAX`，
+  -- 超限后转人工介入。
+  resume_attempts           INT NOT NULL DEFAULT 0,
+  decision                  TEXT
+                              CHECK (decision IS NULL OR decision IN ('approved', 'declined')),
+  resolver_error            TEXT,
+  mastra_call_started_at    TIMESTAMPTZ,
+  mastra_call_completed_at  TIMESTAMPTZ,
+  lease_owner               TEXT,
+  lease_expires_at          TIMESTAMPTZ,
+  expires_at                TIMESTAMPTZ NOT NULL,
+  created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at               TIMESTAMPTZ,
+  -- 复合外键：审批请求与所属 Run 在数据库层强制同 Workspace。
+  -- 引用 agent_runs 上的 UNIQUE(id, workspace_id)（见阶段 2 段
+  -- agent_runs_id_workspace_unique）；旧的单列 run_id → agent_runs(id)
+  -- 外键不再保留，避免两套相互独立的 Run 外键。
+  CONSTRAINT tool_approval_requests_run_workspace_fk
+    FOREIGN KEY (run_id, workspace_id)
+    REFERENCES agent_runs(id, workspace_id)
+    ON DELETE CASCADE,
+  CONSTRAINT tool_approval_requests_run_tool_call_unique
+    UNIQUE (run_id, tool_call_id)
+);
+-- Workspace 收件箱部分索引：pending 状态才有 inbox 路径。
+CREATE INDEX tool_approval_requests_workspace_pending_idx
+  ON tool_approval_requests(workspace_id, status)
+  WHERE status = 'pending';
+CREATE INDEX tool_approval_requests_run_idx
+  ON tool_approval_requests(run_id);
+-- 过期 worker 扫描路径（阶段 3.3+ 验收范围，本阶段不实现）。
+CREATE INDEX tool_approval_requests_expires_pending_idx
+  ON tool_approval_requests(expires_at)
+  WHERE status = 'pending';
+-- 单飞索引：同一 (run_id, tool_call_id) 在中间态 (approving/declining)
+-- 最多一条；防止两个并发 resolve / Worker 同时跑 Mastra SDK 调用。
+CREATE UNIQUE INDEX tool_approval_requests_run_tool_call_inflight_unique
+    ON tool_approval_requests(run_id, tool_call_id)
+    WHERE status IN ('approving', 'declining');
+-- Lease 扫描索引：超时 worker 用 status + lease_expires_at 找挂起的
+-- SDK 调用（started_at 已写但 completed_at 为空 + lease 已过期）。
+CREATE INDEX tool_approval_requests_lease_idx
+    ON tool_approval_requests(lease_expires_at)
+    WHERE status IN ('approving', 'declining');
+-- PR-3.3 Replay Fix：reconciler 扫描索引——按 lease_expires_at 找
+-- `approved_resume_indeterminate` 行（approve SDK 抛错后等待恢复检查）。
+CREATE INDEX tool_approval_requests_indeterminate_idx
+    ON tool_approval_requests(lease_expires_at)
+    WHERE status = 'approved_resume_indeterminate';
+
+-- 本阶段不向 agent_runs 增加 approval_request_id 列（V2.1 决策：
+-- 审批只走 (run_id, workspace_id) → agent_runs(id, workspace_id) 单向复合外键；
+-- 单 Run 可挂多条请求，单值外键不成立）。
+--
+-- 跨 Workspace 完整性：tool_approval_requests.run_id 与 workspace_id
+-- 通过复合外键 (run_id, workspace_id) → agent_runs(id, workspace_id)
+-- 强制同 Workspace（agent_runs 持有 UNIQUE(id, workspace_id) 兜底）；
+-- 任何跨 Workspace 写入都会被 PG 23503 (foreign_key_violation) 拒绝。
+
+-- ────────────────────────────────────────────────────────────────────
+-- 阶段 3.3 追加段（PR-3.3 平台系统执行者身份）：
+-- 协议依据：docs/architecture-v2.md §7 + §9 决策
+-- 本段落地的不变量：
+--   1. `tool_approval_requests.requester_id` 与 `resolver_id` **NOT NULL** FK
+--      → app_users(id)。任何审批请求的发起者 / 终结者都必须对应一个真实
+--      用户行；NULL 不允许（避免审计盲区）。
+--   2. 预留平台服务用户 `app_users(username='system-approval-worker')` 作为
+--      系统动作的真实身份——超时收敛（`expireApproval`）的 resolver_id
+--      写该用户 UUID，**不**允许用 NULL 跳过 FK 约束。
+--      该用户的 `disabled_at` 恒为非空——禁止任何业务路径用其登录，
+--      仅供内部审计追溯。
+--   3. 正常用户发起的审批必须使用 `agent_runs.created_by`——如果
+--      `agent_runs.created_by IS NULL`，Repository 层**拒绝创建**审批
+--      请求（不允许写 NULL 进 requester_id）。
+-- 重要：本段是**新追加段**，与上方阶段 3.1 段共存；不允许用 ALTER
+-- 重写阶段 3.1 表结构。删库重建时 init.sql 必须按顺序执行。
+-- ────────────────────────────────────────────────────────────────────
+
+-- 1. 平台服务用户（system-approval-worker）：作为 SDK 调用 / 超时收敛 /
+--    跨重启接管 / 续 Run 触发动作的 resolver_id / requester_id 真实身份。
+--    username 唯一约束要求 normalized 也唯一，故使用固定 lowercase 串。
+--    该行的存在性由"是否记录可审计身份"决定——**禁止**用 ALL-ZERO UUID
+--    或任何不存在的 UUID 触发外键错误。
+INSERT INTO app_users (id, username, username_normalized, password_hash, disabled_at)
+VALUES (
+  '00000000-0000-0000-0000-0000000000a1',
+  'system-approval-worker',
+  'system-approval-worker',
+  '!disabled-no-login!',
+  now()
+)
+ON CONFLICT (username_normalized) DO NOTHING;

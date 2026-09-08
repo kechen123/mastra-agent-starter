@@ -9,10 +9,28 @@
  *      一个 `AgentDefinition`（见 `core/agent/types.ts`）。
  *   2. 在本文件下追加一行 `registerAgent(<yourDef>);`。
  *   3. 重启后端，新 Agent 会出现在 `GET /agents` 接口中。
+ *
+ * PR-3.3.1 — Staging Approval Probe Agent：
+ *   - 默认不注册、绝不暴露在 `/agents`；
+ *   - 仅当 ENABLE_STAGING_APPROVAL_PROBE=true **且** 部署档位 !== production
+ *     才注册；
+ *   - 若部署档位 === production 即便设置了开关也必须拒绝启动，与
+ *     `tools/index.ts` 的相同守卫构成"Tool + Agent 双门"。
  */
-import { registerAgent } from '../core/agent/registry.js';
+import { registerAgent, getAgentDefinition } from '../core/agent/registry.js';
 import { generalChatAgent } from './general-chat/agent.js';
 import { knowledgeBaseAgent } from './knowledge-base/agent.js';
+import { stagingApprovalProbeAgentDefinition } from './staging-approval-probe/agent.js';
 
-registerAgent(generalChatAgent);
-registerAgent(knowledgeBaseAgent);
+export function registerBuiltinAgents(): void {
+  if (!getAgentDefinition(generalChatAgent.id)) registerAgent(generalChatAgent);
+  if (!getAgentDefinition(knowledgeBaseAgent.id)) registerAgent(knowledgeBaseAgent);
+  if (process.env.ENABLE_STAGING_APPROVAL_PROBE === 'true') {
+    if (process.env.DEPLOYMENT_PROFILE === 'production') {
+      throw new Error('生产环境禁止启用审批探针 Agent。');
+    }
+    if (!getAgentDefinition(stagingApprovalProbeAgentDefinition.id)) registerAgent(stagingApprovalProbeAgentDefinition);
+  }
+}
+
+registerBuiltinAgents();

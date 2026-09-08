@@ -21,7 +21,7 @@ import { knowledgeBaseInstructions } from './instructions.js';
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createKnowledgeBaseAgent(
-  _tools?: Record<string, unknown>,
+  tools?: Record<string, unknown>,
   skills?: unknown[],
   mastraInstance?: Mastra,
 ): Agent {
@@ -29,6 +29,7 @@ export function createKnowledgeBaseAgent(
     id: 'knowledge-base',
     name: `${config.appShortName} 知识库问答 Agent`,
     model: resolveDefaultChatModel(),
+    tools: tools as ConstructorParameters<typeof Agent>[0]['tools'],
     instructions: knowledgeBaseInstructions,
     ...(skills && skills.length > 0 ? { skills: skills as any } : {}),
     ...(mastraInstance ? { mastra: mastraInstance } : {}),

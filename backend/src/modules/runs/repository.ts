@@ -28,6 +28,8 @@ export type RunEventType =
   | 'tool-call-completed'
   | 'approval-requested'
   | 'approval-resolved'
+  | 'run-resumed'
+  | 'run-resume-reclaimed'
   | 'run-completed'
   | 'run-stopped'
   | 'run-failed';
@@ -206,7 +208,6 @@ export async function publishLiveDelta(args: {
   workspaceId: string;
   text: string;
 }): Promise<void> {
-  const envelope = JSON.stringify({ runId: args.runId });
   // envelope 在 text 之前/之后的固定字节开销（text 部分可能为空、也可能含 escape）。
   const { prefixBytes: envelopePrefixBytes, suffixBytes: envelopeSuffixBytes } =
     jsonEnvelopeSplitBytes({ runId: args.runId });
@@ -235,7 +236,7 @@ export async function publishLiveDelta(args: {
   // 一次 NOTIFY 一条包。性能可接受：单 chunk ≤ 7900B，且正常情况下
   // text 远小于此，几乎总是 1 chunk。
   for (const chunk of split.chunks) {
-    const payload = `${envelope},"text":${JSON.stringify(chunk)}}`;
+    const payload = JSON.stringify({ runId: args.runId, text: chunk });
     // 兜底校验：正常输入下 splitter 已保证 < 7900B；若 envelope 字段意外扩展
     // 或 Buffer 边界变了，这里抛错阻止越界 NOTIFY 进入 PG。
     const payloadBytes = Buffer.byteLength(payload, 'utf8');
@@ -362,6 +363,18 @@ export async function heartbeatRunLease(
  *
  *   - 终态 UPDATE 带 WHERE status IN ('queued','running') 条件，
  *     防止覆写已 stopped / failed 的 Run（V2 §6.4 阻断项 5）。
+ *
+ * PR-3.3.2.1 跨实例并发修复：必须**从 SQL 扫描集排除** approval-resume
+ *   Run（WHERE NOT EXISTS 子句），不能依赖"先跑 hard-crash sweeper 后跑
+ *   本函数"的调用顺序——跨进程下两个 sweeper 真并行，普通 sweeper 若
+ *   抢到 approval-resume 行会把它错误写成 `failed + LEASE_EXPIRED`，
+ *   留下"approved + mastra_resume_started_at NOT NULL + failed
+ *   LEASE_EXPIRED"不可恢复的孤儿组合。hard-crash sweeper
+ *   （`approval-resume-recovery.ts`）是审批恢复专责，由它来分流
+ *   approved / declined / expired 三种决策。
+ *
+ *   同步清 `lease_owner / lease_expires_at / heartbeat_at`——写入
+ *   failed 后必须释放 lease，避免心跳 / sweeper 重复触发。
  */
 export async function sweepExpiredLeases(
   executor: Pool | PoolClient = getDatabasePool(),
@@ -381,10 +394,20 @@ export async function sweepExpiredLeases(
           SET status = 'failed',
               error_code = 'LEASE_EXPIRED',
               completed_at = now(),
+              lease_owner = NULL,
+              lease_expires_at = NULL,
+              heartbeat_at = NULL,
               updated_at = now()
         WHERE status IN ('queued', 'running')
           AND lease_expires_at IS NOT NULL
           AND lease_expires_at < now()
+          AND NOT EXISTS (
+            SELECT 1 FROM tool_approval_requests a
+             WHERE a.run_id = agent_runs.id
+               AND a.workspace_id = agent_runs.workspace_id
+               AND a.status IN ('approved','declined','expired')
+               AND a.mastra_resume_started_at IS NOT NULL
+          )
         RETURNING ${RUN_COLUMNS}`,
     );
     const rows = expired.rows.map(rowToRun);

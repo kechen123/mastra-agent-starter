@@ -17,10 +17,31 @@
  *   具体 Agent 不再 inline 持有 tools；Agent 通过 `mastra.tools` 拿同一份
  *   注册表，per-request 通过 `activeTools` 过滤可用子集。这样"重启后
  *   工具可恢复"有统一来源，而不是每个 per-request Agent 临时持有一份。
+ *
+ * PR-3.3.1 — Staging Approval Probe：
+ *   - 默认不注册、绝不暴露在 `/tools`；
+ *   - 仅当 ENABLE_STAGING_APPROVAL_PROBE=true **且** 部署档位 !== production
+ *     才注册；
+ *   - 若部署档位 === production 即便设置了开关也必须拒绝启动（不能静默启用），
+ *     避免把 staging-only 的破坏性探针漏到生产 `Mastra({ tools })` 字典。
+ *   - 部署档位判定与 `config.ts::resolveDeploymentProfile` 对齐：仅以
+ *     `DEPLOYMENT_PROFILE=production` 视为生产。`config.ts` 在 production
+ *     时本身就会抛错；本守卫保留独立判断，避免依赖 config 抛错顺序。
  */
-import { registerTool } from '../core/tool/registry.js';
+import { registerTool, getToolDefinition } from '../core/tool/registry.js';
 import { calculatorDefinition } from './calculator/tool.js';
 import { getCurrentTimeDefinition } from './get-current-time/tool.js';
+import { stagingApprovalProbeDefinition } from './staging-approval-probe/tool.js';
 
-registerTool(calculatorDefinition);
-registerTool(getCurrentTimeDefinition);
+export function registerBuiltinTools(): void {
+  if (!getToolDefinition(calculatorDefinition.id)) registerTool(calculatorDefinition);
+  if (!getToolDefinition(getCurrentTimeDefinition.id)) registerTool(getCurrentTimeDefinition);
+  if (process.env.ENABLE_STAGING_APPROVAL_PROBE === 'true') {
+    if (process.env.DEPLOYMENT_PROFILE === 'production') {
+      throw new Error('生产环境禁止启用审批探针工具。');
+    }
+    if (!getToolDefinition(stagingApprovalProbeDefinition.id)) registerTool(stagingApprovalProbeDefinition);
+  }
+}
+
+registerBuiltinTools();

@@ -162,15 +162,15 @@ export function jsonByteCost(codePoint: string): number {
  * 计算 envelope 的 prefix/suffix 字节数（不含 text 自身及其外层 quotes）。
  *
  * 调用方构造 payload 时使用：
- *   const payload = `${envelope},"text":${JSON.stringify(chunk)}}`;
- * 即 prefix = `${envelope},"text":`，suffix = `}`。
+ *   const payload = JSON.stringify({ runId, text: chunk });
+ * prefix 去掉 envelope 的右花括号后追加 text 字段，suffix = `}`。
  */
 export function jsonEnvelopeSplitBytes(payload: { runId: string }): {
   prefixBytes: number;
   suffixBytes: number;
 } {
   const envelope = JSON.stringify(payload);
-  const prefix = `${envelope},"text":`;
+  const prefix = `${envelope.slice(0, -1)},"text":`;
   const suffix = `}`;
   return {
     prefixBytes: Buffer.byteLength(prefix, 'utf8'),

@@ -1,5 +1,18 @@
 # V2 实施计划（阶段 0～5 / PR 切片）
 
+> **当前执行进度（2026-09-08 PR-3.3.2 / 3.3.2.1 实测验证收尾）**：PR-3.3.1 的本机真实 SDK / 模型基础三路径、pending 后重启批准、107 项真实 PG + fake facade 集成均通过；PR-3.3.2 / 3.3.2.1 本轮新增四项 PG 集成已 Codex 实跑通过——`hard-crash-lease-recovery.ts` 32 passed, 0 failed；`multi-process-resume.ts` 9 passed, 0 failed；`executor-terminal-lease-fence.ts` `done / stopped / error` 三场景全部通过；`approval-reconcile-safety.ts` 通过。Backend `npm run typecheck`、Backend unit fixtures、`git diff --check`、frontend `npm run build` 均通过（前端仅保留 chunk-size / ineffective dynamic import warning，不视作失败）。
+>
+> **本轮新增（PR-3.3.2 / 3.3.2.1）**：
+> - **生产代码修复**：`sweepExpiredApprovalResumeLeases`（`backend/src/core/execution/approval-resume-recovery.ts`——PR-3.3.2.1 从 `modules/tool-policy/repository.ts` 拆分到 execution 层以消除跨聚合编排违反）—— 修复 Codex 2026-09-07 第一次 review 发现的**阻塞级 crash window**（worker 进程被直接杀死时 JavaScript catch 不会执行，原 sweeper 会把孤儿 Run 错误地写成 `failed` + `LEASE_EXPIRED`，留下不可恢复的孤儿组合）。按 Tool 元数据 + approval 状态分流恢复。新增事件类型 `run-resume-reclaimed`。
+> - **跨实例并发修复**：普通 `sweepExpiredLeases` 的 SQL 增加 `NOT EXISTS` 子句**排除** approval-resume Run（`tool_approval_requests.status IN ('approved','declined','expired') AND mastra_resume_started_at IS NOT NULL`）——不能依赖调用顺序，跨进程下两个 sweeper 真并行时仍必须分流。同时 `sweepExpiredLeases` 写入 `failed` 时清 `lease_owner / lease_expires_at / heartbeat_at`，避免心跳 / sweeper 重复触发。
+> - **测试已 Codex 实跑通过**：
+>   - `executor-terminal-lease-fence.ts` —— `done / stopped / error` 三场景独立 seed，覆盖 `completeRun / stopRun / failRun` 终态 `lease_owner` fence；`stopped` 用真实生产入口 `abortRunByMessage(assistantMessageId)` 触发，Settle 用 `listActiveExecutions()` 轮询，三场景均断言对应 `XxxRun 跳过：Run 已终态或当前 worker 已丢失 lease` 日志路径；
+>   - `multi-process-resume.ts` + `multi-process-resume-child.ts` —— 修复 `resolver_id` 缺失、schema 生命周期 try/finally、watchdog 早清、Windows ESM `--import` 必须 file URL、ready 前 early-exit 等关键问题；
+>   - `hard-crash-lease-recovery.ts` —— 覆盖 W4 hard-crash sweeper 7 项验收（含跨实例并发场景）；
+>   - `approval-reconcile-safety.ts` —— 覆盖 reconciler lease fencing / backoff / 非幂等 Tool 拒绝自动重试 / 原子回滚 / 终态手工介入行退出扫描集。
+>
+> **仍不是完整生产容灾验收**：网络抖动 / 真实 SDK 并发去重 / 多实例 SSE 跨实例扇出 / 浏览器端到端仍未验证。已按用户要求停止继续开发，**PR-4 尚未开始编码**。涉及 Mastra resume SDK/stream 边界的 PG 集成测试（`tool-policy-pg.ts` / `multi-process-resume.ts` / `executor-terminal-lease-fence.ts` / `approval-reconcile-safety.ts`）使用 `FakeAgentFacade` / fake stream——验证的是 worker 抢占层 + SDK 边界协议 + lease fencing + 跨进程资源抢占；`hard-crash-lease-recovery.ts` 直接验证生产 sweeper 的 PostgreSQL 状态收敛（不依赖 facade）。本机真实 Mastra Core 1.61.0 + DeepSeek 的 approve / decline / timeout 三条 HTTP/SSE 基础路径及 pending 后重启再 approve 已有验证记录；**完整容灾与多实例真实 SDK e2e 尚未验证**——这是 PR-3.3 staging e2e 待办，**不是** PR-3.3.2 / 3.3.2.1 的功能缺口。详见 [实测与交接记录](runbooks/2026-09-04-approval-verification.md)。下次先核对当前未提交改动及 PR-3.3 剩余风险，再校正 PR-4 计划；不要直接照旧迁移链执行。
+
 > **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / `LEGACY_WORKSPACE_OWNER_USER_ID` ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。PR-1.2 / PR-1.3 / PR-1.4 / PR-1.5 已合并落地。
 
 > **状态：基于 V2.3.6（2026-08-28）** —— `architecture-v2.md` 已升版至 V2.3.6，五项定向修正全部落定（含 §8.4.1 Core/RAG Schema 边界与 §8.4.2 存量内联向量迁移）。本文档据此拆解阶段 0～5 的 PR 切片。**仍为文档/计划阶段，不进入代码开发。**
@@ -509,9 +522,11 @@ CREATE TABLE skill_packages (
 
 ## 阶段 3：Tool Policy 与审批
 
-**状态（2026-09-02）**：阶段 3.0（Durable Agent Runtime）进行中；阶段 3 的 Tool Policy / 审批 UI / 续 Run 仍**未**开始。
+**状态（2026-09-04）**：阶段 3.0（Durable Agent Runtime）已落地（`@mastra/pg` PostgresStore 接到 `mastra_runtime` schema，`streamOptions.runId / memory.thread / memory.resource` 透传）；阶段 3.1（Tool Policy / Approval Schema 与 Repository）已落地；**阶段 3.2（Tool Policy Evaluator 与策略感知 Tool Resolver）已落地**：`modules/tool-policy/evaluator.ts` 提供三态决策（`allowed` / `requires-approval` / `forbidden`）；`modules/tool-policy/resolver.ts` 把 activeTools 过滤从"按 `toolMap.has(id)` 存在性"升级为"按 workspace 策略逐 Tool 决策、仅 allowed 入列"；`runtime.ts` 接入新解析器并暴露 `_setPolicyResolverForTesting` 钩子。**阶段 3.3（Tool Approval Closed-Loop，含 Replay Fix）已落地**：Tool Gateway 接入 `workspaceId` + `requireToolApproval`；`requires-approval` Tool 现在走 Mastra 审批流程（不再 fail-closed）；`/v1/approvals` REST API（list / detail / resolve approve|decline）；Mastra `approveToolCall` / `declineToolCall` 接入 + `resumeStream` 闭环；**职责严格分层**：`/v1/approvals` HTTP 层 / `state-machine.resolveApproval` / `expireApproval` / `reconcileInflightApprovals` / `timeout-worker` **全部 DB-only**，**不**调 Mastra SDK、**不**消费 stream；`runResumeSchedulerOnce` + `runReconcileIndeterminateOnce`（`run-executor.ts`）是**唯一** SDK 调用与 stream 消费方；超时 worker 仅做 DB-only `expired` 决策登记，由 scheduler 调 `declineToolCall(reason='expired')` 收尾 Run；跨重启 reconciliation 启动一次扫描 + 每 tick 周期扫描，对 inflight Run 调用 `listSuspendedRuns` 严格校验 `runId`/`toolCallId`/`workspaceId`/`threadId`/`resourceId`/`agentId`；W2 approve SDK 失败 → `approved_resume_indeterminate` + `resume_attempts ≤ 3` + reconciler 校验通过后 revert 或 fail-closed Run → failed；前端 `useApprovals` hook + `ApprovalCard` 组件 + SSE `approval-requested` / `approval-resolved` 事件显示在 composer 之上。
 
 阶段 3.0 仅作为前置条件——storage、Tool 公共注册和 ID 参数透传已实现：把 `@mastra/pg` 的 `PostgresStore` 接到了独立 schema `mastra_runtime`，并把全部 Agent 经公开 `new Mastra({ agents })` 注册路径绑定同一 storage；`streamOptions.runId / memory.thread / memory.resource` 已在 stream 调用中真实透传。**跨重启恢复审批 Run 未完成真实 PostgreSQL 端到端验证**。阶段 3.0 **不**实现审批表、审批 API、审批 UI，也不新增演示性高风险 Tool。
+
+阶段 3.1 仅落出 Schema（`tool_policy_rules` / `tool_approval_requests`）与最小 Repository 层（`modules/tool-policy/`）；**不**实现策略评估器、Tool Gateway 接入、审批 API、审批 UI、超时 worker，也不接入运行时——本阶段提交的 PR **不**完成 V2 §7 决策里的"接入 Mastra requireToolApproval + approveToolCall / declineToolCall / resumeStream"路径；阶段 3 总体验收仍未勾选。
 
 ### PR-3.0（进行中）—— Durable Agent Runtime 前置
 
@@ -557,57 +572,274 @@ CREATE TABLE skill_packages (
 - 跨重启恢复：参数已透传不等于"跨重启恢复已实现"；本阶段**未**实际触发"重启 → 列出 suspended runs → 续 Run"流程；属于阶段 3.1+ 验收范围。
 - `agent_runs.id / conversations.id / workspaces.id` 与 Mastra snapshot 的同源校验未在真实 PG 上验证。
 
-### PR-3.1（仍未开始）—— `tool_approval_requests` / `tool_policy_rules` Schema
+### PR-3.1（已落地 schema/repository，未接入运行时）—— `tool_policy_rules` / `tool_approval_requests`
 
 **Files**
-- 修改 `backend/database/init.sql`（**不**新开 migration 文件；G-2 约束）
+- Modify: `backend/database/init.sql`（**不**新开 migration 文件；G-2 约束）
+- Create: `backend/src/modules/tool-policy/types.ts`
+- Create: `backend/src/modules/tool-policy/repository.ts`
+- Create: `backend/tests/unit/tool-policy-schema.ts`
+- Create: `backend/tests/unit/tool-policy-repository.ts`
 
-> TODO：阶段 3.0 落地后才动此 PR；具体 Schema 仍按 V2 §7 设计。
+**Schema**（与 `backend/database/init.sql` 阶段 3.1 段完全一致；旧草案中的 `tool_call_id UUID`、`requested_payload`、`users(id)`、`'rejected'` 等已废弃字段均不留存）
 
-**Schema**
 ```sql
 CREATE TABLE tool_policy_rules (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id),
-  tool_name TEXT NOT NULL,
-  effect TEXT NOT NULL CHECK (effect IN ('allow','deny','require_approval')),
-  conditions JSONB NOT NULL DEFAULT '{}',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  tool_id      TEXT NOT NULL,
+  effect       TEXT NOT NULL
+                 CHECK (effect IN ('allow', 'deny', 'require_approval')),
+  conditions   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by   UUID NOT NULL REFERENCES app_users(id),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT tool_policy_rules_workspace_tool_unique UNIQUE (workspace_id, tool_id)
 );
+CREATE INDEX tool_policy_rules_workspace_idx ON tool_policy_rules(workspace_id);
+
 CREATE TABLE tool_approval_requests (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
-  tool_call_id UUID NOT NULL,
-  requested_payload JSONB NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','expired')),
-  approver_user_id UUID REFERENCES users(id),
-  decided_at TIMESTAMPTZ,
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id   UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  run_id         UUID NOT NULL,                          -- 复合 FK 在表底约束中
+  tool_id        TEXT NOT NULL,
+  tool_call_id   TEXT NOT NULL,                          -- TEXT 而非 UUID（V2 §7）；与 run_id 共同构成审批恢复键
+  inputs_hash    TEXT NOT NULL,
+  inputs_summary JSONB NOT NULL,                         -- 已脱敏 JSON，调用方负责脱敏
+  status         TEXT NOT NULL
+                   CHECK (status IN ('pending', 'approved', 'declined', 'expired')),
+  requester_id   UUID NOT NULL REFERENCES app_users(id),
+  resolver_id    UUID REFERENCES app_users(id),          -- 可空
+  expires_at     TIMESTAMPTZ NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at    TIMESTAMPTZ,                            -- 可空
+  -- 跨 Workspace 完整性：审批请求与所属 Run 在 DB 层强制同 Workspace。
+  -- 引用 agent_runs 上的 UNIQUE(id, workspace_id)（见阶段 2 段
+  -- agent_runs_id_workspace_unique）；旧的单列 run_id → agent_runs(id)
+  -- 外键不再保留，避免两套相互独立的 Run 外键。
+  CONSTRAINT tool_approval_requests_run_workspace_fk
+    FOREIGN KEY (run_id, workspace_id)
+    REFERENCES agent_runs(id, workspace_id)
+    ON DELETE CASCADE,
+  CONSTRAINT tool_approval_requests_run_tool_call_unique UNIQUE (run_id, tool_call_id)
+  -- 注意：Mastra 1.61 公开 API 的 agent.approveToolCall / agent.declineToolCall
+  -- 只接收 runId、可选 toolCallId、reason，**没有**独立可持久化的
+  -- suspension token；本表**不**存 suspension_id 列与
+  -- UNIQUE(suspension_id) 约束，审批恢复键仅为 (run_id, tool_call_id)。
 );
+CREATE INDEX tool_approval_requests_workspace_pending_idx
+  ON tool_approval_requests(workspace_id, status) WHERE status = 'pending';
+CREATE INDEX tool_approval_requests_run_idx
+  ON tool_approval_requests(run_id);
+CREATE INDEX tool_approval_requests_expires_pending_idx
+  ON tool_approval_requests(expires_at) WHERE status = 'pending';
 ```
 
-### PR-3.2（仍未开始）—— Tool 执行网关接入身份 + 策略评估
+**约束**（V2.1 决策；本 PR 严格遵守）
+- **不**对 `agent_runs` 新增 `approval_request_id` 列；审批关系单向 `(run_id, workspace_id) → agent_runs(id, workspace_id)` 复合外键（一个 Run 可有多条请求）。
+- `tool_call_id` 为 **TEXT**（与 Mastra SDK 的 `toolCallId` 一致），**不**使用 UUID。
+- status 枚举为 `pending / approved / declined / expired`，**不**使用 `rejected`（V2 §7 一致）。
+- `requester_id` 必填；`resolver_id` 可空（pending 行不存在）。
+- `inputs_summary` 强制 NOT NULL，**无**默认值——调用方必须传入"已脱敏"的 JSON；Repository 不写入原始敏感输入。
+- **跨 Workspace 完整性（PR-3.1 完整性修复）**：
+  - `agent_runs` 持有 `UNIQUE(id, workspace_id)`（约束名 `agent_runs_id_workspace_unique`），与 PK(`id`) 共存，独立索引；
+  - `tool_approval_requests` 走复合外键 `FOREIGN KEY (run_id, workspace_id) REFERENCES agent_runs(id, workspace_id) ON DELETE CASCADE`（约束名 `tool_approval_requests_run_workspace_fk`）；
+  - 旧的"单列 `run_id` → `agent_runs(id)`"外键不再保留——两套相互独立的 Run FK 已被复合 FK 完全替代；
+  - 任何跨 Workspace 写入（INSERT）会被 PG 23503 (foreign_key_violation) 拒绝；Repository 层无需额外前置校验，但**仍**保留所有读取的 `workspace_id` 过滤作为防御性兜底。
+
+**Repository**（`backend/src/modules/tool-policy/repository.ts`）
+- 所有 SQL 走参数化（$N），不拼接字符串；全部读取强制 `workspace_id` 过滤。
+- `createApprovalRequest(input, executor)`：INSERT；唯一性约束由 DB 兜底（UNIQUE 触发时由后续 PR 决定是返回已存在 row 还是拒绝重试）。
+- `getApprovalRequestById(workspaceId, approvalId, executor)`：跨 workspace 一律返回 null（**不**抛错；上游 HTTP 统一映射为 404，避免越权嗅探）。
+- `listPendingApprovalRequests(workspaceId, executor)`：仅取 status='pending' 的行；按 `created_at ASC` 排序。
+- `resolveApprovalRequest(client, input)`：**原子** UPDATE 带
+  `WHERE id=$1 AND workspace_id=$2 AND status='pending'`；1 行 → `resolved`；0 行 → 在同事务内再读一次（仍带 `workspace_id` 过滤）区分 `not_found` / `already_resolved`。**不**切换 `agent_runs.status`、**不**写 SSE、**不**调 Mastra SDK；这些都是 PR-3.3 范围。
+- `upsertPolicyRule(input, executor)` / `getPolicyRule(workspaceId, toolId, executor)`：最小基础规则读写；不参与 evaluator 决策。
+
+**验收（本 PR 自身；不勾阶段 3 总体验收）**
+- [x] `backend/database/init.sql` 阶段 3.1 段落地，两张表 + 索引 + UNIQUE + CHECK 全部对齐 V2 §7；`backend npm run typecheck` 通过；新增 `tool-policy-schema.ts` / `tool-policy-repository.ts` 两个 fixture 通过。
+- [x] 跨 Workspace 完整性修复：`agent_runs` 持有 `UNIQUE(id, workspace_id)`；`tool_approval_requests` 走复合外键 `(run_id, workspace_id) → agent_runs(id, workspace_id)`；旧的单列 FK 已彻底删除；`tool-policy-schema.ts` 8 项新断言（含反向断言）全部通过。
+- [ ] **PR-3.1 完成时的历史验收快照**：PR-3.3 / 阶段 3 总体验收在 PR-3.1 完成时仍未开始；阶段 3 总勾选框（Tool 网关、跨 workspace 404、超时、跨重启 Run 恢复）维持空。**这些后续已被 PR-3.3 全部覆盖**：Tool 网关、跨 workspace 404、超时（DB-only + scheduler 收尾）、跨重启 Run 恢复（`runReconcileIndeterminateOnce` + W2 reconciliation）均已落地并通过真实 PostgreSQL 集成测试 107 passed, 0 failed；当前真实状态见下方 Phase 3.3 阶段 3 验收勾选框。
+
+**PR-3.1 完成时的历史未验证项（已由后续 PR 覆盖，仅供历史追溯）**
+- Repository 与真实 PostgreSQL 的 SQL 行为（`tools/unit` 仅做 fake-client 合约断言）—— PR-3.3 起 `tests/integration/tool-policy-pg.ts` 在真实 PostgreSQL 上覆盖 repository 全部路径。
+- `tool_approval_requests` partial / expires 索引在真实 PG 上的查询计划 —— PR-3.3 起 PG 集成测试在 init.sql 后运行该索引。
+- 策略评估器与 Tool Gateway 接入（PR-3.2） —— **已由 PR-3.2 落地**，见下方 PR-3.2 节。
+- 审批 API / 审批 UI / SSE `approval-requested` / `approval-resolved` 路径（PR-3.3） —— **已由 PR-3.3 落地**（`/v1/approvals` HTTP API + `ApprovalCard` + `useApprovals` + SSE 事件订阅）；当前唯一未验证的是真实浏览器 + 真实后端 + 真实 SSE 的端到端联调。
+- 超时 worker（`tool_approval_requests.expires_at < now()` → `stopped + APPROVAL_EXPIRED`） —— **已被 PR-3.3 替代**：timeout worker 现仅 DB-only 写 `status='expired'` + `resolver_id=system-approval-worker`（`00000000-0000-0000-0000-0000000000a1`），由 `runResumeSchedulerOnce`（`run-executor.ts`）下次 tick 调 `declineToolCall(reason='expired')` 并经 `consumeAgentStream` 真实消费 resume stream 收尾 Run；**不再**经过 `stopped + APPROVAL_EXPIRED` 路径。
+- 跨重启 Run 恢复（Mastra `listSuspendedRuns` + `approveToolCall` / `declineToolCall` / `resumeStream`） —— **PR-3.3 已接入对应 SDK 调用路径**（`runReconcileIndeterminateOnce` + W2 reconciliation + `consumeAgentStream` 公共消费）；本机真实 Mastra Core 1.61.0 + DeepSeek 的 approve / decline / timeout 三条 HTTP/SSE 基础路径及 pending 后重启再 approve 已有验证记录，**完整容灾与多实例真实 SDK e2e 尚未验证**。
+
+### PR-3.2（已落地策略评估与可用工具过滤；审批运行时仍未接入）—— Tool Policy Evaluator + Policy-aware Tool Resolver
 
 **Files**
-- Modify: `backend/src/core/runtime/tool-executor.ts`（注入 `workspaceId` 与 `userId`）
-- Create: `backend/src/modules/tool-policy/evaluator.ts`
+- Create: `backend/src/modules/tool-policy/evaluator.ts`（单 Tool 三态决策）
+- Create: `backend/src/modules/tool-policy/resolver.ts`（多 Tool 过滤；`createDefaultResolverContext()` 装配 Tool 注册表 + tool_policy_rules repository）
+- Modify: `backend/src/core/agent/runtime.ts`（activeTools 计算从 `resolveToolIds(...,undefined)` 升级为 `resolveAllowedToolIdsForRuntime(...)`；新增 `_setPolicyResolverForTesting` 测试钩子；**不**向 `agent.stream()` 传入 `requireToolApproval`）
+- Create: `backend/tests/unit/tool-policy-evaluator.ts`
+- Create: `backend/tests/unit/tool-policy-resolver.ts`
+- Create: `backend/tests/unit/tool-policy-runtime-filtering.ts`
+- Modify: `backend/tests/unit/dynamic-tool-resolution.ts`（注入 stub resolver 维持 calculator / get-current-time 既有 C2 合约）
 
-**测试**：destructive / openWorld / requiresRuntime 三类 Tool 的策略路径。
+**架构**
+- `evaluator(ctx, { workspaceId, toolId })` 返回三态决策：
+   - `forbidden`：Tool 未在服务端注册表 / `requiresRuntime=true` / `openWorld` 缺策略或显式 deny / `deny` 覆盖低风险；
+   - `requires-approval`：`destructive=true` 永远走此态（即便 DB 显式 allow 也不降级）；`openWorld` + `require_approval` / 低风险 + `require_approval`；
+   - `allowed`：`destructive=false && openWorld=false && requiresRuntime=false` 的 Tool 在显式 allow 或无策略时（仅本地只读走 fail-open）。
+- 信任模型：仅服务端 ToolDefinition 元数据与 DB `tool_policy_rules`；**不**信任 Tool execute 入口或 Mastra 工具调用中任何"自报字段"（架构-v2 §0 明确 metadata 仅 UI 提示）。
+- `resolver(workspaceId, toolIds, ctx)` 仅返回 `allowed` 子集；输入顺序保留，便于 SSE / 审计对账。
+- `runtime.ts` 通过 `resolveAllowedToolIdsForRuntime` 调用 resolver（默认走真实 `createDefaultResolverContext()`，测试可通过 `_setPolicyResolverForTesting` 注入 stub）；本阶段**不**把 `requireToolApproval` 传入 `agent.stream()`——避免产生无 API 可处理的挂起 Run。
+- **不**修改 `backend/src/core/runtime/tool-executor.ts`（该文件不存在；本 PR 不创建脱离真实链路的平行执行器，per-request Agent 的 inline tools 仍走现有 `resolveTools(activeToolIds)` 路径兼容上层调用方）。
+- **不**修改 calculator / get-current-time / _template 的现有 ToolDefinition；不新增演示性高风险 Tool。
 
-### PR-3.3（仍未开始）—— 审批 UI + 续 Run
+**验收（本 PR 自身；不勾阶段 3 总体验收）**
+- [x] `evaluator.ts` 实现 7 类决策（未注册 / requiresRuntime / destructive / openWorld×3 / deny / 低风险×3）；`tool-policy-evaluator.ts` 覆盖全部 7 类。
+- [x] `resolver.ts` 仅 `allowed` 入列，保留输入顺序；`tool-policy-resolver.ts` 覆盖允许 / 拒绝 / 未注册 / 空输入 / 显式策略四类。
+- [x] `runtime.ts` 接入 resolver；`tool-policy-runtime-filtering.ts` 验证 forbidden / requires-approval Tool 不进 activeTools、allowed Tool 进；capabilities.tools=false 路径 activeTools 字段不出现。
+- [x] `backend npm run typecheck` + `npm run test:unit` 通过；现有 dynamic-tool-resolution / stream-agent-identity-mapping / sweeper-transactional 等 fixture 维持原合约。
+- [ ] **PR-3.2 完成时的历史验收快照**：PR-3.3（审批 UI + 续 Run + Mastra `requireToolApproval` 接入）/ 阶段 3 总体验收在 PR-3.2 完成时仍未开始；总勾选框（Tool 网关、跨 workspace 404、超时、跨重启 Run 恢复）维持空。**这些后续已被 PR-3.3 全部覆盖**：Tool 网关（`tool-approval-gateway.ts` + `requireToolApproval` 包装层）、跨 workspace 404、超时（DB-only + scheduler `declineToolCall(reason='expired')` + `consumeAgentStream` 收尾）、跨重启 Run 恢复（`runReconcileIndeterminateOnce` + W2 reconciliation）均已落地并通过真实 PostgreSQL 集成测试 107 passed, 0 failed；当前真实状态见下方 Phase 3.3 阶段 3 验收勾选框。
+
+**PR-3.2 完成时的历史未验证项（已由后续 PR 覆盖，仅供历史追溯）**
+- `tool_policy_rules` 在真实 PG 上的查询计划（unit 仅做 fake-context 合约断言） —— PR-3.3 起 `tests/integration/tool-policy-pg.ts` 在真实 PostgreSQL 上覆盖 resolver / evaluator 路径。
+- `evaluator` 与真实 repository 的端到端 SQL 行为（`require_approval` Tool 在 PR-3.3 接入 Mastra `requireToolApproval` 后才能实测） —— **已由 PR-3.3 实测**：`runtime.ts` 经 Tool Gateway 包装层注入 `requireToolApproval` + 真实 PG 集成测试覆盖 `requires-approval` Tool 入列与 SDK 挂起路径。
+- Tool Gateway 完整接入（PR-3.2 范围之外的"具体 Tool execute 前再校验策略"路径） —— **已由 PR-3.3 落地**：`core/agent/tool-approval-gateway.ts` + `requireToolApproval` 包装层在 Tool execute 前完成策略二次校验与审批 row 写入。
+- 审批 API / 审批 UI / SSE `approval-requested` / `approval-resolved` 路径（PR-3.3） —— **已由 PR-3.3 落地**（`/v1/approvals` HTTP API + `ApprovalCard` + `useApprovals` + SSE 事件订阅）；当前唯一未验证的是真实浏览器 + 真实后端 + 真实 SSE 的端到端联调（属 PR-3.3 staging e2e 而非功能未实现）。
+- 超时 worker（`tool_approval_requests.expires_at < now()` → `stopped + APPROVAL_EXPIRED`） —— **已被 PR-3.3 替代**：timeout worker 现仅 DB-only 写 `status='expired'` + `resolver_id=system-approval-worker`（`00000000-0000-0000-0000-0000000000a1`），由 `runResumeSchedulerOnce`（`run-executor.ts`）下次 tick 调 `declineToolCall(reason='expired')` 并经 `consumeAgentStream` 真实消费 resume stream 收尾 Run；**不再**经过 `stopped + APPROVAL_EXPIRED` 路径。
+- 跨重启 Run 恢复（Mastra `listSuspendedRuns` + `approveToolCall` / `declineToolCall` / `resumeStream`） —— **PR-3.3 已接入对应 SDK 调用路径**（`runReconcileIndeterminateOnce` + W2 reconciliation + `consumeAgentStream` 公共消费）；本机真实 Mastra Core 1.61.0 + DeepSeek 的 approve / decline / timeout 三条 HTTP/SSE 基础路径及 pending 后重启再 approve 已有验证记录，**完整容灾与多实例真实 SDK e2e 尚未验证**。
+
+### PR-3.3（已落地）—— 审批 UI + 续 Run + Mastra 审批运行时接入
 
 **Files**
-- Create: `frontend/src/features/tool-approvals/`
-- Modify: 前端 `AssistantChatWorkspace`（订阅 `awaiting_approval` 状态 → 渲染审批面板）
+- Create: `backend/src/modules/tool-policy/mastra-facade.ts`（production path 的 Mastra 客户端懒加载 + 工作区注入）
+- Create: `backend/src/modules/tool-policy/timeout-worker.ts`（15 秒周期 + 启动一次 reconcile；**DB-only**，不调 SDK）
+- Create: `backend/src/server/routes/approvals.ts`（`/v1/approvals` + `/v1/approvals/:id` + `/v1/approvals/:id/resolve`；**HTTP 层不调 SDK**）
+- Modify: `backend/src/modules/tool-policy/state-machine.ts`（`expireApproval` / `reconcileInflightApprovals` + DB-only 决策登记；**state-machine 不调 SDK、不消费 stream**）
+- Modify: `backend/src/modules/tool-policy/repository.ts`（`getAgentIdByRun` + workspace 隔离 + `listApprovalsPendingReconcile` 含 `resolver_error` 人工介入过滤）
+- Modify: `backend/src/core/agent/runtime.ts`（Tool Gateway 注入 `workspaceId` + `requireToolApproval` + `consumeAgentStream` 公共消费）
+- Modify: `backend/src/core/execution/run-executor.ts`（`runResumeSchedulerOnce` + `runReconcileIndeterminateOnce`；**唯一 SDK 调用方 + 唯一 stream 消费方**；W2 exhausted 分支同事务写 approval + Run + messages + run-failed 事件）
+- Modify: `backend/src/server/bootstrap.ts`（注册 approval routes + 安装 production facade + 启动 timeout worker）
+- Create: `frontend/src/types/approval.ts` + `frontend/src/features/chat/useApprovals.ts` + `frontend/src/features/chat/components/ApprovalCard.tsx`
+- Modify: `frontend/src/lib/api.ts`（`listApprovals` / `getApproval` / `resolveApproval`）
+- Modify: `frontend/src/features/chat/components/AssistantChatWorkspace.tsx`（composer 之上渲染 `ApprovalCard`）
+- Modify: `frontend/src/app/App.tsx`（`useApprovals` 与现有 run-stream SSE 共线）
+
+**核心闭环（职责严格分层）**：
+- `requireToolApproval` 经 Tool Gateway 注入 `agent.stream()`：只有 policy 决策为 `requires-approval` 的 Tool 调用会触发 Mastra 挂起；其它走原有路径。
+- 高风险 Tool execute 前：Mastra 调用 Tool Gateway 包装层 → 写 `tool_approval_requests(status='pending')` + `agent_run_events(type='approval-requested')` + Mastra SDK 通知前端 SSE → 返回挂起。
+- 用户在 `/v1/approvals/:id/resolve` POST approve|decline → HTTP handler **只**做 auth / workspace / decision 校验 + 调 `state-machine.resolveApproval`；`resolveApproval` 仅写 DB（`status='approved'` / `'declined'` + `resolver_id` + `resolved_at`），**不**调 Mastra SDK、**不**消费 stream。
+- Run Executor scheduler `runResumeSchedulerOnce` 通过 `listApprovalsPendingResume`（扫描 `('approved'|'declined'|'expired') AND mastra_resume_started_at IS NULL`）抢占 → 原子事务推 Run → 'running' + INSERT `run-resumed` 事件 + 写 `mastra_resume_started_at` → 调 `facade.approveToolCall` / `declineToolCall` 拿 `AsyncIterable<unknown>` → `consumeAgentStream` 真实消费 resume stream（首次 Run 与 resume 共享同一消费路径）→ 推 Run 终态 + 写 message checkpoint + SSE 事件。
+- 超时：timeout worker 每 15 秒扫 `expires_at < now()` 的 pending 行 → `state-machine.expireApproval` **DB-only** 写 `status='expired'` + `resolver_id=system-approval-worker`（**不**调 SDK、不消费 stream）；scheduler 在下个 tick 通过 `listApprovalsPendingResume` 拾起 `status='expired'` 行 → 调 `declineToolCall(reason='expired')` 收尾 Run。
+- 跨重启 + 周期 reconcile：`runReconcileIndeterminateOnce` 扫 `('approved_resume_indeterminate') AND lease_expires_at < now() AND resume_attempts < MAX AND resolver_error NOT LIKE 'APPROVAL_RECONCILE_MANUAL_INTERVENTION_%'`；调 `facade.listSuspendedRuns` fail-closed 校验 `runId`/`toolCallId`/`workspaceId`/`threadId`/`resourceId`/`agentId`；校验通过 → DB-only `revertApprovalForReconcile`（`status='approved'` + 清 `mastra_resume_started_at`），scheduler 自然接管；校验失败 / attempts 耗尽 → fail-closed 写人工介入错误 + Run → failed。
+- 不变性：`tool_approval_requests` 仅存脱敏摘要 + SHA-256 hash；恢复键 `(run_id, tool_call_id)`（无 `suspension_id` 字段）；DB 与 Mastra Storage 不在同事务，依赖 saga + lease 单飞 + timeout/reconcile 收敛。
+- API：`GET /v1/approvals`（workspace 内全部）、`GET /v1/approvals/:id`（workspace + UUID 校验）、`POST /v1/approvals/:id/resolve`（approve|decline → 409 区分 `APPROVAL_ALREADY_RESOLVED` / `APPROVAL_INFLIGHT`）。
+- 前端：`useApprovals` hook 拉列表 + 订阅 SSE `approval-requested` / `approval-resolved`；`ApprovalCard` 渲染 tool 名 / 状态徽标 / 脱敏摘要 / 倒计时 / Approve+Decline 按钮；`AssistantChatWorkspace` 在 composer 之上挂 `pendingApprovals` 列表。
+
+**测试**（**真实 PostgreSQL + FakeAgentFacade / fake stream（涉及 Mastra resume SDK/stream 边界的 PG 集成测试）** —— **完整容灾与多实例真实 SDK e2e 尚未验证**）：
+- `backend/tests/unit/tool-policy-schema.ts` + `tool-policy-repository.ts`（schema / FK / UNIQUE / partial 索引 / workspace 隔离 / 原子 resolve；既有）
+- `backend/tests/unit/tool-policy-evaluator.ts` + `tool-policy-resolver.ts`（策略三态决策 + activeTools 过滤；既有）
+- `backend/tests/unit/dynamic-tool-resolution.ts`（run-time workspaceId 注入；既有）
+- `backend/tests/unit/tool-policy-runtime-filtering.ts`（gateway 注入 + Mastra SDK 路径；既有）
+- `backend/tests/unit/approvals-route.ts`（路由 UUID 校验 + `rowToView` 映射 + 输入校验 + 当前 `resolveApproval` union 收窄；既有）
+- `backend/tests/unit/tool-policy-timeout.ts`（`expireApproval` + `reconcileInflightApprovals` + 当前 DB-only outcome；既有）
+- `backend/tests/unit/tool-policy-state-machine.ts`（DB-only `resolveApproval` / `expireApproval` + lease / 终态语义；既有）
+- `backend/tests/integration/tool-policy-pg.ts`（**PR-3.3 Replay Fix W2 + Replay Fix attempts-exhausted** —— 真实 PG + FakeAgentFacade / fake stream：(a) waiting_approval 保留 / (b) approve resume stream 消费 → Run → completed / (c) decline / (c-2) expire system-approval-worker / (d) **W2 approve SDK 失败 → approval → `approved_resume_indeterminate` + Run → `waiting_approval` + reconciler 校验通过 revert 让 scheduler 重新接管** / (e) scheduler 原子事务单飞（Run 已不 `waiting_approval` 时跳过） / (f) `listSuspendedRuns` fail-closed（缺 workspaceId/agentId/threadId/resourceId 抛错） / (g) 跨重启 / (h) **3 次 W2 失败 → attempts 耗尽 → `APPROVAL_RECONCILE_MANUAL_INTERVENTION_ATTEMPTS_EXHAUSTED` + Run → failed + 后续多次 tick 不再调 SDK / `listSuspendedRuns`** / (x) `created_by` NULL → 拒绝；**107 passed, 0 failed**）。
+- `backend/tests/integration/approval-reconcile-safety.ts`（**PR-3.3.2 reconcile safety —— 已 Codex 实跑通过** —— 真实 PG + FakeAgentFacade）：lease fencing（worker-A claim 后 worker-B 因 `lease_contended` 被拒）/ reconciler backoff（lease 未到期时不被扫到）/ **未注册或非幂等 Tool（`metadata.idempotent !== true`）进入人工介入、不调 SDK、不查 `listSuspendedRuns`** / 原子回滚（`messages` 触发器注入失败 → approval 人工介入标记 + Run → waiting_approval 全量回滚）/ 终态手工介入行永久退出 reconciler 扫描集。
+- `backend/tests/integration/executor-terminal-lease-fence.ts`（**PR-3.3.2 terminal lease fence —— 已 Codex 实跑通过** —— 真实 PG + 真实 `runResumeSchedulerOnce` + 注入 deferred `AsyncIterable` 的 FakeAgentFacade）：覆盖 `done` / `stopped` / `error` 三场景独立 seed，每个场景在 stream 落地前手动 UPDATE `lease_owner` 为外部 owner，验证 `completeRun / stopRun / failRun` 的 `lease_owner = WORKER_ID` fence 阻断对应终态写入——`agent_runs.status` NOT in 终态、`messages.status` NOT in 终态、`agent_run_events` 无对应 `run-completed / run-stopped / run-failed`、`approveToolCall` 仍只调用 1 次；三场景均断言对应 `XxxRun 跳过：Run 已终态或当前 worker 已丢失 lease` 日志路径。
+- `backend/tests/integration/multi-process-resume.ts` + `multi-process-resume-child.ts`（**PR-3.3.2 multi-process resume —— 已 Codex 实跑通过（9 passed, 0 failed）** —— `fork` 两个独立 Node 子进程 + IPC 同步屏障 + 共享 schema + `sdk_call_log` 跨进程计数器）：`approveToolCall` 总计只调用 1 次、`run-resumed` 事件只写 1 条、Run 收敛到 `completed`、`messages.content` 由赢者 child 写入一次正确结果、子进程 `exit 0`。**Codex 2026-09-07 第一次 review 触发的关键修复**：seed `approved` approval 时填合法 `resolver_id = seedUserId`、全 schema 生命周期 try/finally、watchdog 仅在两 child 都结束后清除、子进程轮询到达截止必须 `exit(3)`、fork .ts 用显式 tsx loader（Windows ESM `--import` 必须 file URL，经 `pathToFileURL` 包装）、ready 前 early-exit 兜底、不打印 DATABASE_URL。**测试使用 FakeAgentFacade，验证 worker 抢占层 + SDK 边界协议；不能被引用为"多实例生产并发 SDK 已验证"。**
+- `backend/tests/integration/hard-crash-lease-recovery.ts`（**PR-3.3.2.1 W4 hard-crash sweeper —— 已 Codex 实跑通过（32 passed, 0 failed）** —— 真实 PG + 直接调生产 `runHardCrashApprovalResumeSweeperOnce` 入口）：覆盖 7 项验收：(a) approved + 幂等 Tool → `approved_resume_indeterminate` + Run → `waiting_approval` + 写 `run-resume-reclaimed` 事件；(b) approved + 非幂等 Tool → 人工介入 + Run → `failed` + `APPROVAL_RESUME_RECLAIMED_MANUAL_INTERVENTION_REQUIRED`；(c) attempts 耗尽 → 人工介入 + Run → `failed` + `APPROVAL_RESUME_RECLAIMED_ATTEMPTS_EXHAUSTED`；(d) 普通 running Run 仍走 `LEASE_EXPIRED`；(e) 两个 sweeper 并发 SKIP LOCKED 单飞；(f) 终态后不存在 `approved + started_at NOT NULL + failed LEASE_EXPIRED` 孤儿组合；(g) **跨实例并发**：hard-crash sweeper 与普通 `sweepExpiredLeases` 真并行（`Promise.all`）时，approval-resume Run **不**变 `failed + LEASE_EXPIRED`，依赖普通 sweeper 的 SQL `NOT EXISTS` 排除。
+
+**文档同步**：
+- `README.md`：`Tool Approval` 章节（用户视角）
+- `docs/architecture.md`：阶段 3.3 / PR-3.3 状态 + 工具元数据真实定位节更新
+- `docs/architecture-v2.md`：`approval_request_id` 决策 + `waiting_approval` 释放执行 Lease + Approval resolve 必须调 Mastra approve/decline
+- `docs/implementation-plan.md`：本节 + 总体验收勾选
 
 ### 阶段 3 验收（映射 V2 §7.4）
 
-- [ ] PR-3.0 完成
-- [ ] Tool 网关不依赖 `metadata` 自报字段
-- [ ] 审批超时自动 reject + Run 进入 `stopped` + `error_code='APPROVAL_EXPIRED'`（V2.3 裁决；不再归类 failed）
-- [ ] 跨 workspace Tool 调用一律 404
-- [ ] 跨重启 Run 恢复：Mastra `listSuspendedRuns` + `approveToolCall` / `declineToolCall` / `resumeStream` 路径打通；审批状态落 `tool_approval_requests` 表，SSE `approval-requested` 事件可续
+- [x] PR-3.0 完成（`@mastra/pg` PostgresStore + runId/thread/resource 透传；跨重启真实 PG 端到端验证仅覆盖 inflight Run reconcile + suspended list，未覆盖完整 approval resume 链路）
+- [x] Tool 网关不依赖 `metadata` 自报字段（PR-3.2 已把风险输入集中到 `tool_policy_rules`；PR-3.3 通过 Tool Gateway 包装层 + `requireToolApproval` 走 Mastra 审批流，不再依赖 Tool 自报授权）
+- [x] **审批超时自动 reject + Run 由 scheduler 收尾**：`timeout-worker.ts` 每 15 秒扫 `expires_at < now()` 的 pending 行 → `state-machine.expireApproval` 严格 DB-only 写 `status='expired'` + `resolver_id=system-approval-worker`（**不**调 SDK）；scheduler 在下个 tick 通过 `listApprovalsPendingResume` 拾起 `status='expired'` 行 → 调 `facade.declineToolCall(reason='expired')` → `consumeAgentStream` 真实消费 resume stream 推 Run 到 completed（fake stream 给 done）
+- [x] 跨 workspace Tool 调用一律 404（PR-3.1 + PR-3.3 共享：Tool Gateway 走 workspace 隔离 + `tool_approval_requests` 走复合外键 `(run_id, workspace_id) → agent_runs(id, workspace_id)`；`resolveApprovalRequest` 强制带 `workspace_id` 过滤）
+- [x] 跨重启 Run 恢复：`runReconcileIndeterminateOnce`（`run-executor.ts`）扫 `('approved_resume_indeterminate') AND lease_expires_at < now() AND resume_attempts < MAX AND resolver_error NOT LIKE 'APPROVAL_RECONCILE_MANUAL_INTERVENTION_%'` 的行；先校验 `getToolDefinition(approval.toolId).metadata.idempotent === true`（**非幂等/未注册 Tool 直接 fail-closed 写人工介入 + Run → failed，不查 SDK**），按 `listSuspendedRuns` fail-closed 严格校验 → revert（→ `approved`）/ 校验失败 / 耗尽（→ `failed` + 人工介入错误）；timeout worker 启动期先调一次 `reconcileInflightApprovals`
+- [x] **执行器终态 lease fencing**（`run-executor.ts`）：`completeRun / stopRun / failRun` 终态 UPDATE 均带 `WHERE lease_owner = WORKER_ID` fence——迟到 worker 在 lease 被替换后无法覆盖 `agent_runs.status` 终态、`messages.status` 终态或 `agent_run_events.run-completed / run-stopped / run-failed` 事件。生产路径测试：`backend/tests/integration/executor-terminal-lease-fence.ts`（`RUN_PG_TOOL_POLICY=1 RUN_PG_LEASE_FENCE=1`，**已 Codex 实跑通过，`done / stopped / error` 三场景独立 seed 均通过**）。
+- [x] **多进程 resume SDK 单飞**（`run-executor.ts::resumeAwaitingRunsOnce`）：两个独立 Node 子进程并发接管同一 approval 时，原子 `UPDATE tool_approval_requests SET mastra_resume_started_at = now() WHERE id = $1 AND mastra_resume_started_at IS NULL RETURNING ...` 保证 `approveToolCall` 在跨进程维度只调用 1 次。多进程生产路径测试：`backend/tests/integration/multi-process-resume.ts` + `multi-process-resume-child.ts`（`RUN_PG_MULTI_PROCESS=1`，**已 Codex 实跑通过（9 passed, 0 failed）**）。**注意：本测试使用 FakeAgentFacade，验证的是 worker 抢占层 + SDK 边界协议，不能被引用为"多实例生产并发 SDK 已验证"。**
+- [x] **W4 hard-crash 恢复**（PR-3.3.2.1，`backend/src/core/execution/approval-resume-recovery.ts::sweepExpiredApprovalResumeLeases`）：识别"approval 已写 `mastra_resume_started_at` + Run 持 lease 但 worker 进程被直接杀死"的孤儿现场；按 Tool 元数据 + approval 状态分流（幂等 Tool 转 `approved_resume_indeterminate` + Run → `waiting_approval`；非幂等 / 未注册 Tool 人工介入 + Run → `failed`；declined / expired 硬崩溃 `fail-closed` 不重放）；`SELECT ... FOR UPDATE SKIP LOCKED` 多 sweeper 并发单飞；在普通 `sweepExpiredLeases` **之前**执行。生产路径测试：`backend/tests/integration/hard-crash-lease-recovery.ts`（`RUN_PG_HARD_CRASH_LEASE=1`，**已 Codex 实跑通过（32 passed, 0 failed）**）。
+
+### PR-3.3 Replay Fix（已落地 fake-stream e2e，未做真 SDK e2e）
+
+**根因**：旧版本 `runApprovalSagas` 收 approve/decline 后调 `streamAgent(prompt)` 重发模型请求——既不是真实 resume，也不是 Mastra 1.61 公开 API。
+
+**修法**：
+- **职责严格分层**：`/v1/approvals` HTTP 层 / `state-machine.resolveApproval` / `expireApproval` / `reconcileInflightApprovals` / `timeout-worker` **全部 DB-only**——只做身份校验、workspace 隔离、审批决策、超时登记、数据库状态收敛；**不**调 Mastra SDK、**不**消费 stream、不写 Run 终态。`run-executor.ts::runResumeSchedulerOnce` + `runReconcileIndeterminateOnce` 是**唯一** SDK 调用与 stream 消费方。
+- `core/agent/runtime.ts` 抽取 `consumeAgentStream(execution, stream)` 公共能力；首次 Run（`agent.stream().fullStream`）与 resume（`agent.approveToolCall()` / `declineToolCall()` 返回的 `AsyncIterable<unknown>`）共用；
+- `core/execution/run-executor.ts::runResumeSchedulerOnce` 不再调 `streamAgent(prompt)`，改为：扫描 `listApprovalsPendingResume` → 原子推 Run → 'running' + INSERT `run-resumed` 事件 + 写 `mastra_resume_started_at`（同事务）→ `facade.approveToolCall()` / `declineToolCall()` → `consumeAgentStream` 真实消费 resume stream → 推 Run 终态；
+- **W2 approve SDK 抛错 reconciliation**：写入 `approved_resume_indeterminate` + `resume_attempts += 1` + `resolver_error='APPROVE_SDK_INDETERMINATE: …'` + Run 推回 `waiting_approval`（**保留** `mastra_resume_started_at` 阻止 scheduler 立即重扫）；等 lease 到期后由 `runReconcileIndeterminateOnce` 调 `listSuspendedRuns` fail-closed 严格校验 `runId`/`toolCallId`/`workspaceId`/`threadId`/`resourceId`/`agentId`；校验通过 → DB-only `revertApprovalForReconcile`（`status='approved'` + 清 `mastra_resume_started_at`），scheduler 自然接管；校验失败 / `resume_attempts >= MAX_RESUME_ATTEMPTS=3` → fail-closed：保留 `approved_resume_indeterminate` + 保留 `mastra_resume_started_at` + 覆盖 `resolver_error` 为 `APPROVAL_RECONCILE_MANUAL_INTERVENTION_REQUIRED: …` 或 `APPROVAL_RECONCILE_MANUAL_INTERVENTION_ATTEMPTS_EXHAUSTED: …`；Run → `failed` + 相应 `error_code` + 写 `run-failed` 事件 + `messages.status='failed'`（同事务）。**这些人工介入记录永久退出自动 reconciler 扫描集**（`resume_attempts >= MAX` + `resolver_error NOT LIKE 'APPROVAL_RECONCILE_MANUAL_INTERVENTION_%'` 双重防护）——避免重复 SDK / `listSuspendedRuns` 调用与日志噪声；approval 行、`mastra_resume_started_at`、人工介入错误信息全部留保留供检索。
+- `core/execution/run-executor.ts` 导出 `runResumeSchedulerOnce()` / `runReconcileIndeterminateOnce()` 测试入口；
+- `tool-policy/state-machine.ts::MastraAgentFacade` 类型改为 `approveToolCall/declineToolCall: (...) => Promise<AsyncIterable<unknown>>`、`listSuspendedRuns: (...) => Promise<SuspendedRunSnapshot[]>`；`listSuspendedRuns` 在 Agent 实例上调用（`agent.listSuspendedRuns({threadId, resourceId, workspaceId, agentId})`），`validateSuspendedRunsSnapshot` 严格校验 `runId/toolCallId/threadId/resourceId`，缺一即 fail-closed 抛错；state-machine 不再有"general-chat 兜底"；
+- `database/init.sql` 保持 `requester_id UUID NOT NULL REFERENCES app_users(id)` 与 `resolver_id UUID NOT NULL REFERENCES app_users(id)`；system-initiated 路径走预设 `system-approval-worker` 平台用户 UUID `00000000-0000-0000-0000-0000000000a1`（init.sql 阶段 3.3 段 INSERT 一行 `app_users(username='system-approval-worker')` 支撑）；`repository.createApprovalRequest` 强制 `requesterId` 非空，`agent_runs.created_by` NULL 时拒绝创建；`takeoverInflightLease` 同步写 `mastra_resume_started_at`（避免 takeover 后被 scheduler 再次调度）。
+- `server/routes/approvals.ts` HTTP handler **不**再持有 Mastra stream 句柄，**不**调 SDK；`resolveApprovalHandler` 仅做当前 `ResolveApprovalOutcome` (`approved` / `declined` / `not_found` / `already_resolved` / `lease_contended`) 收窄映射，**不**伪造 `sdk_failed` / `lease_lost_during_sdk` 分支。
+
+**验证（2026-09-04）**：
+- `cd backend && npm run typecheck`：通过；
+- `cd backend && npm run test:unit`：全部通过；
+- `cd backend && RUN_PG_TOOL_POLICY=1 npx tsx tests/integration/tool-policy-pg.ts`：**107 passed, 0 failed**；
+- `cd frontend && npm run build`：成功（保留既有 chunk-size warning 与 ineffective dynamic import）；
+- `git diff --check`：无非空白冲突。
+
+**未验证边界 / Codex 复查点（PR-3.3 staging e2e 待办，非 Phase 4）**：
+- 涉及 Mastra resume SDK/stream 边界的 PG 集成测试（`tool-policy-pg.ts` / `multi-process-resume.ts` / `executor-terminal-lease-fence.ts` / `approval-reconcile-safety.ts`）使用 `FakeAgentFacade` / fake stream；`hard-crash-lease-recovery.ts` 直接验证生产 sweeper 的 PostgreSQL 状态收敛（不依赖 facade）。本机真实 Mastra Core 1.61.0 + DeepSeek 的 approve / decline / timeout 三条 HTTP/SSE 基础路径及 pending 后重启再 approve 已有验证记录；建议在 staging 环境以真 SDK + 当前配置的真实 Provider（本机为 DeepSeek）再跑 (a)~(h)；
+- `listSuspendedRuns` 在真实 Mastra 返回结构上**尚未**实测（fake 仅在 threadId=`convH.id` 时返回一条匹配快照，`fail-closed` 抛错分支已覆盖）；
+- `consumeResumeStream` 的 W2 / W2' / W3 crash window 兜底逻辑已实现并有 fake 失败用例覆盖；W4 hard-crash（worker 进程被直接杀死，JavaScript catch 不执行）由新加的 `sweepExpiredApprovalResumeLeases`（PR-3.3.2.1）按 Tool 元数据分流恢复——`hard-crash-lease-recovery.ts` **已 Codex 实跑通过（32 passed, 0 failed）**；生产端 SDK 异常的具体形态（network error / rate limit / partial response）未做容灾演练；
+- **多进程真实 SDK 并发未实测**：`multi-process-resume.ts` **已 Codex 实跑通过（9 passed, 0 failed）**——验证的是 facade 层跨进程资源抢占（原子 `UPDATE ... WHERE mastra_resume_started_at IS NULL` 兜底 + IPC 同步屏障 + 共享 `sdk_call_log` 介质），facade 仍是 fake。多实例生产部署下真实 Mastra SDK 并发去重、SSE 跨实例扇出、PostgresStore lock 行为**仍**未在本 PR 验收——属 PR-3.3 staging e2e 待办。**本测试不能被引用为"多实例生产并发 SDK 已验证"。**
+- 执行器终态 lease fencing（`executor-terminal-lease-fence.ts`，覆盖 `done / stopped / error` 三场景独立 seed）**已 Codex 实跑通过**；真实 SDK stream 落地下迟到 worker 的终态写入行为**未**实测，属 PR-3.3 staging e2e 待办。
+- W2 reconciliation 的非幂等 / 未注册 Tool 校验已用真实 PG + FakeAgentFacade 验证（`approval-reconcile-safety.ts` **已 Codex 实跑通过**）；真实 SDK `listSuspendedRuns` 在不同返回结构下的 fail-closed 行为**未**实测。
+- `system-approval-worker` 平台用户 UUID 在 init.sql 里硬编码；DB init flow 假定 `app_users` 表已 seed；后续如做多环境 provisioning 应抽到 seed script。
+
+### PR-3.3.1（已实现 staging e2e harness，**尚未实际执行**）—— 真实 Mastra SDK + 真实模型 + 真实 HTTP/SSE 验收基建
+
+**Files**
+- Create: `backend/src/tools/staging-approval-probe/tool.ts`（零副作用、幂等、`destructive=true` 的 staging-only Tool；`tools/index.ts` 守卫：仅 `ENABLE_STAGING_APPROVAL_PROBE=true` 且 `DEPLOYMENT_PROFILE !== 'production'` 才注册；production 下抛错拒绝启动）
+- Create: `backend/src/agents/staging-approval-probe/agent.ts`（专用 e2e Agent；指令**强制**每次 user message 先调一次 `staging-approval-probe`，不得混用 general-chat；`agents/index.ts` 守卫同上）
+- Modify: `backend/src/core/agent/runtime.ts`（导出 `resolveApprovalTtlMs()`：默认 `5 * 60_000` ms；仅在 staging 开关 + 非 production 下，`STAGING_APPROVAL_E2E_APPROVAL_TTL_MS` 可覆盖，且严格校验 `1000–300000`）
+- Create: `backend/src/scripts/staging-tool-approval-e2e.ts`（staging e2e 脚本：仅 HTTP + SSE；env 守卫；健康检查；`/agents` `/tools` 校验专用 Agent + Probe 已注册；三条场景 approve / decline / timeout；stdout 输出脱敏报告）
+- Create: `docs/runbooks/staging-tool-approval-e2e.md`（前置条件 + env + 三条场景期望 + 失败证据 + 清理边界 + 已知限制）
+
+**安全边界**：
+- Probe / Agent 默认**不**注册，**不**暴露到 `/agents` 或 `/tools`；
+- production 启动被 `tools/index.ts` 与 `agents/index.ts` 双门拒绝（即便设了 `ENABLE_STAGING_APPROVAL_PROBE=true`）；
+- TTL 环境变量仅在 staging 开关 + 非 production 下生效，**绝不**影响生产 5 分钟默认；
+- 脚本拒绝打印 password / token / `DATABASE_URL` / 模型密钥；
+- 脚本只通过 HTTP API + SSE 验证；**不**直接调 state-machine / repository / run-executor / facade；
+- 脚本**不** DROP / TRUNCATE / RESET DB；只清理本轮 conversation；**不**删既有用户。
+
+**三条场景执行逻辑**：
+- **approve**：登录 → 创建 conversation（agentId=`staging-approval-probe`）→ POST message → SSE 订阅到 `approval-requested` → `POST /v1/approvals/:id/resolve {decision:'approve'}` → SSE 订阅到 `run-completed`；期望 Run `completed`。
+- **decline**：同上到 `approval-requested`，改 `decision:'decline'`，期望 Run `failed` 或 `completed`（resume 流语义决定）+ approval `declined`。
+- **timeout**：必设 `STAGING_APPROVAL_E2E_APPROVAL_TTL_MS`（1000–300000）；等到 `approval-requested` 后**不** resolve，等 TTL 到期 → timeout worker（15s tick）调 `expireApproval`（resolver_id=system-approval-worker）→ resume scheduler（1s tick）调 `declineToolCall(reason='expired')` → 消费 resume stream → Run 进 `failed`/`completed`；期望 approval `expired` 且 resolver_id 为 system-approval-worker。
+
+**未覆盖边界（明确告诉 Codex 不在 PR-3.3.1 范围）**：
+- W2 approve SDK 抛错人为注入；
+- 多 backend 实例并发抢占；
+- 进程重启 / `recoverSuspendedRunsOnce`；
+- 浏览器 UI（`ApprovalCard` 渲染 / `useApprovals` 事件订阅）；
+- Provider 网络错误的容灾演练；
+- 真实业务副作用（Probe 零副作用、Agent 不允许业务 Skill / KB）；
+
+**Codex 在 staging 执行的验证命令**（脚本本身**不**自动运行）：
+```
+# 1) 启 staging 后端（一次性）
+DEPLOYMENT_PROFILE=demo ENABLE_STAGING_APPROVAL_PROBE=true npm run start
+
+# 2) 三场景 e2e
+cd backend
+RUN_STAGING_TOOL_APPROVAL_E2E=1 \
+STAGING_E2E_BASE_URL=https://staging.xuanshu.example \
+STAGING_E2E_USERNAME=staging-e2e-probe \
+STAGING_E2E_PASSWORD='<staging_password>' \
+STAGING_APPROVAL_E2E_APPROVAL_TTL_MS=30000 \
+npx tsx src/scripts/staging-tool-approval-e2e.ts
+```
+
+**状态更新（2026-09-04）**：本机真实 PG + Mastra 1.61 + DeepSeek 的三条基础链路及 pending 后进程重启批准已实测。此前“仅 fake”的表述是旧验收基线；故障矩阵和多实例仍待验证。见 [Codex 实测记录](runbooks/2026-09-04-approval-verification.md)。
 
 ---
 

@@ -2,7 +2,7 @@ import type { Citation } from '../../modules/citations/types.js';
 import type { Message } from '../../modules/conversations/types.js';
 import { getKnowledgeBase } from '../../modules/knowledge/service.js';
 import { searchKnowledgeBase } from '../knowledge/search.js';
-import { resolveTools, resolveToolIds } from '../tool/registry.js';
+import { resolveTools } from '../tool/registry.js';
 import {
   resolveSkillsForAgent,
   getAgentSkillBindings,
@@ -12,6 +12,18 @@ import { getAgentDefinition, resolvePerRequestAgent } from './registry.js';
 import type { StreamEvent } from '../execution/stream-events.js';
 import { normalizeTextChunk } from '../execution/stream-text-normalizer.js';
 import type { Mastra } from '@mastra/core';
+import {
+  createDefaultResolverContext,
+  resolveAllowedToolIds,
+} from '../../modules/tool-policy/resolver.js';
+import { buildRequireApproval } from './tool-approval-gateway.js';
+import { getDatabasePool } from '../../infrastructure/database/pool.js';
+import {
+  type RunEventType,
+  insertRunEvent,
+} from '../../modules/runs/repository.js';
+import { createApprovalRequest } from '../../modules/tool-policy/repository.js';
+import { sanitizeToolInputs } from '../../modules/tool-policy/sanitize.js';
 export type {
   StreamChunk,
   StreamResult,
@@ -22,6 +34,22 @@ export type {
   StreamToolCallError,
   StreamEvent,
 } from '../execution/stream-events.js';
+// `consumeAgentStream` 与 `AgentStreamExecution` 在本文件内声明；
+// 调用方 import 它们时直接拿本模块的命名导出即可。
+
+/**
+ * 工具审批请求事件——前端 / SSE 端拿这个事件展示待审批列表。
+ */
+export interface StreamApprovalRequested {
+  type: 'approval-requested';
+  approvalId: string;
+  runId: string;
+  toolCallId: string;
+  toolName: string;
+  inputsSummary: Record<string, unknown>;
+  inputsHash: string;
+  expiresAt: string;
+}
 
 /**
  * Phase 3.0 修订：Mastra 实例获取的依赖注入点。
@@ -80,6 +108,56 @@ async function getMastraInstance(): Promise<unknown> {
 }
 
 /**
+ * Phase 3.2 — Policy-aware Tool Resolver 注入点。
+ *
+ * 默认路径：`resolveAllowedToolIdsForRuntime()` 走真实 resolver
+ * （`createDefaultResolverContext()` 装配 Tool 注册表 +
+ * tool_policy_rules repository）；该路径需要 DATABASE_URL 等真实依赖。
+ *
+ * 测试路径：单元测试通过本钩子注入一个不连 DB 的 stub resolver；
+ * 注入后 streamAgent 内**不**触发真实 repository 调用，也不会触发
+ * `server/bootstrap.ts` 副作用。生产代码绝不调用本钩子。
+ */
+export type PolicyResolverOverride = (
+  workspaceId: string,
+  toolIds: string[],
+) => Promise<string[]>;
+let _policyResolverOverride: PolicyResolverOverride | null = null;
+export function _setPolicyResolverForTesting(
+  impl: PolicyResolverOverride | null,
+): void {
+  _policyResolverOverride = impl;
+}
+async function resolveAllowedToolIdsForRuntime(
+  workspaceId: string,
+  toolIds: string[],
+): Promise<string[]> {
+  if (_policyResolverOverride) {
+    return _policyResolverOverride(workspaceId, toolIds);
+  }
+  return resolveAllowedToolIds(
+    workspaceId,
+    toolIds,
+    createDefaultResolverContext(),
+  );
+}
+
+/**
+ * 测试钩子：注入 `requireToolApproval` 函数。生产代码绝不调用本钩子。
+ * 用于 runtime-filtering 测试在不连真实 Tool 注册表的情况下，验证
+ * `requireToolApproval` 回调被注入 streamOptions。
+ */
+export type RequireApprovalOverride = (
+  ctx: { toolName: string; args: Record<string, unknown> },
+) => boolean | Promise<boolean>;
+let _requireApprovalOverride: RequireApprovalOverride | null = null;
+export function _setRequireApprovalForTesting(
+  impl: RequireApprovalOverride | null,
+): void {
+  _requireApprovalOverride = impl;
+}
+
+/**
  * 测试钩子：清空 production 单例缓存与 override。**仅供需要在进程
  * 内重新解析 Mastra 单例的测试使用**；生产代码绝不调用。
  */
@@ -110,6 +188,12 @@ export interface StreamAgentInput {
   history?: Message[];
   abortSignal: AbortSignal;
   /**
+   * PR-3.3 — 创建 approval request 时需要的 requester_id。
+   * 不传则使用 system fallback（实际业务路径 run executor 总会传）；
+   * null 表示"系统发起"（cron / 重试 worker）。
+   */
+  requesterId?: string | null;
+  /**
    * Phase 3.0 — 标识映射字段（业务 ↔ Mastra）。
    * - `runId`：业务 `agent_runs.id`，透传到 Mastra `streamOptions.runId`；
    * - `threadId`：业务 `conversations.id`，透传到 Mastra
@@ -122,6 +206,204 @@ export interface StreamAgentInput {
   runId?: string;
   threadId?: string;
   resourceId?: string;
+}
+
+/**
+ * PR-3.3 — `consumeAgentStream` 公共内部能力。
+ *
+ * 共享于"首次 Run"（`streamAgent` 调 `agent.stream(...).fullStream`）与
+ * "审批续 Run"（resume 调度器调 `agent.approveToolCall(...).fullStream` /
+ * `agent.declineToolCall(...).fullStream`）。**唯一**翻译 Mastra chunk →
+ * 业务 `StreamEvent` 的入口；任何 delta / tool 事件 / checkpoint /
+ * messages / SSE / Run completed-failed-stopped 都必须走它。
+ *
+ * 设计动机：
+ *   - 旧版本的 resume 路径"把 Run 改 queued + 重跑 streamAgent(prompt)"是
+ *     **错误重放**——Mastra 重新发起模型请求，而非从 approval 挂起点恢复。
+ *   - 真正续 Run 必须消费 `agent.approveToolCall(...)` 返回的 AsyncIterable
+ *     stream；该 stream 由框架从 workflow snapshot 处续推，**不**包含重
+ *     新 prompt 与历史。
+ *
+ * 调用方约定：
+ *   - 调用前由调用方**保证** lease 已抢占、Run 状态已推到 'running'（续
+ *     Run 时由 resume 调度器负责）；
+ *   - 循环退出条件由 stream 自身决定（done / stopped / error / approval-
+ *     requested）；
+ *   - 持久化副作用（事件、checkpoint、message 状态）由 `handleStreamEvent`
+ *     兜底；本函数**只**做翻译。
+ */
+export async function* consumeAgentStream(
+  execution: AgentStreamExecution,
+  stream: AsyncIterable<unknown>,
+): AsyncGenerator<StreamEvent, void, unknown> {
+  let content = '';
+  for await (const chunk of stream) {
+    if (execution.abortSignal.aborted) {
+      yield { type: 'stopped', content };
+      return;
+    }
+    const c = chunk as { type?: string };
+    if (c.type === 'text-delta') {
+      const payload = (chunk as { payload?: { text?: string }; textDelta?: string });
+      const incomingText = payload.payload?.text ?? payload.textDelta ?? '';
+      const normalized = normalizeTextChunk(content, incomingText);
+      content = normalized.accumulatedText;
+      if (normalized.delta) yield { type: 'delta', text: normalized.delta };
+    } else if (c.type === 'tool-call') {
+      const payload = (chunk as { payload?: { toolCallId?: string; toolName?: string; args?: unknown } }).payload;
+      if (payload) {
+        yield {
+          type: 'tool-call-start',
+          toolCallId: payload.toolCallId ?? '',
+          toolName: payload.toolName ?? '',
+          input: (payload.args as Record<string, unknown>) ?? {},
+        };
+      }
+    } else if (c.type === 'tool-result') {
+      const payload = (chunk as { payload?: { toolCallId?: string; toolName?: string; result?: unknown } }).payload;
+      if (payload) {
+        const result = payload.result;
+        const isError = result && typeof result === 'object' && 'error' in result && !!(result as { error?: unknown }).error;
+        if (isError) {
+          yield {
+            type: 'tool-call-error',
+            toolCallId: payload.toolCallId ?? '',
+            toolName: payload.toolName ?? '',
+            error: String((result as { error: unknown }).error),
+          };
+        } else {
+          yield {
+            type: 'tool-call-complete',
+            toolCallId: payload.toolCallId ?? '',
+            toolName: payload.toolName ?? '',
+            output: (result as Record<string, unknown>) ?? {},
+          };
+        }
+      }
+    } else if (c.type === 'error') {
+      const payload = (chunk as { payload?: { error?: string } }).payload;
+      console.error('Provider error chunk:', payload?.error ?? 'unknown provider error');
+      yield { type: 'error', error: '服务暂时不可用，请稍后重试。' };
+      return;
+    } else if (c.type === 'tool-call-approval') {
+      // PR-3.3：Mastra 1.61 在 requireToolApproval=true 时再次发
+      // 'tool-call-approval' chunk（resume stream 中也可能出现，例如第二
+      // 个 Tool 也需审批）；持久化 approval request + 写 approval-requested
+      // 事件 + 把 Run 推到 waiting_approval + 释放 lease。
+      const payload = (chunk as { payload?: { toolCallId?: string; toolName?: string; args?: Record<string, unknown> } }).payload;
+      if (payload && execution.runId) {
+        // PR-3.3 — requesterId 必须非空（schema NOT NULL FK）。若
+        // execution.requesterId 为 null，必须由调用方在 run executor 入口
+        // 把 agent_runs.created_by 注入（run executor 已保证）。这里
+        // 显式校验，避免 NULL 写库。
+        if (!execution.requesterId) {
+          yield {
+            type: 'error',
+            error:
+              '审批请求创建失败：agent_runs.created_by 为 NULL；' +
+              '必须由真实用户创建 Run。',
+          };
+          return;
+        }
+        const sanitized = sanitizeToolInputs(payload.args ?? {});
+        const ttlMs = resolveApprovalTtlMs();
+        const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+        const approvalRow = await persistApprovalRequested({
+          workspaceId: execution.workspaceId,
+          runId: execution.runId,
+          toolCallId: payload.toolCallId ?? '',
+          toolName: payload.toolName ?? '',
+          inputsHash: sanitized.hash,
+          inputsSummary: sanitized.summary,
+          requesterId: execution.requesterId,
+          expiresAt,
+        });
+        yield {
+          type: 'approval-requested',
+          approvalId: approvalRow.id,
+          runId: approvalRow.runId,
+          toolCallId: approvalRow.toolCallId,
+          toolName: approvalRow.toolId,
+          inputsSummary: sanitized.summary,
+          inputsHash: sanitized.hash,
+          expiresAt: approvalRow.expiresAt,
+        };
+        return;
+      }
+    }
+  }
+  if (execution.abortSignal.aborted) {
+    yield { type: 'stopped', content };
+    return;
+  }
+  yield { type: 'done', content, citations: execution.citations ?? [] };
+}
+
+/**
+ * PR-3.3.1 — 审批 TTL 的可测试性。
+ *
+ * 默认行为：与 PR-3.3 完全一致——`5 * 60_000` ms。
+ *
+ * 测试 / staging 覆盖路径：仅当
+ *   1. `ENABLE_STAGING_APPROVAL_PROBE=true`
+ *   2. `DEPLOYMENT_PROFILE !== 'production'`
+ * 才允许 `STAGING_APPROVAL_E2E_APPROVAL_TTL_MS` 覆盖默认 TTL；
+ * 任何生产部署即便误设 TTL 也**不会**影响 5 分钟默认行为，避免在生产
+ * 把 pending 审批的有效期改成秒级。
+ *
+ * 校验范围（严格）：
+ *   - 必须是正整数；
+ *   - 必须 ≥ 1 000 ms（避免毫秒级 TTL 让 pending 状态在写入瞬间过期、
+ *     让 e2e 误判为超时路径）；
+ *   - 必须 ≤ 5 * 60_000 ms（不允许拉长到超过默认 TTL——避免 staging 用例
+ *     改坏未来回归测试的 SLA 期望）。
+ *
+ * 不通过：
+ *   - 默认场景未设置 → 仍使用 5 分钟；
+ *   - 任何不满足上述三项校验的值 → 抛错（fail-closed，**不**回退到 5 分钟）。
+ */
+export const DEFAULT_APPROVAL_TTL_MS = 5 * 60_000;
+export const STAGING_APPROVAL_TTL_MIN_MS = 1_000;
+export const STAGING_APPROVAL_TTL_MAX_MS = DEFAULT_APPROVAL_TTL_MS;
+
+export function resolveApprovalTtlMs(): number {
+  const raw = process.env.STAGING_APPROVAL_E2E_APPROVAL_TTL_MS;
+  if (raw === undefined || raw === '') return DEFAULT_APPROVAL_TTL_MS;
+  if (process.env.ENABLE_STAGING_APPROVAL_PROBE !== 'true') {
+    throw new Error(
+      'STAGING_APPROVAL_E2E_APPROVAL_TTL_MS 仅在 ENABLE_STAGING_APPROVAL_PROBE=true 时生效。',
+    );
+  }
+  if (process.env.DEPLOYMENT_PROFILE === 'production') {
+    throw new Error(
+      'STAGING_APPROVAL_E2E_APPROVAL_TTL_MS 在 DEPLOYMENT_PROFILE=production 时被禁用。',
+    );
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < STAGING_APPROVAL_TTL_MIN_MS || parsed > STAGING_APPROVAL_TTL_MAX_MS) {
+    throw new Error(
+      `STAGING_APPROVAL_E2E_APPROVAL_TTL_MS=${raw} 不合法：必须是 ${STAGING_APPROVAL_TTL_MIN_MS}–${STAGING_APPROVAL_TTL_MAX_MS} 之间的整数。`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * `consumeAgentStream` 的执行上下文契约——调用方把"已知的会话身份"
+ * 透传进来，避免每次重读历史 / 重算 prompt。
+ */
+export interface AgentStreamExecution {
+  workspaceId: string;
+  /** 必填：首次 Run 与 resume 都必须透传 runId。 */
+  runId: string;
+  /**
+   * PR-3.3 — 必填非空：审批 requesterId 必须来自 agent_runs.created_by
+   * （NULL 时拒绝创建审批）。Run executor 在 executeRun / consumeResumeStream
+   * 入口强制透传；若 null 直接 fail-closed。
+   */
+  requesterId: string;
+  abortSignal: AbortSignal;
+  citations?: Citation[];
 }
 
 /**
@@ -172,8 +454,28 @@ export async function* streamAgent(
     //     传给 `agent.stream()`，由 v1 在执行期按白名单过滤。
     //   - `resolveTools()` 在本路径仅作为"按 ID 取 tool 对象"被复用，
     //     保留以兼容上层把 tools 重新 inline 装配的调用方（如单测）。
+    //
+    // Phase 3.2 修订：activeTools 走策略感知解析器——
+    //   - 服务端 ToolDefinition 元数据（destructive / openWorld /
+    //     requiresRuntime）是风险判定唯一来源；
+    //   - tool_policy_rules 是 Workspace 维度策略唯一来源；
+    //   - forbidden 不出现（fail-closed 阻断）；
+    //   - requires-approval **进入** activeTools（PR-3.3 起），由
+    //     requireToolApproval(ctx) 在调用前回调触发挂起 + 持久化。
+    //
+    // Phase 3.3 修订：requireToolApproval 真实接入。
+    //   - 调用 buildRequireApproval({ workspaceId }) 构造 per-workspace
+    //     函数，注入 streamOptions.requireToolApproval；
+    //   - 真实 Mastra 1.61 行为：requireToolApproval 返回 true →
+    //     Mastra 发 'tool-call-approval' chunk 并挂起；返回 false →
+    //     Tool 正常执行；
+    //   - forbidden Tool 不进入 activeTools——理论上不应被 Mastra
+    //     调用，万一绕过 requireToolApproval 返回 false 即可（fallback）。
     const activeToolIds: string[] = definition.capabilities.tools
-      ? resolveToolIds(definition.toolIds ?? [], undefined)
+      ? await resolveAllowedToolIdsForRuntime(
+          workspaceId,
+          definition.toolIds ?? [],
+        )
       : [];
     const inlineTools: Record<string, unknown> = activeToolIds.length > 0
       ? resolveTools(activeToolIds)
@@ -244,9 +546,8 @@ export async function* streamAgent(
     const mastra = (await getMastraInstance()) as Mastra;
     // Phase 3.0：把 Mastra 实例透传给 definition.factory。
     // 具体 Agent 工厂会把它注入 `new Agent({..., mastra })`，让 per-request
-    // Agent 通过 public Mastra 注册路径同时拿到全局 tool 字典与 storage。
-    // 这里把 `inlineTools` 作为兼容参数透传：具体工厂在 Phase 3.0 修订后
-    // 不再读取 tools，但仍保留位置以不破坏 `AgentFactory` 签名。
+    // Agent 通过 public Mastra 注册路径访问 storage。
+    // `inlineTools` 必须由工厂显式传给 Agent.tools，不能依赖全局工具自动注入。
     //
     // 优先走 `resolvePerRequestAgent`：单元测试用 `_setPerRequestFactoryOverrideForTesting`
     // 注入 stub Agent 拦截 `agent.stream()` 选项，stub 不会被写进
@@ -254,12 +555,18 @@ export async function* streamAgent(
     const agent =
       resolvePerRequestAgent(agentId, inlineTools, skills, mastra) ??
       definition.factory(inlineTools, skills, mastra);
+    // PR-3.3：构造 per-workspace 的 requireToolApproval 函数。
+    // 该函数被 Mastra 在每次 Tool 调用前回调；返回 true → 触发
+    // 'tool-call-approval' chunk + 挂起；false → 正常执行。
+    const requireApproval = _requireApprovalOverride ?? buildRequireApproval({ workspaceId });
     const stream = await agent.stream(resolvedPrompt, {
       abortSignal,
       // Phase 3.0：Tool 子集过滤走 v1 公开 streamOptions。
       // v1 在执行期按 `activeTools` 白名单过滤；不传时该 Agent 可用
       // 其注册的全部 tool。
       ...(activeToolIds.length > 0 ? { activeTools: activeToolIds } : {}),
+      // PR-3.3：把服务端策略感知的 requireToolApproval 注入 Mastra。
+      requireToolApproval: requireApproval,
       // Phase 3.0：标识映射通过 Mastra 公开 streamOptions 携带。
       // - `runId`：Mastra `AgentExecutionOptionsBase.runId`（参见
       //   `@mastra/core/agent.types.d.ts`），用于让框架把 snapshot 与
@@ -283,73 +590,38 @@ export async function* streamAgent(
       yield { type: 'stopped', content: '' };
       return;
     }
-    let content = '';
     try {
-      for await (const chunk of stream.fullStream) {
-        if (abortSignal.aborted) {
-          yield { type: 'stopped', content };
-          return;
-        }
-        if (chunk.type === 'text-delta') {
-          const c = chunk as unknown as { payload?: { text?: string }; textDelta?: string };
-          const incomingText = c.payload?.text ?? c.textDelta ?? '';
-          const normalized = normalizeTextChunk(content, incomingText);
-          content = normalized.accumulatedText;
-          // SSE / executor 对外只有纯增量；累计快照的无变化帧不应产生事件。
-          if (normalized.delta) yield { type: 'delta', text: normalized.delta };
-        }
-        if (chunk.type === 'tool-call') {
-          const payload = (chunk as unknown as { payload?: { toolCallId?: string; toolName?: string; args?: unknown } }).payload;
-          if (payload) {
-            yield {
-              type: 'tool-call-start',
-              toolCallId: payload.toolCallId ?? '',
-              toolName: payload.toolName ?? '',
-              input: (payload.args as Record<string, unknown>) ?? {},
-            };
-          }
-        }
-        if (chunk.type === 'tool-result') {
-          const payload = (chunk as unknown as { payload?: { toolCallId?: string; toolName?: string; result?: unknown } }).payload;
-          if (payload) {
-            const result = payload.result;
-            const isError = result && typeof result === 'object' && 'error' in result && !!result.error;
-            if (isError) {
-              yield {
-                type: 'tool-call-error',
-                toolCallId: payload.toolCallId ?? '',
-                toolName: payload.toolName ?? '',
-                error: (result as { error: string }).error,
-              };
-            } else {
-              yield {
-                type: 'tool-call-complete',
-                toolCallId: payload.toolCallId ?? '',
-                toolName: payload.toolName ?? '',
-                output: (result as Record<string, unknown>) ?? {},
-              };
-            }
-          }
-        }
-        if (chunk.type === 'error') {
-          const payload = (chunk as unknown as { payload?: { error?: string } }).payload;
-          console.error('Provider error chunk:', payload?.error ?? 'unknown provider error');
-          yield { type: 'error', error: '服务暂时不可用，请稍后重试。' };
-          return;
-        }
+      // PR-3.3 — requesterId 必须非空；run executor 入口已校验
+      // agent_runs.created_by，运行时透传。
+      if (!input.runId) {
+        yield { type: 'error', error: 'runId 缺失；streamAgent 必须由 run executor 调用。' };
+        return;
       }
+      if (!input.requesterId) {
+        yield {
+          type: 'error',
+          error:
+            'agent_runs.created_by 为 NULL；拒绝创建审批请求。',
+        };
+        return;
+      }
+      yield* consumeAgentStream(
+        {
+          workspaceId,
+          runId: input.runId,
+          requesterId: input.requesterId,
+          abortSignal,
+          citations,
+        },
+        stream.fullStream as AsyncIterable<unknown>,
+      );
     } catch (error) {
       if ((error as Error).name === 'AbortError' || abortSignal.aborted) {
-        yield { type: 'stopped', content };
+        yield { type: 'stopped', content: '' };
         return;
       }
       throw error;
     }
-    if (abortSignal.aborted) {
-      yield { type: 'stopped', content };
-      return;
-    }
-    yield { type: 'done', content, citations };
   } catch (error) {
     console.error('Agent 流式执行失败：', error);
     yield { type: 'error', error: '服务暂时不可用，请稍后重试。' };
@@ -367,4 +639,107 @@ function buildPrompt(history: Message[], latestUserMessage: string): string {
     lines.push(`User: ${latestUserMessage}`);
   }
   return lines.join('\n\n');
+}
+
+/**
+ * 在事务内：
+ *   1. INSERT tool_approval_requests（status='pending'）；
+ *   2. INSERT agent_run_events(type='approval-requested')；
+ *   3. UPDATE agent_runs SET status='waiting_approval', lease 清空。
+ *
+ * 三件事必须同事务——任何一步失败就回滚，避免"已写 approval 但 Run
+ * 还在 running"的脑裂状态。
+ *
+ * requesterId 为 null 表示"系统主动发起的审批请求"——例如 run executor
+ * 续 Run 时重建 approval row。nullable + ON DELETE SET NULL 已在
+ * init.sql 阶段 3.3 段声明；这里直接透传 null 给 PG。
+ */
+async function persistApprovalRequested(args: {
+  workspaceId: string;
+  runId: string;
+  toolCallId: string;
+  toolName: string;
+  inputsHash: string;
+  inputsSummary: Record<string, unknown>;
+  requesterId: string | null;
+  expiresAt: string;
+}): Promise<{
+  id: string;
+  runId: string;
+  toolCallId: string;
+  toolId: string;
+  expiresAt: string;
+}> {
+  const pool = getDatabasePool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // 1. INSERT approval request
+    const r = await client.query<Record<string, unknown>>(
+      `INSERT INTO tool_approval_requests (
+         workspace_id, run_id, tool_id, tool_call_id,
+         inputs_hash, inputs_summary, status,
+         requester_id, resolver_id, expires_at
+       ) VALUES (
+         $1, $2, $3, $4,
+         $5, $6::jsonb, 'pending',
+         $7::uuid, $7::uuid, $8
+       )
+       RETURNING id, run_id, tool_call_id, tool_id, expires_at`,
+      [
+        args.workspaceId,
+        args.runId,
+        args.toolName,
+        args.toolCallId,
+        args.inputsHash,
+        JSON.stringify(args.inputsSummary ?? {}),
+        args.requesterId,
+        args.expiresAt,
+      ],
+    );
+    const approvalRow = r.rows[0]!;
+    // 2. INSERT approval-requested event
+    await insertRunEvent(client, {
+      runId: args.runId,
+      workspaceId: args.workspaceId,
+      type: 'approval-requested',
+      payload: {
+        approvalId: approvalRow.id as string,
+        toolCallId: args.toolCallId,
+        toolName: args.toolName,
+        inputsHash: args.inputsHash,
+        expiresAt: args.expiresAt,
+      },
+    });
+    // 3. UPDATE agent_runs → waiting_approval + 清 lease
+    await client.query(
+      `UPDATE agent_runs
+          SET status = 'waiting_approval',
+              lease_owner = NULL,
+              lease_expires_at = NULL,
+              heartbeat_at = NULL,
+              updated_at = now()
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status IN ('queued', 'running')`,
+      [args.runId, args.workspaceId],
+    );
+    await client.query('COMMIT');
+    return {
+      id: approvalRow.id as string,
+      runId: approvalRow.run_id as string,
+      toolCallId: approvalRow.tool_call_id as string,
+      toolId: approvalRow.tool_id as string,
+      expiresAt: new Date(approvalRow.expires_at as string).toISOString(),
+    };
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* ignore */
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }

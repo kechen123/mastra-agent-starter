@@ -34,6 +34,9 @@ import '../tools/index.js';
 import { initializeApp } from './init.js';
 import { preloadSkillRegistry } from '../core/skill/registry.js';
 import { startRunExecutor } from '../core/execution/run-executor.js';
+import { startApprovalTimeoutWorker } from '../modules/tool-policy/timeout-worker.js';
+import { installProductionMastraFacade } from '../modules/tool-policy/mastra-facade.js';
+import { getAgentIdByRun } from '../modules/tool-policy/repository.js';
 
 import { askRoute, stopMessageRoute, regenerateMessageRoute } from './routes/messages/index.js';
 import {
@@ -85,16 +88,23 @@ import {
   streamRunEventsV1Route,
   stopMessageV1Route,
 } from './routes/v2alpha/index.js';
+import {
+  listApprovalsRoute,
+  getApprovalRoute,
+  resolveApprovalRoute,
+} from './routes/approvals.js';
 
 preloadSkillRegistry();
-initializeApp().catch((err) => {
-  console.error('initializeApp() rejected:', err);
-});
-
-// Run executor 单进程启动；模块级 globalThis flag 保证幂等。
-startRunExecutor().catch((err) => {
-  console.error('startRunExecutor() rejected:', err);
-});
+// 注册就绪 → SDK facade 就绪 → 调度器启动；不能并发启动形成空注册表竞态。
+initializeApp()
+  .then(() => installProductionMastraFacade({ getAgentIdByRun }))
+  .then(async () => {
+    await startRunExecutor();
+    await startApprovalTimeoutWorker();
+  })
+  .catch((err) => {
+    console.error('approval timeout worker 启动失败：', err);
+  });
 
 /**
  * 给旧根路径响应（/ask、/conversations*、/messages/*）附加 V2 §9.5.1
@@ -199,4 +209,7 @@ export const apiRoutes = [
   getConversationV1Route,
   streamRunEventsV1Route,
   stopMessageV1Route,
+  listApprovalsRoute,
+  getApprovalRoute,
+  resolveApprovalRoute,
 ];

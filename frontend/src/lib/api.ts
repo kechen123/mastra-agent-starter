@@ -299,6 +299,40 @@ export function listSkills(): Promise<SkillSummary[]> {
   return request('/skills');
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// PR-3.3 — Tool Approval API client
+//
+// 仅负责 HTTP 调用；状态机与 SSE 由 `lib/conversations.ts` + useApprovals
+// hook 接管。错误语义按后端 error_code 透传，由调用方决定如何 UX。
+// ─────────────────────────────────────────────────────────────────────
+
+import type {
+  ApprovalDetailResponse,
+  ApprovalListResponse,
+  ApprovalResolveResponse,
+  ApprovalView,
+} from '../types/approval';
+
+export function listApprovals(): Promise<ApprovalListResponse> {
+  return request('/v1/approvals');
+}
+
+export function getApproval(id: string): Promise<ApprovalDetailResponse> {
+  return request(`/v1/approvals/${encodeURIComponent(id)}`);
+}
+
+export function resolveApproval(
+  id: string,
+  decision: 'approve' | 'decline',
+): Promise<ApprovalResolveResponse> {
+  return request(`/v1/approvals/${encodeURIComponent(id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ decision }),
+  });
+}
+
+export type { ApprovalView };
+
 export function getSkill(id: string): Promise<SkillSummary> {
   return request(`/skills/${id}`);
 }

@@ -51,6 +51,26 @@ export interface StreamToolCallError {
   error: string;
 }
 
+/**
+ * 工具调用进入"等待人工审批"挂起态——前端 / SSE 收到这个事件后
+ * 展示"待审批"卡片；后端在事务内已经持久化 approval request，
+ * 释放 Run lease，Run 进入 `waiting_approval`。
+ */
+export interface StreamApprovalRequested {
+  type: 'approval-requested';
+  approvalId: string;
+  runId: string;
+  toolCallId: string;
+  toolName: string;
+  /**
+   * 已脱敏的输入摘要（结构化：每个 leaf 是 `{kind, preview, count?}`）。
+   * 不含原始敏感输入。
+   */
+  inputsSummary: Record<string, unknown>;
+  inputsHash: string;
+  expiresAt: string;
+}
+
 export type StreamEvent =
   | StreamChunk
   | StreamResult
@@ -58,4 +78,5 @@ export type StreamEvent =
   | StreamError
   | StreamToolCallStart
   | StreamToolCallComplete
-  | StreamToolCallError;
+  | StreamToolCallError
+  | StreamApprovalRequested;

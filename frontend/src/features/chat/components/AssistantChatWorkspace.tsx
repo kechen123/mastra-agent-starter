@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Citation, KnowledgeBase } from '../../../lib/api';
 import { cn } from '../../../lib/cn';
 import type { ChatMessage, ToolCallState } from '../../../types/ui';
+import type { ApprovalView } from '../../../types/approval';
 import {
   chatMessageToThreadMessage,
   extractAppendMessageText,
@@ -19,6 +20,7 @@ import {
 } from '../assistantAdapter';
 import { CitationPanel } from './CitationPanel';
 import { Markdown } from './Markdown';
+import { ApprovalCard } from './ApprovalCard';
 
 export interface AssistantChatWorkspaceProps {
   appShortName: string;
@@ -38,6 +40,16 @@ export interface AssistantChatWorkspaceProps {
   onSelectKnowledgeBase: (knowledgeBase: KnowledgeBase) => void;
   onClearKnowledgeBase: () => void;
   onSelectCitation: (citation: Citation) => void;
+  /**
+   * PR-3.3 — 当前 run 命中的 pending approvals。本组件仅渲染；
+   * 列表 state 由 `useApprovals` 在 App 侧管理。
+   */
+  pendingApprovals?: ApprovalView[];
+  /** PR-3.3 — 当前正在 resolve 的 approval.id（用于禁用按钮）。 */
+  busyApprovalId?: string | null;
+  /** PR-3.3 — 用户点击 Approve / Decline 时的回调。 */
+  onApproveApproval?: (approval: ApprovalView) => void;
+  onDeclineApproval?: (approval: ApprovalView) => void;
 }
 
 const scrollbarStyle = {
@@ -115,6 +127,10 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
     onSelectKnowledgeBase,
     onClearKnowledgeBase,
     onSelectCitation,
+    pendingApprovals,
+    busyApprovalId,
+    onApproveApproval,
+    onDeclineApproval,
   } = props;
 
   const messageScrollRef = useRef<HTMLDivElement>(null);
@@ -288,6 +304,22 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
       </div>
 
       <div className="relative z-10 shrink-0 px-4 sm:px-8 pb-3 bg-gradient-to-t from-app-bg via-app-bg to-transparent">
+        {pendingApprovals && pendingApprovals.length > 0 && (
+          <div
+            data-testid="approvals-banner"
+            className="w-full max-w-[768px] mx-auto mb-2 grid gap-2"
+          >
+            {pendingApprovals.map((approval) => (
+              <ApprovalCard
+                key={approval.id}
+                approval={approval}
+                busy={busyApprovalId === approval.id}
+                onApprove={(item) => onApproveApproval?.(item)}
+                onDecline={(item) => onDeclineApproval?.(item)}
+              />
+            ))}
+          </div>
+        )}
         <ComposerPrimitive.Root
           className={cn(
             'w-full max-w-[768px] mx-auto p-2 rounded-[26px] bg-app-surface shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_8px_28px_rgba(0,0,0,0.14)]',
