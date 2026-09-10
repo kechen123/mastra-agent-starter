@@ -149,6 +149,57 @@ export class ConversationActiveRunError extends Error {
   }
 }
 
+export interface RegenerateMessageV2Result {
+  /** 新生成的 assistant message id（替换前的旧消息仍保留 content/citations，但 status=stopped）。 */
+  assistantMessageId: string;
+  /** 旧 assistant message id（已被置为 stopped）。 */
+  replacedAssistantMessageId: string;
+  /** 新 Run id；前端拿到后立即订阅 /runs/:runId/events 走 V2 SSE 回放。 */
+  runId: string;
+  /** V2 SSE 端点 URL。 */
+  eventsUrl: string;
+}
+
+/**
+ * V2 重新生成入口（POST /v1/v2alpha/messages/:id/regenerate）。
+ *
+ * 与 /v1/v2alpha/conversations/:id/messages 行为对齐：
+ *   - 服务端在单事务内收敛旧 assistant message、INSERT 新 assistant pending、
+ *     创建 queued Run、写 run-queued 事件；
+ *   - 客户端拿到 runId 后立即 EventSource 续上；
+ *   - 同会话活跃 Run → 409 CONVERSATION_CONFLICT_ACTIVE_RUN；
+ *   - 跨 workspace / 不存在 → 404。
+ *
+ * 旧 SSE /messages/:id/regenerate 仅留作向后兼容，前端主流程不再调用。
+ */
+export async function regenerateMessageV2(
+  assistantMessageId: string,
+): Promise<RegenerateMessageV2Result> {
+  const baseUrl = getApiBaseUrl();
+  const idemKey = generateUuid();
+  const response = await fetch(
+    `${baseUrl}${V2_PREFIX}/messages/${assistantMessageId}/regenerate`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Idempotency-Key': idemKey,
+      },
+    },
+  );
+  if (response.status === 401) {
+    throw new UnauthenticatedError();
+  }
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { message?: string; error_code?: string } | null;
+    if (response.status === 409 && data?.error_code === 'CONVERSATION_CONFLICT_ACTIVE_RUN') {
+      throw new ConversationActiveRunError(data.message ?? '已有正在进行的生成。');
+    }
+    throw new Error(data?.message ?? '重新生成失败。');
+  }
+  return response.json() as Promise<RegenerateMessageV2Result>;
+}
+
 /**
  * 阶段 2：使用 EventSource 订阅 Run 事件。EventSource 不支持自定义头，
  * 因此 lastEventId 通过 query string 传递；服务端 SSE 模块接受二者之一。

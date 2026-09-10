@@ -55,6 +55,12 @@ export const stopMessageV2AlphaRoute = registerApiRoute('/v1/v2alpha/messages/:i
   handler: runWith(sharedHandlers.stopMessage, 'v2alpha'),
 });
 
+export const regenerateMessageV2AlphaRoute = registerApiRoute('/v1/v2alpha/messages/:id/regenerate', {
+  method: 'POST',
+  requiresAuth: true,
+  handler: runWith(sharedHandlers.regenerateMessage, 'v2alpha'),
+});
+
 export const createConversationV1Route = registerApiRoute('/v1/conversations', {
   method: 'POST',
   requiresAuth: true,
@@ -83,4 +89,10 @@ export const stopMessageV1Route = registerApiRoute('/v1/messages/:id/stop', {
   method: 'POST',
   requiresAuth: true,
   handler: runWith(sharedHandlers.stopMessage, 'v1'),
+});
+
+export const regenerateMessageV1Route = registerApiRoute('/v1/messages/:id/regenerate', {
+  method: 'POST',
+  requiresAuth: true,
+  handler: runWith(sharedHandlers.regenerateMessage, 'v1'),
 });

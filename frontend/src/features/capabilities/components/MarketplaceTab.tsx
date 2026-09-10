@@ -50,6 +50,7 @@ interface MarketplaceTabProps {
   onRefresh: () => Promise<void> | void;
   onError: (message: string) => void;
   onClearError: () => void;
+  onRequestRemoveSkill?: (name: string, action: () => Promise<void>) => void;
 }
 
 /**
@@ -61,7 +62,7 @@ interface MarketplaceTabProps {
  * 内部状态：searchQuery / marketResults / searchingMarket / selectedMarketSkill / preview /
  * previewLoading / installing。状态本地，不污染父组件。
  */
-export function MarketplaceTab({ installed, onRefresh, onError, onClearError }: MarketplaceTabProps) {
+export function MarketplaceTab({ installed, onRefresh, onError, onClearError, onRequestRemoveSkill }: MarketplaceTabProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [marketResults, setMarketResults] = useState<MarketSkillInfo[]>([]);
   const [searchingMarket, setSearchingMarket] = useState(false);
@@ -133,13 +134,21 @@ export function MarketplaceTab({ installed, onRefresh, onError, onClearError }: 
   }
 
   async function handleRemove(id: string) {
-    if (!window.confirm('确定要卸载此技能吗？')) return;
-    try {
-      await removeSkill(id);
-      await onRefresh();
-    } catch (err) {
-      onError(toErrorMessage(err));
+    const skill = installed.find((item) => item.id === id);
+    if (!skill) return;
+    const remove = async () => {
+      try {
+        await removeSkill(id);
+        await onRefresh();
+      } catch (err) {
+        onError(toErrorMessage(err));
+      }
+    };
+    if (onRequestRemoveSkill) {
+      onRequestRemoveSkill(skill.name, remove);
+      return;
     }
+    await remove();
   }
 
   useEffect(() => {

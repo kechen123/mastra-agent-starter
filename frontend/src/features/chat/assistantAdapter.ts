@@ -15,6 +15,7 @@ import type { ChatMessage, ToolCallState } from '../../types/ui';
 export interface ChatMessageMetadata {
   citations: Citation[];
   toolCalls: ToolCallState[];
+  createdAt: string;
   /** 业务层 ChatMessage 的 status，方便渲染层做失败/停止分支。 */
   chatStatus: ChatMessage['status'];
 }
@@ -33,6 +34,7 @@ export function chatMessageToThreadMessage(message: ChatMessage): ThreadMessageL
       metadata: {
         custom: {
           chatStatus: message.status,
+          createdAt: message.createdAt,
         } satisfies Partial<ChatMessageMetadata>,
       },
     };
@@ -49,6 +51,7 @@ export function chatMessageToThreadMessage(message: ChatMessage): ThreadMessageL
         citations: message.citations,
         toolCalls: message.tools ?? [],
         chatStatus: message.status,
+        createdAt: message.createdAt,
       } satisfies ChatMessageMetadata,
     },
   };

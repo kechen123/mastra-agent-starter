@@ -39,6 +39,8 @@ export interface RunRow {
   workspaceId: string;
   conversationId: string;
   assistantMessageId: string;
+  /** 该 Run 响应的 user message id（regenerate / resume 都用它作为权威配对）。 */
+  userMessageId: string;
   agentId: string;
   provider: string;
   model: string;
@@ -72,6 +74,8 @@ export interface CreateRunInput {
   workspaceId: string;
   conversationId: string;
   assistantMessageId: string;
+  /** 该 Run 响应的 user message id（regenerate / resume 都用它作为权威配对）。 */
+  userMessageId: string;
   agentId: string;
   provider: string;
   model: string;
@@ -93,6 +97,7 @@ function rowToRun(row: Record<string, unknown>): RunRow {
     workspaceId: row.workspace_id as string,
     conversationId: row.conversation_id as string,
     assistantMessageId: row.assistant_message_id as string,
+    userMessageId: row.user_message_id as string,
     agentId: row.agent_id as string,
     provider: row.provider as string,
     model: row.model as string,
@@ -114,7 +119,7 @@ function rowToRun(row: Record<string, unknown>): RunRow {
   };
 }
 
-const RUN_COLUMNS = `id, workspace_id, conversation_id, assistant_message_id, agent_id,
+const RUN_COLUMNS = `id, workspace_id, conversation_id, assistant_message_id, user_message_id, agent_id,
   provider, model, status, input_tokens, output_tokens, estimated_cost_usd,
   started_at, completed_at, error_code, parent_run_id, request_id,
   lease_owner, lease_expires_at, heartbeat_at, created_by, created_at, updated_at`;
@@ -127,14 +132,15 @@ export async function createQueuedRun(
 ): Promise<RunRow> {
   const r = await executor.query<Record<string, unknown>>(
     `INSERT INTO agent_runs (
-       workspace_id, conversation_id, assistant_message_id, agent_id,
+       workspace_id, conversation_id, assistant_message_id, user_message_id, agent_id,
        provider, model, status, request_id, created_by
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8)
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9)
      RETURNING ${RUN_COLUMNS}`,
     [
       input.workspaceId,
       input.conversationId,
       input.assistantMessageId,
+      input.userMessageId,
       input.agentId,
       input.provider,
       input.model,

@@ -18,6 +18,10 @@ Run `backend/database/init.sql` against the configured PostgreSQL database befor
 
 Use TypeScript with strict mode and two-space indentation. Use `camelCase` for values and functions, `PascalCase` for types/classes, and kebab-case filenames. Keep imports explicit with `.js` extensions in source files. Preserve citation metadata (`title`, `chapter`, `documentName`, `chunkIndex`, `source`) through every retrieval path.
 
+## Framework-native Capability Priority
+
+When `assistant-ui`, Base UI, React, Tailwind, Mastra, or PostgreSQL already provides a capability whose semantics meet the requirement, prefer that framework-native capability over a parallel hand-written implementation. Keep or introduce custom behavior only when there is a confirmed product or reliability difference. Record the difference, risk, and validation evidence; do not treat a superficially similar framework feature as grounds to remove durable Run persistence, SSE replay, approvals, workspace isolation, or citation provenance.
+
 ## Testing Guidelines
 
 No automated test runner is configured yet. Every code change must pass `npm run typecheck`. Add future tests beside the relevant module as `*.test.ts` and avoid real API keys or production databases in tests.

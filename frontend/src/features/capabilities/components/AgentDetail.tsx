@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { MessageSquare } from 'lucide-react';
+import { Select } from '@base-ui/react/select';
+import { Check, ChevronDown, MessageSquare } from 'lucide-react';
 import type { AgentDefinition } from '../../../types/conversation';
 import type { SkillSummary } from '../../../types/conversation';
 import type { ToolDefinition } from '../../../lib/api';
@@ -14,6 +15,10 @@ import { TabBar } from './TabBar';
 type TabId = 'overview' | 'tools' | 'skills' | 'instructions' | 'marketplace';
 
 interface AgentDetailProps {
+  agents: AgentDefinition[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  loading: boolean;
   agent: AgentDefinition | null;
   tools: ToolDefinition[];
   skills: SkillSummary[];
@@ -33,6 +38,10 @@ interface AgentDetailProps {
  * - Marketplace Tab 是系统级操作（不受 Agent 切换影响），由父组件注入 slot。
  */
 export function AgentDetail({
+  agents,
+  selectedId,
+  onSelect,
+  loading,
   agent,
   tools,
   skills,
@@ -47,8 +56,8 @@ export function AgentDetail({
       <section className="flex-1 min-w-0 min-h-0 grid place-items-center bg-app-bg">
         <EmptyState
           icon={MessageSquare}
-          title="未选中任何 Agent"
-          description="从左侧选择一个 Agent 查看其配置、工具与技能。"
+          title={loading ? '正在加载能力…' : '暂无可用能力'}
+          description={loading ? '正在读取智能体、工具与技能配置。' : '后端尚未注册任何 Agent。'}
         />
       </section>
     );
@@ -76,15 +85,31 @@ export function AgentDetail({
 
   return (
     <section className="flex-1 min-w-0 min-h-0 grid grid-rows-[auto_auto_1fr] bg-app-bg" aria-label={`Agent 详情：${agent.name}`}>
-      <header className="sticky top-0 z-10 grid gap-1.5 px-6 max-[760px]:pl-14 sm:px-8 pt-5 pb-4 bg-app-bg/95 backdrop-blur-xl">
+      <header className="sticky top-0 z-10 grid gap-3 px-6 max-[760px]:pl-14 sm:px-8 pt-7 pb-5 bg-app-bg/95 backdrop-blur-xl">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="grid gap-1 min-w-0">
-            <div className="flex items-baseline gap-2 min-w-0">
-              <h2 className="m-0 text-[20px] font-semibold tracking-[-0.025em] text-app-text truncate">
-                {agent.name}
-              </h2>
-              <span className="app-mono text-[12px] text-app-muted shrink-0">{agent.id}</span>
+          <div className="grid gap-2 min-w-0">
+            <div className="flex items-center gap-3 min-w-0">
+              <h1 className="m-0 text-[24px] font-semibold tracking-[-0.03em] text-app-text">能力</h1>
+              <Select.Root value={selectedId ?? undefined} onValueChange={(next) => onSelect(String(next ?? ''))}>
+                <Select.Trigger className="inline-flex items-center gap-1.5 max-w-[260px] h-9 py-1.5 px-2.5 text-[13px] font-medium text-app-text bg-app-surface border border-app-border rounded-lg transition-colors duration-150 hover:bg-app-hover focus-visible:bg-app-hover data-[popup-open]:bg-app-hover" aria-label="选择智能体">
+                  <Select.Value>{agent.name}</Select.Value>
+                  <Select.Icon><ChevronDown size={14} className="text-app-muted" /></Select.Icon>
+                </Select.Trigger>
+                <Select.Portal>
+                  <Select.Positioner sideOffset={6} align="start" className="z-30">
+                    <Select.Popup className="grid min-w-[var(--anchor-width)] max-w-[320px] p-1.5 bg-app-surface border border-app-border rounded-xl shadow-[0_16px_40px_rgba(0,0,0,0.28)] outline-none">
+                      {agents.map((item) => (
+                        <Select.Item key={item.id} value={item.id} className="flex items-center justify-between gap-3 min-h-10 py-2 px-3 text-[13.5px] text-app-text rounded-lg cursor-pointer data-[highlighted]:bg-app-hover outline-none">
+                          <Select.ItemText>{item.name}</Select.ItemText>
+                          <Select.ItemIndicator><Check size={14} className="text-app-muted" /></Select.ItemIndicator>
+                        </Select.Item>
+                      ))}
+                    </Select.Popup>
+                  </Select.Positioner>
+                </Select.Portal>
+              </Select.Root>
             </div>
+            <span className="app-mono text-[12px] text-app-muted">{agent.id}</span>
             {agent.description && (
               <p className="m-0 text-[13.5px] text-app-muted leading-6 max-w-[680px]">
                 {agent.description}

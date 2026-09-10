@@ -244,6 +244,13 @@ CREATE TABLE agent_runs (
   workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   conversation_id      UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   assistant_message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  -- PR-UI-1.0.5 F1 修复：每个 Run 必须显式记录它响应的 user message。
+  -- 原因：`messages.created_at` 在同一事务内由 PG `now()` 锁定为同一值，
+  -- 因此不能依赖 created_at 排序来反查 user/assistant 配对；rebuild 类需求
+  -- （regenerate、resume、cross-instance 兜底）需要一个稳定 FK。
+  -- regenerate service 直接读取目标 assistant 对应 Run 的 user_message_id，
+  -- 不再依赖时序启发式。
+  user_message_id      UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   agent_id             TEXT NOT NULL,
   provider             TEXT NOT NULL,
   model                TEXT NOT NULL,

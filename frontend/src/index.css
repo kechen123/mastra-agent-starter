@@ -61,7 +61,7 @@
 }
 
 .app-chat-canvas {
-  background: var(--color-app-bg);
+  background: var(--color-app-sidebar);
 }
 
 * { box-sizing: border-box; }
@@ -126,19 +126,15 @@ button:disabled { cursor: not-allowed; }
  *   并用容器 border 增强代替。
  */
 /**
- * 全局 focus ring：仅作用于无 border 的可交互元素。
- * input / textarea / select 自带 border，focus 时不另加 outline，避免双层边框。
- * 想在子元素聚焦时增强外层容器边框（如 Composer），用 :focus-within 处理。
+ * 全局 focus ring：仅作用于无自身边框的可交互元素。
+ * input / textarea / select 自带 border，焦点状态由其父容器（Composer、表单）
+ * 通过 :focus-within 接管，避免出现直角 outline 与圆角容器不一致。
+ * 想在子元素聚焦时增强外层容器边框（如 Composer），用 .app-focus-within 工具类。
  */
-:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+:where(button, a, [tabindex]):focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
-
-/**
- * Composer / 表单容器：聚焦时不改变容器 border。子元素同样无 outline。
- * 用户要求：输入框获取焦点时，外层与内层都不显示边框。
- */
 
 /**
  * Workbench 通用滚动条样式：保留薄滚动条 + 拇指描边 + 透明轨道。

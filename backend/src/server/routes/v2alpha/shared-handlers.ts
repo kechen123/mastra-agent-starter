@@ -27,6 +27,7 @@ import {
 import {
   createDraftConversation,
   createUserMessageAndQueuedRun,
+  createRegenerateRun,
   stopRunByMessageId,
 } from '../../../modules/runs/service.js';
 import {
@@ -456,6 +457,109 @@ export const sharedHandlers = {
     } finally {
       client.release();
     }
+  },
+
+  /**
+   * POST /messages/:id/regenerate — V2 重新生成入口。
+   *
+   * 协议顺序（V2 §6.5）：
+   *   1. 校验 :id 是 assistant message，且归属当前 workspace；
+   *   2. 找紧邻的上一条 user message（同会话、role=user、created_at 严格小于目标）；
+   *   3. 同会话活跃 Run 检查（409 CONVERSATION_CONFLICT_ACTIVE_RUN）；
+   *   4. 单事务：
+   *        a. 旧 assistant message → status=stopped（保留 content/citations）；
+   *        b. INSERT 新 assistant message (status=pending)；
+   *        c. INSERT agent_runs(status=queued)；
+   *        d. INSERT run-queued 事件 + NOTIFY；
+   *        e. 新 assistant.current_run_id=<run.id>。
+   *   5. 写 idempotency_keys 缓存。
+   *
+   * 返回 { assistantMessageId, runId, eventsUrl, replacedAssistantMessageId }。
+   * 前端：拿到 runId 后立即 EventSource 订阅 /runs/:runId/events，复用
+   * 现有 V2 渲染管线；不需要走旧 SSE。
+   */
+  async regenerateMessage(auth: AuthedHandlerContext, context: AuthedCtxLike, deps: RunDeps): Promise<Response> {
+    return runHandler(auth, context, deps, async () => {
+      const id = context.req.param('id');
+      if (!isUuid(id)) {
+        throw new InputValidationError('消息 ID 格式不正确。');
+      }
+      const idemKey = readIdempotencyKey(context);
+      const fingerprint = fingerprintRequest('POST', `/messages/${id}/regenerate`, {});
+
+      const pool = getDatabasePool();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const claim = await claimOrLookupIdempotency(client, {
+          workspaceId: auth.workspaceId,
+          userId: auth.userId,
+          key: idemKey,
+          fingerprint,
+        });
+        if ('mismatch' in claim && claim.mismatch) {
+          await client.query('ROLLBACK');
+          return context.json(
+            { error_code: 'IDEMPOTENCY_KEY_REUSED', message: 'Idempotency-Key 已被用于其它请求。' },
+            409,
+          );
+        }
+        if ('hit' in claim) {
+          await client.query('ROLLBACK');
+          return context.json(claim.hit.body, claim.hit.status);
+        }
+
+        const result = await createRegenerateRun(client, {
+          workspaceId: auth.workspaceId,
+          assistantMessageId: id,
+          provider: config.chatProvider,
+          model: config.chatModel,
+          userId: auth.userId,
+          requestId: deps.requestId,
+        });
+
+        const responseBody = {
+          assistantMessageId: result.assistantMessage.id,
+          replacedAssistantMessageId: result.oldAssistantMessage.id,
+          runId: result.run.id,
+          eventsUrl: buildEventsUrl(result.run.id, deps.base),
+        };
+        await finalizeIdempotency(client, {
+          workspaceId: auth.workspaceId,
+          userId: auth.userId,
+          key: idemKey,
+          responseStatus: 202,
+          responseBody,
+        });
+        await client.query('COMMIT');
+        logRequest('info', {
+          msg: 'V2 regenerate message',
+          workspaceId: auth.workspaceId,
+          userId: auth.userId,
+          conversationId: result.conversation.id,
+          runId: result.run.id,
+          replacedAssistantMessageId: result.oldAssistantMessage.id,
+        });
+        return context.json(responseBody, 202);
+      } catch (err) {
+        try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+        if ((err as Error).name === 'NotFoundError') {
+          return context.json({ error_code: 'NOT_FOUND', message: (err as Error).message }, 404);
+        }
+        if ((err as Error).name === 'ConversationActiveRunError') {
+          return context.json(
+            {
+              error_code: 'CONVERSATION_CONFLICT_ACTIVE_RUN',
+              message: (err as Error).message,
+            },
+            409,
+          );
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+    });
   },
 };
 

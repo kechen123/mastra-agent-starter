@@ -3,11 +3,12 @@ import {
   ComposerPrimitive,
   ThreadPrimitive,
   useExternalStoreRuntime,
+  useThreadViewport,
   type AppendMessage,
   type ExternalStoreAdapter,
   type MessageState,
 } from '@assistant-ui/react';
-import { Check, ChevronDown, Library, LoaderCircle, RefreshCw, RotateCcw, Send, Sparkles, X } from 'lucide-react';
+import { Check, ChevronDown, Copy, Library, LoaderCircle, PanelLeftOpen, RefreshCw, RotateCcw, Send, Sparkles, Square, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Citation, KnowledgeBase } from '../../../lib/api';
 import { cn } from '../../../lib/cn';
@@ -20,7 +21,10 @@ import {
 } from '../assistantAdapter';
 import { CitationPanel } from './CitationPanel';
 import { Markdown } from './Markdown';
-import { ApprovalCard } from './ApprovalCard';
+import { ApprovalsBanner } from './ApprovalsBanner';
+import { AgentSelect } from './AgentSelect';
+import { KnowledgeBasePicker } from './KnowledgeBasePicker';
+import { ModelSelect } from './ModelSelect';
 
 export interface AssistantChatWorkspaceProps {
   appShortName: string;
@@ -32,6 +36,8 @@ export interface AssistantChatWorkspaceProps {
   knowledgeBases: KnowledgeBase[];
   selectedAgentId: string;
   defaultChatModel: string;
+  /** 后端 llm.displayName（如 "DeepSeek"）；缺省回退 defaultChatModel。 */
+  llmDisplayName?: string;
   activeKnowledgeBase: Pick<KnowledgeBase, 'id' | 'name'> | null;
   onSubmit: (text: string) => void;
   onStop: () => void;
@@ -50,6 +56,9 @@ export interface AssistantChatWorkspaceProps {
   /** PR-3.3 — 用户点击 Approve / Decline 时的回调。 */
   onApproveApproval?: (approval: ApprovalView) => void;
   onDeclineApproval?: (approval: ApprovalView) => void;
+  /** 桌面 sidebar 折叠状态：折叠时在聊天头部渲染展开入口。 */
+  sidebarCollapsed?: boolean;
+  onExpandSidebar?: () => void;
 }
 
 const scrollbarStyle = {
@@ -122,6 +131,7 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
     knowledgeBases,
     selectedAgentId,
     defaultChatModel,
+    llmDisplayName,
     activeKnowledgeBase,
     onSwitchAgent,
     onSelectKnowledgeBase,
@@ -131,44 +141,24 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
     busyApprovalId,
     onApproveApproval,
     onDeclineApproval,
+    sidebarCollapsed,
+    onExpandSidebar,
   } = props;
 
   const messageScrollRef = useRef<HTMLDivElement>(null);
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const [isAgentPickerOpen, setIsAgentPickerOpen] = useState(false);
-  const [isKnowledgeBasePickerOpen, setIsKnowledgeBasePickerOpen] = useState(false);
-  const agentPickerRef = useRef<HTMLDivElement>(null);
-  const knowledgeBasePickerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    function closePickers(event: MouseEvent) {
-      if (!agentPickerRef.current?.contains(event.target as Node)) setIsAgentPickerOpen(false);
-      if (!knowledgeBasePickerRef.current?.contains(event.target as Node)) setIsKnowledgeBasePickerOpen(false);
-    }
-    document.addEventListener('mousedown', closePickers);
-    return () => document.removeEventListener('mousedown', closePickers);
-  }, []);
-
-  function scrollToLatest(behavior: ScrollBehavior = 'smooth') {
-    const element = messageScrollRef.current;
-    if (!element) return;
-    setShowJumpToLatest(false);
-    element.scrollTo({ top: element.scrollHeight, behavior });
-  }
-
-  function handleMessageScroll() {
-    const element = messageScrollRef.current;
-    if (!element) return;
-    const isAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
-    setShowJumpToLatest(!isAtBottom);
-  }
+  // assistant-ui viewport store：isAtBottom 由框架原生维护，
+  // 不再依赖手写 scrollTop/scrollHeight 阈值；用户上滑 → isAtBottom=false →
+  // "回到最新"按钮可见；点击 ThreadPrimitive.ScrollToBottom → 恢复自动跟随。
+  const viewport = useThreadViewport();
+  const isAtBottom = viewport.isAtBottom;
 
   const currentAgent = chatAgents.find((agent) => agent.id === selectedAgentId);
   const isKnowledgeAgent = currentAgent?.requiresKnowledgeBase ?? false;
-  const streamingAssistant = useMemo(() => {
+  const hasInFlightAssistant = useMemo(() => {
     return messages.find(
       (m): m is Extract<ChatMessage, { role: 'assistant' }> =>
-        m.role === 'assistant' && m.status === 'streaming',
+        m.role === 'assistant' && (m.status === 'pending' || m.status === 'streaming'),
     );
   }, [messages]);
   const lastAssistantIndex = messages.reduce(
@@ -177,66 +167,42 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
   );
 
   return (
-    <section className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden flex-col bg-app-bg app-chat-canvas">
-      <header className="relative z-10 flex items-center justify-between gap-3 shrink-0 min-h-14 px-4 max-[760px]:pl-14 bg-app-bg/95 backdrop-blur-xl">
-        <div className="relative min-w-0" ref={agentPickerRef}>
+    <section className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden flex-col bg-app-sidebar app-chat-canvas">
+      <header className="relative z-10 flex items-center justify-between gap-3 shrink-0 min-h-14 px-4 max-[760px]:pl-14 bg-app-sidebar/95 backdrop-blur-xl">
+        <div className="flex items-center gap-2 min-w-0">
+          {sidebarCollapsed && onExpandSidebar && (
             <button
-              className="flex items-center gap-1.5 min-w-0 h-10 px-2.5 text-[15px] font-medium text-app-text bg-transparent border-0 rounded-lg transition-colors duration-150 hover:bg-app-hover focus-visible:bg-app-hover"
               type="button"
-              onClick={() => setIsAgentPickerOpen((open) => !open)}
-              aria-haspopup="listbox"
-              aria-expanded={isAgentPickerOpen}
+              onClick={onExpandSidebar}
+              aria-label="展开 sidebar"
+              title="展开 sidebar"
+              className="hidden md:grid place-items-center w-9 h-9 text-app-muted bg-transparent border-0 rounded-lg transition-colors duration-150 hover:text-app-text hover:bg-app-hover focus-visible:text-app-text focus-visible:bg-app-hover"
             >
-              <span className="truncate">
-                {currentAgent?.name ?? '选择智能体'}
-              </span>
-              <ChevronDown size={15} className="shrink-0 pointer-events-none text-app-muted" />
+              <PanelLeftOpen size={16} strokeWidth={1.9} aria-hidden />
             </button>
-            {isAgentPickerOpen && (
-              <div
-                className="absolute z-20 top-[calc(100%+6px)] left-0 grid min-w-[240px] p-1.5 bg-app-surface border border-app-border rounded-xl shadow-[0_16px_40px_rgba(0,0,0,0.28)]"
-                role="listbox"
-                aria-label="选择智能体"
-              >
-                {chatAgents.map((agent) => (
-                  <button
-                    key={agent.id}
-                    className={cn(
-                      'flex items-center justify-between gap-3 min-h-10 py-2 px-3 text-[13.5px] text-app-text bg-transparent border-0 rounded-lg text-left transition-colors duration-150 hover:bg-app-hover focus-visible:bg-app-hover',
-                      agent.id === selectedAgentId && 'bg-app-hover font-medium',
-                    )}
-                    type="button"
-                    role="option"
-                    aria-selected={agent.id === selectedAgentId}
-                    onClick={() => {
-                      onSwitchAgent(agent.id);
-                      setIsAgentPickerOpen(false);
-                    }}
-                  >
-                    <span>{agent.name}</span>
-                    <span className="flex items-center gap-2 shrink-0">
-                      {agent.requiresKnowledgeBase && <small className="text-app-muted text-[11px]">需知识库</small>}
-                      {agent.id === selectedAgentId && <Check size={14} className="text-app-muted" />}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
+          )}
+          <div className="relative min-w-0">
+            <AgentSelect
+              agents={chatAgents}
+              value={selectedAgentId}
+              onChange={onSwitchAgent}
+            />
+          </div>
         </div>
-        <span className="hidden md:block max-w-[260px] truncate text-[12px] text-app-muted app-mono" title={defaultChatModel}>
-          {defaultChatModel}
-        </span>
       </header>
 
       <div className="relative flex-1 min-h-0 overflow-hidden">
         <ThreadPrimitive.Viewport
           ref={messageScrollRef}
-          onScroll={handleMessageScroll}
           // 使用 assistant-ui 原生的 ResizeObserver 自动跟随器：内容流式增长、
           // Markdown 排版变化、终态按钮出现都会再次定位到底部；仅用户主动上滑
           // 时暂停，避免自定义 scrollHeight 时序与内部 viewport 状态相互打架。
+          // runStart 默认会无条件发起一次底部滚动，会覆盖用户正在阅读历史时
+          // 由 autoScroll 暂停的状态；关闭它后，仅原本位于底部的视口继续跟随。
+          // isAtBottom / scrollToBottom 由 useThreadViewport 提供给下面的
+          // 自定义按钮可见性 / 点击使用。
           autoScroll
-          scrollToBottomOnRunStart
+          scrollToBottomOnRunStart={false}
           style={scrollbarStyle}
           className="h-full overflow-y-auto px-4 sm:px-8"
         >
@@ -269,7 +235,7 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
                 />
               )}
             </ThreadPrimitive.Messages>
-            {isAsking && !streamingAssistant && (
+            {isAsking && !hasInFlightAssistant && (
               <div className="flex gap-3.5 mt-8">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 text-[14px] leading-[1.65] text-app-muted">
@@ -288,60 +254,53 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
             )}
           </ThreadPrimitive.Root>
         </ThreadPrimitive.Viewport>
-        {showJumpToLatest && (
-          <button
+        {!isAtBottom && (
+          <ThreadPrimitive.ScrollToBottom
             className={cn(
               'absolute z-20 left-1/2 -translate-x-1/2 bottom-4 grid place-items-center w-10 h-10 p-0 text-app-text bg-app-surface border border-app-border-strong rounded-full shadow-xl hover:bg-app-hover hover:border-app-text',
               isStreaming && 'bg-app-text text-app-surface border-app-text hover:bg-app-text',
             )}
-            type="button"
-            onClick={() => scrollToLatest()}
             aria-label="滚动到底部"
           >
             {isStreaming ? <LoaderCircle size={17} className="animate-spin" /> : <ChevronDown size={17} />}
-          </button>
+          </ThreadPrimitive.ScrollToBottom>
         )}
       </div>
 
-      <div className="relative z-10 shrink-0 px-4 sm:px-8 pb-3 bg-gradient-to-t from-app-bg via-app-bg to-transparent">
+      <div className="relative z-10 shrink-0 px-4 sm:px-8 pb-3">
         {pendingApprovals && pendingApprovals.length > 0 && (
-          <div
-            data-testid="approvals-banner"
-            className="w-full max-w-[768px] mx-auto mb-2 grid gap-2"
-          >
-            {pendingApprovals.map((approval) => (
-              <ApprovalCard
-                key={approval.id}
-                approval={approval}
-                busy={busyApprovalId === approval.id}
-                onApprove={(item) => onApproveApproval?.(item)}
-                onDecline={(item) => onDeclineApproval?.(item)}
-              />
-            ))}
-          </div>
+          <ApprovalsBanner
+            approvals={pendingApprovals}
+            busyApprovalId={busyApprovalId ?? null}
+            onApprove={(item) => onApproveApproval?.(item)}
+            onDecline={(item) => onDeclineApproval?.(item)}
+          />
         )}
         <ComposerPrimitive.Root
           className={cn(
-            'w-full max-w-[768px] mx-auto p-2 rounded-[26px] bg-app-surface shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_8px_28px_rgba(0,0,0,0.14)]',
+            'w-full max-w-[768px] mx-auto p-2 rounded-[26px] bg-app-surface transition-shadow duration-150 shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_8px_28px_rgba(0,0,0,0.14)]',
           )}
         >
           {isKnowledgeAgent && activeKnowledgeBase && (
-            <div className="flex items-center gap-1.5 w-fit mt-0 mx-1.5 mb-1 px-2 py-1 bg-app-surface-muted border border-app-border rounded text-[11.5px]">
-              <Library size={14} />
-              <span>当前知识库：<strong>{activeKnowledgeBase.name}</strong></span>
+            <div className="flex items-center gap-2 w-fit max-w-full mt-0 mx-1.5 mb-1.5 px-2 py-1 bg-app-surface-muted border border-app-border rounded text-[11.5px]">
+              <Library size={14} className="shrink-0 text-app-muted" />
+              <span className="truncate min-w-0 max-w-[180px] sm:max-w-[260px]">
+                当前知识库：<strong className="font-semibold">{activeKnowledgeBase.name}</strong>
+              </span>
               <button
-                className="grid place-items-center p-0 text-app-muted bg-transparent border-0 focus-visible:outline-none focus-visible:text-app-text"
+                className="grid place-items-center shrink-0 w-5 h-5 p-0 text-app-muted bg-transparent border-0 rounded transition-colors duration-150 hover:text-app-text hover:bg-app-hover focus-visible:outline-2 focus-visible:outline focus-visible:outline-focus-ring focus-visible:text-app-text"
+                style={{ outlineOffset: 2 }}
                 onClick={onClearKnowledgeBase}
                 aria-label="退出当前知识库"
               >
-                <X size={14} />
+                <X size={12} />
               </button>
             </div>
           )}
           {isKnowledgeAgent && !activeKnowledgeBase && (
-            <div className="flex items-center gap-1.5 w-fit mt-0 mx-1.5 mb-1 px-2 py-1 text-app-danger bg-app-danger/[0.07] border border-app-border rounded text-[11.5px]">
-              <Library size={14} />
-              <span>请先选择一个知识库</span>
+            <div className="flex items-center gap-2 w-fit max-w-full mt-0 mx-1.5 mb-1.5 px-2 py-1 text-app-danger bg-app-danger/[0.07] border border-app-border rounded text-[11.5px]">
+              <Library size={14} className="shrink-0" />
+              <span className="truncate">请先选择一个知识库</span>
             </div>
           )}
           <ComposerPrimitive.Input
@@ -353,63 +312,29 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
                   : '请先选择一个知识库'
                 : '输入问题，开始对话'
             }
-            className="block w-full min-h-[54px] px-3 py-2.5 resize-none border-0 outline-none text-app-text bg-transparent text-[15px] leading-6 placeholder:text-app-muted"
+            className="block w-full min-h-[54px] px-3 py-2.5 resize-none border-0 outline-none text-app-text bg-transparent text-[15px] leading-6 placeholder:text-app-muted focus:outline-none focus-visible:outline-none"
             rows={2}
           />
           <div className="flex items-center justify-between gap-2.5 mt-1 px-0.5">
-            <div className="relative" ref={knowledgeBasePickerRef}>
-              <button
-                className="inline-flex items-center gap-1.5 min-h-9 py-1.5 px-3 text-[13px] text-app-muted bg-transparent border-0 rounded-full transition-colors duration-150 hover:text-app-text hover:bg-app-hover focus-visible:bg-app-hover"
-                type="button"
-                onClick={() => setIsKnowledgeBasePickerOpen((open) => !open)}
-                aria-haspopup="listbox"
-                aria-expanded={isKnowledgeBasePickerOpen}
-              >
-                <Library size={13} />知识库
-              </button>
-              {isKnowledgeBasePickerOpen && (
-                <div
-                  className="absolute z-20 bottom-[calc(100%+9px)] left-0 grid min-w-[220px] max-w-[280px] p-1.5 bg-app-surface border border-app-border-strong rounded-xl shadow-2xl"
-                  role="listbox"
-                  aria-label="选择知识库"
-                >
-                  {knowledgeBases.length === 0 ? (
-                    <p className="m-1.5 px-2 text-app-muted text-xs leading-snug">暂无知识库，请先在知识库页创建。</p>
-                  ) : (
-                    knowledgeBases.map((knowledgeBase) => (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={knowledgeBase.id === activeKnowledgeBase?.id}
-                        className={cn(
-                          'flex items-center gap-2 w-full py-2 px-2.5 text-[12.5px] text-app-text bg-transparent border-0 rounded-lg text-left hover:bg-app-surface-muted focus-visible:outline-none focus-visible:bg-app-surface-muted',
-                          knowledgeBase.id === activeKnowledgeBase?.id && 'bg-app-surface-muted',
-                        )}
-                        key={knowledgeBase.id}
-                        onClick={() => {
-                          onSelectKnowledgeBase(knowledgeBase);
-                          setIsKnowledgeBasePickerOpen(false);
-                        }}
-                      >
-                        <Library size={14} />
-                        <span>{knowledgeBase.name}</span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
+            <KnowledgeBasePicker
+              knowledgeBases={knowledgeBases}
+              activeId={activeKnowledgeBase?.id ?? null}
+              onSelect={onSelectKnowledgeBase}
+            />
             <div className="flex items-center gap-1.5">
+              <ModelSelect defaultChatModel={defaultChatModel} llmDisplayName={llmDisplayName} />
               {isStreaming ? (
                 <ComposerPrimitive.Cancel
-                  className="grid place-items-center w-9 h-9 text-white bg-app-danger border-0 rounded-full transition-transform duration-150 active:scale-95 hover:opacity-90"
+                  className="grid place-items-center w-9 h-9 text-app-surface bg-app-text border-0 rounded-full transition-transform duration-150 active:scale-95 hover:opacity-90 focus-visible:outline-2 focus-visible:outline focus-visible:outline-focus-ring"
+                  style={{ outlineOffset: 2 }}
                   aria-label="停止生成"
                 >
-                  <X size={18} />
+                  <Square size={13} fill="currentColor" strokeWidth={0} aria-hidden />
                 </ComposerPrimitive.Cancel>
               ) : (
                 <ComposerPrimitive.Send
-                  className="grid place-items-center w-9 h-9 text-app-bg bg-app-text border-0 rounded-full transition-[transform,opacity] duration-150 active:scale-95 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35"
+                  className="grid place-items-center w-9 h-9 text-app-bg bg-app-text border-0 rounded-full transition-[transform,opacity] duration-150 active:scale-95 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline-2 focus-visible:outline focus-visible:outline-focus-ring"
+                  style={{ outlineOffset: 2 }}
                   aria-label="发送问题"
                 >
                   <Send size={18} />
@@ -436,19 +361,61 @@ interface MessageViewProps {
 
 function MessageView({ message, index, isLastAssistant, onSelectCitation, onRegenerate }: MessageViewProps) {
   const isUser = message.role === 'user';
+  const meta = (message.metadata.custom ?? {}) as Partial<ChatMessageMetadata>;
+  const content = messageContentText(message.content);
+  const [copied, setCopied] = useState(false);
+  const createdAt = meta.createdAt;
+
+  async function handleCopy() {
+    if (!content) return;
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      const textArea = document.createElement('textarea');
+      textArea.value = content;
+      textArea.style.position = 'fixed';
+      textArea.style.opacity = '0';
+      document.body.append(textArea);
+      textArea.select();
+      const copiedByFallback = document.execCommand('copy');
+      textArea.remove();
+      if (copiedByFallback) {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1600);
+      }
+    }
+  }
+
+  const copyButton = content ? (
+    <button
+      type="button"
+      onClick={() => void handleCopy()}
+      className="grid place-items-center w-7 h-7 text-app-muted bg-transparent border-0 rounded-md hover:text-app-text hover:bg-app-hover focus-visible:outline-none focus-visible:bg-app-hover"
+      aria-label={copied ? '已复制' : '复制消息'}
+      title={copied ? '已复制' : '复制消息'}
+    >
+      {copied ? <Check size={14} /> : <Copy size={14} />}
+    </button>
+  ) : null;
+
   if (isUser) {
     return (
-      <div className="flex flex-row-reverse mt-8" data-message-id={message.id} data-index={index}>
+      <div className="group flex flex-row-reverse mt-8" data-message-id={message.id} data-index={index}>
         <div className="flex flex-col items-end max-w-[78%]">
           <p className="m-0 py-2.5 px-4 max-w-full break-words whitespace-pre-wrap bg-app-surface-muted border-0 rounded-[20px] text-[15px] leading-[1.65]">
-            {messageContentText(message.content)}
+            {content}
           </p>
+          <div className="flex items-center gap-1 h-7 mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+            {createdAt && <time className="text-[11px] text-app-muted" dateTime={createdAt}>{formatMessageTime(createdAt)}</time>}
+            {copyButton}
+          </div>
         </div>
       </div>
     );
   }
 
-  const meta = (message.metadata.custom ?? {}) as Partial<ChatMessageMetadata>;
   const citations = meta.citations ?? [];
   const toolCalls = meta.toolCalls ?? [];
   const chatStatus = (meta.chatStatus ?? 'completed') as Extract<ChatMessage, { role: 'assistant' }>['status'];
@@ -457,15 +424,21 @@ function MessageView({ message, index, isLastAssistant, onSelectCitation, onRege
   const showRetry = isFailed || isStopped;
   const showRegenerate = chatStatus === 'completed' && isLastAssistant;
   const showActions = chatStatus !== 'pending' && chatStatus !== 'streaming';
-  const content = messageContentText(message.content);
 
   return (
-    <div className="flex mt-8" data-message-id={message.id} data-index={index}>
+    <div className="group flex mt-8" data-message-id={message.id} data-index={index}>
       <div className="min-w-0 max-w-full">
         <div className="text-[15.5px] leading-7">
           {content ? (
             <Markdown text={content} />
-          ) : chatStatus === 'pending' || chatStatus === 'streaming' ? null : (
+          ) : chatStatus === 'pending' || chatStatus === 'streaming' ? (
+            <div className="flex items-center gap-2 min-h-7 text-[14px] leading-[1.65] text-app-muted" role="status" aria-label="正在思考">
+              <span className="w-1.5 h-1.5 rounded-full bg-current" style={{ animation: 'app-loading-dot 1s infinite ease-in-out' }} />
+              <span className="w-1.5 h-1.5 rounded-full bg-current" style={{ animation: 'app-loading-dot 1s infinite ease-in-out', animationDelay: '0.15s' }} />
+              <span className="w-1.5 h-1.5 rounded-full bg-current" style={{ animation: 'app-loading-dot 1s infinite ease-in-out', animationDelay: '0.3s' }} />
+              <span>正在思考…</span>
+            </div>
+          ) : (
             <p className="m-0 text-app-muted">（无内容）</p>
           )}
           {isFailed && (
@@ -501,24 +474,33 @@ function MessageView({ message, index, isLastAssistant, onSelectCitation, onRege
             </div>
           </div>
         )}
-        {showActions && (showRetry || showRegenerate) && (
-          <div className="flex flex-wrap gap-2 mt-3">
+        {(showActions || createdAt) && (
+          <div className={cn(
+            'flex items-center gap-1 h-8 mt-3 transition-opacity',
+            showActions ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+          )}>
+            {createdAt && <time className="mr-1 text-[11px] text-app-muted" dateTime={createdAt}>{formatMessageTime(createdAt)}</time>}
+            {copyButton}
             {showRetry && (
               <button
-                className="inline-flex items-center gap-1 py-1 px-2.5 text-[12px] text-app-text bg-app-surface-muted border border-app-border rounded hover:bg-app-hover focus-visible:outline-none focus-visible:border-focus-border focus-visible:bg-app-hover"
+                type="button"
+                className="grid place-items-center w-7 h-7 text-app-muted bg-transparent border-0 rounded-md hover:text-app-text hover:bg-app-hover focus-visible:outline-none focus-visible:bg-app-hover"
                 onClick={() => onRegenerate(message.id)}
+                aria-label="重试生成"
+                title="重试生成"
               >
-                <RotateCcw size={13} />
-                重试
+                <RotateCcw size={14} />
               </button>
             )}
             {showRegenerate && (
               <button
-                className="inline-flex items-center gap-1 py-1 px-2.5 text-[12px] text-app-text bg-app-surface-muted border border-app-border rounded hover:bg-app-hover focus-visible:outline-none focus-visible:border-focus-border focus-visible:bg-app-hover"
+                type="button"
+                className="grid place-items-center w-7 h-7 text-app-muted bg-transparent border-0 rounded-md hover:text-app-text hover:bg-app-hover focus-visible:outline-none focus-visible:bg-app-hover"
                 onClick={() => onRegenerate(message.id)}
+                aria-label="重新生成"
+                title="重新生成"
               >
-                <RefreshCw size={13} />
-                重新生成
+                <RefreshCw size={14} />
               </button>
             )}
           </div>
@@ -526,6 +508,14 @@ function MessageView({ message, index, isLastAssistant, onSelectCitation, onRege
       </div>
     </div>
   );
+}
+
+function formatMessageTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).format(date);
 }
 
 function ToolCallsPanel({ toolCalls }: { toolCalls: ToolCallState[] }) {

@@ -18,12 +18,12 @@
     "users:create": "tsx src/scripts/users-create.ts"
   },
   "dependencies": {
-    "@mastra/core": "1.61.0",
-    "@mastra/pg": "1.21.1",
-    "@mastra/rag": "2.6.0",
-    "@mastra/server": "1.61.0",
+    "@mastra/core": "1.65.0",
+    "@mastra/pg": "1.23.0",
+    "@mastra/rag": "2.6.2",
+    "@mastra/server": "1.65.0",
     "dotenv": "^16.5.0",
-    "mastra": "1.26.0",
+    "mastra": "1.28.0",
     "pg": "^8.16.0",
     "pino": "^9.14.0",
     "pino-pretty": "^11.3.0",

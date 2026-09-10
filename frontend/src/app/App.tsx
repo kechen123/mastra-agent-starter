@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMediaQuery } from '@base-ui/react/unstable-use-media-query'
 import {
   DEFAULT_CAPABILITIES,
   UnauthenticatedError,
@@ -28,12 +29,11 @@ import {
   updateConversation,
   deleteConversation,
   stopMessage,
-  regenerateMessage,
+  regenerateMessageV2,
   postMessage,
   streamRunEvents,
   readPersistedLastEventId,
   clearPersistedLastEventId,
-  type SSEEvent,
   type V2RunEvent,
   type RunStreamHandle,
 } from '../lib/conversations'
@@ -51,12 +51,14 @@ import {
 } from '../lib/streaming-renderer'
 import { cn } from '../lib/cn'
 import { Sidebar } from '../components/layout/Sidebar'
-import { CitationPanel } from '../features/chat/components/CitationPanel'
+import { CitationPanel, MobileCitationDialog } from '../features/chat/components/CitationPanel'
 import { AssistantChatWorkspace } from '../features/chat/components/AssistantChatWorkspace'
 import { KnowledgeBaseWorkspace } from '../features/knowledge/components/KnowledgeBaseWorkspace'
 import { SkillsWorkspace } from '../features/capabilities/components/SkillsWorkspace'
 import { LoginScreen } from '../features/auth/components/LoginScreen'
 import { useApprovals } from '../features/chat/useApprovals'
+import { ConfirmDialog, type ConfirmRequest } from '../components/feedback/ConfirmDialog'
+import { RenameConversationDialog } from '../features/chat/components/RenameConversationDialog'
 import { Menu } from 'lucide-react'
 
 type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated'
@@ -70,8 +72,8 @@ type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated'
 //   - content-checkpoint：是权威完整快照；若它比当前文本更长，必须收敛；
 //     若它比当前文本短或非前缀，保留当前文本（已经被更长的实时 delta 推进过）。
 
-// URL ↔ 当前会话的工具函数。V2 阶段 2 起统一为 `/chat/new` / `/chat/<uuid>` 路径式。
-// 旧 `?conversation=<uuid>` 查询参数保留解析能力，但不再主动写入。
+// URL ↔ 应用视图的工具函数。保留原生 History API，避免为三个一级页面引入
+// 一套并不需要的路由依赖。旧 `?conversation=<uuid>` 仅保留解析兼容，不再写入。
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function isUuid(value: string): boolean {
@@ -82,36 +84,51 @@ function isBrowser(): boolean {
   return typeof window !== 'undefined' && typeof window.history !== 'undefined'
 }
 
-// 把 URL 解析为三态：draft (new) / invalid / valid (id)。启动恢复、popstate
-// 都靠这个判别走不同分支，避免把"路径缺失 / 路径非法"混在一起掩盖。
-type ConversationUrlState =
-  | { kind: 'draft' }
-  | { kind: 'invalid' }
-  | { kind: 'valid'; id: string };
+type AppRoute =
+  | { kind: 'chat-draft' }
+  | { kind: 'chat-conversation'; id: string }
+  | { kind: 'knowledge-list' }
+  | { kind: 'knowledge-detail'; id: string }
+  | { kind: 'skills' }
+  | { kind: 'invalid' };
 
-function readConversationUrlState(): ConversationUrlState {
-  if (!isBrowser()) return { kind: 'draft' }
+type NavigationMode = 'push' | 'replace' | 'none'
+
+function readAppRoute(): AppRoute {
+  if (!isBrowser()) return { kind: 'chat-draft' }
   const path = window.location.pathname.replace(/\/+$/, '')
-  if (path === '' || path === '/chat' || path === '/chat/new') return { kind: 'draft' }
+  if (path === '' || path === '/chat' || path === '/chat/new') return { kind: 'chat-draft' }
   const segments = path.split('/').filter(Boolean)
-  if (segments.length >= 2 && segments[0] === 'chat' && isUuid(segments[1])) {
-    return { kind: 'valid', id: segments[1] }
+  if (segments[0] === 'chat') {
+    if (segments.length === 2 && isUuid(segments[1])) return { kind: 'chat-conversation', id: segments[1] }
+    return { kind: 'invalid' }
+  }
+  if (segments[0] === 'knowledge-bases') {
+    if (segments.length === 1) return { kind: 'knowledge-list' }
+    if (segments.length === 2 && isUuid(segments[1])) return { kind: 'knowledge-detail', id: segments[1] }
+    return { kind: 'invalid' }
+  }
+  if (segments.length === 1 && segments[0] === 'skills') {
+    return { kind: 'skills' }
   }
   // 兼容旧 query ?conversation=<uuid>（不要污染迁移期间的用户体验）
   const params = new URLSearchParams(window.location.search)
   if (params.has('conversation')) {
     const raw = params.get('conversation')
-    if (raw && isUuid(raw)) return { kind: 'valid', id: raw }
+    if (raw && isUuid(raw)) return { kind: 'chat-conversation', id: raw }
     return { kind: 'invalid' }
   }
-  if (segments[0] === 'chat' && segments[1]) return { kind: 'invalid' }
-  return { kind: 'draft' }
+  return { kind: 'invalid' }
 }
 
-function buildChatPath(id: string | null): string {
+function buildRoutePath(route: Exclude<AppRoute, { kind: 'invalid' }>): string {
   // 保留 query / hash 不被误删。
   const url = new URL(window.location.href)
-  url.pathname = id === null ? '/chat/new' : `/chat/${id}`
+  if (route.kind === 'chat-draft') url.pathname = '/chat/new'
+  else if (route.kind === 'chat-conversation') url.pathname = `/chat/${route.id}`
+  else if (route.kind === 'knowledge-list') url.pathname = '/knowledge-bases'
+  else if (route.kind === 'knowledge-detail') url.pathname = `/knowledge-bases/${route.id}`
+  else url.pathname = '/skills'
   // 旧查询参数清掉，避免"路径 + 查询"双通道并存
   url.searchParams.delete('conversation')
   return url.pathname + url.search + url.hash
@@ -121,40 +138,63 @@ function currentLocationMatches(target: string): boolean {
   return window.location.pathname + window.location.search + window.location.hash === target
 }
 
+function writeRoute(route: Exclude<AppRoute, { kind: 'invalid' }>, mode: 'push' | 'replace'): void {
+  if (!isBrowser()) return
+  const next = buildRoutePath(route)
+  if (currentLocationMatches(next)) return
+  const state = route.kind === 'chat-conversation' ? { conversationId: route.id } : null
+  if (mode === 'push') window.history.pushState(state, '', next)
+  else window.history.replaceState(state, '', next)
+}
+
 // 用户主动操作（首条消息创建后）写历史栈。
 function setConversationUrl(id: string): void {
-  if (!isBrowser()) return
-  const next = buildChatPath(id)
-  if (currentLocationMatches(next)) return
-  window.history.pushState({ conversationId: id }, '', next)
+  writeRoute({ kind: 'chat-conversation', id }, 'push')
 }
 
 // 用户主动点"新对话" / 删除当前会话时：写入 draft 历史栈，避免浏览器回退
 // 时反复回到已被清理的会话。
 function clearConversationUrl(): void {
-  if (!isBrowser()) return
-  const next = buildChatPath(null)
-  if (currentLocationMatches(next)) return
-  window.history.pushState(null, '', next)
+  writeRoute({ kind: 'chat-draft' }, 'push')
 }
 
 // 启动恢复 / 解析失败 / 404 / 跨 Workspace 无权：用 replaceState 清理无效
 // 路径，避免污染浏览历史。
 function replaceConversationUrl(id: string | null): void {
-  if (!isBrowser()) return
-  const next = buildChatPath(id)
-  if (currentLocationMatches(next)) return
-  if (id === null) window.history.replaceState(null, '', next)
-  else window.history.replaceState({ conversationId: id }, '', next)
+  writeRoute(id === null ? { kind: 'chat-draft' } : { kind: 'chat-conversation', id }, 'replace')
 }
 
 function App() {
   const [theme, setTheme] = useState<Theme>('dark'); const [activeModule, setActiveModule] = useState<Module>('对话')
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  // 桌面 sidebar 折叠状态：仅适用于 ≥760px。localStorage key 与项目其他设置保持命名空间一致。
+  // 移动端 drawer 不受此状态影响（仍由 isSidebarOpen 控制）。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    try { return window.localStorage.getItem('xuanshu-agent.sidebar-collapsed') === 'true' }
+    catch { return false }
+  })
+  // Base UI 的 Menu / ContextMenu / Dialog / Select 通过 Portal 挂到 body。
+  // 主题若只写在 <main>，这些弹层不会继承 .dark 变量，导致暗色模式仍显示亮色菜单。
+  useEffect(() => {
+    const root = document.documentElement
+    root.classList.toggle('dark', theme === 'dark')
+    return () => root.classList.remove('dark')
+  }, [theme])
+  useEffect(() => {
+    try { window.localStorage.setItem('xuanshu-agent.sidebar-collapsed', sidebarCollapsed ? 'true' : 'false') }
+    catch { /* localStorage 不可用时静默忽略 */ }
+  }, [sidebarCollapsed])
+  const toggleSidebarCollapsed = useCallback(() => setSidebarCollapsed((value) => !value), [])
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [conversationState, setConversationState] = useState<ConversationState>({ type: 'draft', agentId: 'general-chat', knowledgeBaseId: null })
   const [messages, setMessages] = useState<ChatMessage[]>([]); const [isAsking, setIsAsking] = useState(false); const [chatError, setChatError] = useState<string | null>(null); const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]); const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<string | null>(null); const [documents, setDocuments] = useState<KnowledgeDocument[]>([]); const [isKnowledgeLoading, setIsKnowledgeLoading] = useState(false); const [isUploading, setIsUploading] = useState(false); const [showCreateKnowledgeBase, setShowCreateKnowledgeBase] = useState(false); const [knowledgeError, setKnowledgeError] = useState<string | null>(null); const [capabilities, setCapabilities] = useState<Capabilities>(DEFAULT_CAPABILITIES)
+  // ConfirmDialog 集中状态：所有 window.confirm 替代品走这里。
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null)
+  const [isConfirming, setIsConfirming] = useState(false)
+  // RenameConversationDialog 状态：null → 关闭；非 null → 弹出并预填 initialTitle。
+  const [renameRequest, setRenameRequest] = useState<{ id: string; initialTitle: string } | null>(null)
   const [chatAgents, setChatAgents] = useState<ChatAgentInfo[]>(DEFAULT_CAPABILITIES.chatAgents)
 
   // 认证状态机：见设计文档 § 前端。未认证仅渲染 <LoginScreen />，业务
@@ -177,6 +217,7 @@ function App() {
   // 进入新对话时，过期响应不得覆盖最新 UI。
   const loadConversationSeqRef = useRef(0)
   const refreshConversationsSeqRef = useRef(0)
+  const refreshKnowledgeBasesSeqRef = useRef(0)
   // 启动恢复是否已执行：避免依赖 authStatus 反复触发。
   const startupRecoveryDoneRef = useRef(false)
   // V2 Run 流句柄（GET SSE）；由 streamRunEvents 持有，重连 / 切会话时关闭。
@@ -197,6 +238,10 @@ function App() {
   const approvals = useApprovals({
     sessionKey: authStatus === 'authenticated' ? currentUser?.id ?? null : null,
   })
+
+  // 集中保存 ConfirmDialog 的待处理动作；ref 而非 state 防止重渲染。
+  const pendingDeleteRef = useRef<{ kind: 'conversation' | 'knowledge-base' | 'document'; id: string } | null>(null)
+  const pendingConfirmActionRef = useRef<(() => Promise<void>) | null>(null)
 
   // 绑定 renderer ops。`useCallback` 内访问的 setMessages 由 React 提供稳定引用。
   const rendererOpsRef = useRef<RendererOps | null>(null)
@@ -338,28 +383,13 @@ function App() {
     }
   }, [authStatus, activeModule, selectedKnowledgeBaseId, handleUnauthenticated])
 
-  // 启动恢复：首次认证成功后根据 ?conversation=<uuid> 加载会话。
-  // - valid(id)：loadConversation(replace) 写入 UI；用 replace 不污染历史栈。
-  // - invalid：URL 有 conversation 参数但不是合法 UUID → replace 清掉 + 回 draft。
-  // - absent：URL 无参数 → 保持 draft，不动 URL。
-  // - 401 走 handleUnauthenticated；其它错误保留 chatError 不卡死页面。
+  // 启动恢复：认证完成后由 URL 决定当前一级页面与详情选择。
+  // 非法地址统一 replace 到聊天草稿，避免把未知路径伪装成有效页面。
   useEffect(() => {
     if (authStatus !== 'authenticated') return
     if (startupRecoveryDoneRef.current) return
     startupRecoveryDoneRef.current = true
-    const urlState = readConversationUrlState()
-    if (urlState.kind === 'invalid') {
-      enterDraft({ clearUrl: 'replace', message: null })
-      return
-    }
-    if (urlState.kind === 'draft') {
-      // /chat/new → 仅确保 URL 路径一致；保留查询参数 / hash 不动。
-      if (isBrowser() && window.location.pathname !== '/chat/new') {
-        replaceConversationUrl(null)
-      }
-      return
-    }
-    void loadConversation(urlState.id, 'replace')
+    applyRoute(readAppRoute(), 'replace')
     // loadConversation 闭包会引用组件最新状态，但启动恢复只跑一次，
     // 不会在依赖更新时反复执行。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -368,8 +398,8 @@ function App() {
   // Phase 2：`/chat/new` 的事实来源必须是服务端 draft，而不是前端临时状态。
   // 有具体会话 ID 时由 loadConversation 接管，不能在恢复历史会话期间额外创建 draft。
   useEffect(() => {
-    if (authStatus !== 'authenticated' || conversationState.type !== 'draft') return
-    if (readConversationUrlState().kind !== 'draft') return
+    if (authStatus !== 'authenticated' || activeModule !== '对话' || conversationState.type !== 'draft') return
+    if (readAppRoute().kind !== 'chat-draft') return
     void ensureServerDraftConversation().catch((error) => {
       if (error instanceof UnauthenticatedError) {
         handleUnauthenticated()
@@ -379,7 +409,7 @@ function App() {
     })
     // conversationState 是 draft 时需要捕获当时选择的 agent / knowledge base。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authStatus, conversationState])
+  }, [authStatus, activeModule, conversationState])
 
   // 浏览器前进 / 后退：URL 是真相，状态必须跟随。
   // 注意 pushState/replaceState 不会触发 popstate，只有浏览器导航才会。
@@ -389,25 +419,13 @@ function App() {
   conversationStateRef.current = conversationState
   const authStatusRef = useRef(authStatus)
   authStatusRef.current = authStatus
+  const applyRouteRef = useRef<(route: AppRoute, navigation: NavigationMode) => void>(() => {})
+  applyRouteRef.current = applyRoute
   useEffect(() => {
     function onPopState() {
       // 未认证就忽略；登录页本身不参与 URL 会话恢复。
       if (authStatusRef.current !== 'authenticated') return
-      const urlState = readConversationUrlState()
-      if (urlState.kind === 'invalid') {
-        // URL 路径非法：replace 清掉，回到 draft。
-        enterDraft({ clearUrl: 'replace', message: null })
-        return
-      }
-      if (urlState.kind === 'draft') {
-        // 用户回退到 /chat/new：不动 URL，回到 draft。
-        enterDraft({ clearUrl: 'none', message: null })
-        return
-      }
-      // valid：切到与当前相同就避免重复请求。
-      const current = conversationStateRef.current
-      if (current.type === 'persisted' && current.id === urlState.id) return
-      void loadConversation(urlState.id, 'none')
+      applyRouteRef.current(readAppRoute(), 'none')
     }
     window.addEventListener('popstate', onPopState)
     return () => { window.removeEventListener('popstate', onPopState) }
@@ -447,6 +465,7 @@ function App() {
     cancelStreamingRender()
     // 让任何还在飞的 getConversation 响应作废。
     loadConversationSeqRef.current += 1
+    setActiveModule('对话')
     setConversationState({
       type: 'draft',
       agentId: options?.agentId ?? 'general-chat',
@@ -493,7 +512,25 @@ function App() {
       }
     }
   }
-  async function refreshKnowledgeBases() { setIsKnowledgeLoading(true); try { setKnowledgeBases(await listKnowledgeBases()) } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); setIsKnowledgeLoading(false); return }; setKnowledgeError(toErrorMessage(error)) } finally { setIsKnowledgeLoading(false) } }
+  async function refreshKnowledgeBases() {
+    const seq = ++refreshKnowledgeBasesSeqRef.current
+    setIsKnowledgeLoading(true)
+    try {
+      const list = await listKnowledgeBases()
+      if (seq !== refreshKnowledgeBasesSeqRef.current) return
+      setKnowledgeBases(list)
+      if (selectedKnowledgeBaseId && !list.some((knowledgeBase) => knowledgeBase.id === selectedKnowledgeBaseId)) {
+        setKnowledgeError('该知识库不存在或已无权访问。')
+        enterKnowledgeBaseList('replace')
+      }
+    } catch (error) {
+      if (seq !== refreshKnowledgeBasesSeqRef.current) return
+      if (error instanceof UnauthenticatedError) { handleUnauthenticated(); setIsKnowledgeLoading(false); return }
+      setKnowledgeError(toErrorMessage(error))
+    } finally {
+      if (seq === refreshKnowledgeBasesSeqRef.current) setIsKnowledgeLoading(false)
+    }
+  }
   async function refreshDocuments(id: string) { setIsKnowledgeLoading(true); try { setDocuments(await listDocuments(id)) } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); setIsKnowledgeLoading(false); return }; setKnowledgeError(toErrorMessage(error)) } finally { setIsKnowledgeLoading(false) } }
   // 加载指定 conversation。navigation 决定是否写 URL：
   // - 'push'：用户主动从侧边栏点击 / 首条消息创建后；写历史栈。
@@ -518,7 +555,7 @@ function App() {
       const { messages: loadedMessages } = await getConversation(id)
       if (seq !== loadConversationSeqRef.current) return
       setConversationState({ type: 'persisted', id })
-      setMessages(loadedMessages.map((m) => m.role === 'user' ? { id: m.id, role: 'user', content: m.content, status: m.status as 'completed' | 'failed' } : { id: m.id, role: 'assistant', content: m.content, citations: m.citations, status: m.status as Extract<ChatMessage, { role: 'assistant' }>['status'] }))
+      setMessages(loadedMessages.map((m) => m.role === 'user' ? { id: m.id, role: 'user', content: m.content, status: m.status as 'completed' | 'failed', createdAt: m.createdAt } : { id: m.id, role: 'assistant', content: m.content, citations: m.citations, status: m.status as Extract<ChatMessage, { role: 'assistant' }>['status'], createdAt: m.createdAt }))
       if (navigation === 'push') setConversationUrl(id)
       else if (navigation === 'replace') replaceConversationUrl(id)
       // V2 SSE 重连：最后一条 assistant message 若仍携带 currentRunId，
@@ -614,6 +651,7 @@ function App() {
           content: '',
           citations: [],
           status: 'pending',
+          createdAt: new Date().toISOString(),
         }]
       })
       setIsAsking(true)
@@ -637,6 +675,7 @@ function App() {
 
   // 侧边栏点击：用户主动操作 → push URL。
   async function openConversation(id: string) {
+    setActiveModule('对话')
     if (streamingAssistantIdRef.current) {
       await handleStop()
     }
@@ -650,6 +689,64 @@ function App() {
   function newChat() {
     // 用户主动操作：用 push 清 URL，让浏览器"返回"能回到刚刚清掉的状态。
     enterDraft({ clearUrl: 'push', message: null })
+  }
+
+  function enterKnowledgeBaseList(navigation: NavigationMode, showCreate = false) {
+    if (streamingAssistantIdRef.current) void handleStop()
+    setActiveModule('知识库')
+    setSelectedCitation(null)
+    setSelectedKnowledgeBaseId(null)
+    setDocuments([])
+    setShowCreateKnowledgeBase(showCreate)
+    setKnowledgeError(null)
+    if (navigation !== 'none') writeRoute({ kind: 'knowledge-list' }, navigation)
+  }
+
+  function openKnowledgeBase(id: string, navigation: NavigationMode) {
+    if (streamingAssistantIdRef.current) void handleStop()
+    setActiveModule('知识库')
+    setSelectedCitation(null)
+    setSelectedKnowledgeBaseId(id)
+    setDocuments([])
+    setShowCreateKnowledgeBase(false)
+    setKnowledgeError(null)
+    if (navigation !== 'none') writeRoute({ kind: 'knowledge-detail', id }, navigation)
+  }
+
+  function enterSkills(navigation: NavigationMode) {
+    if (streamingAssistantIdRef.current) void handleStop()
+    setActiveModule('能力')
+    setSelectedCitation(null)
+    if (navigation !== 'none') writeRoute({ kind: 'skills' }, navigation)
+  }
+
+  // 启动恢复与浏览器前进/后退共用这个入口；组件内部状态永远跟随 URL，
+  // 用户主动点击则由对应的 enter/open 函数选择 pushState。
+  function applyRoute(route: AppRoute, navigation: NavigationMode) {
+    if (route.kind === 'invalid') {
+      enterDraft({ clearUrl: 'replace', message: null })
+      return
+    }
+    if (route.kind === 'chat-draft') {
+      enterDraft({ clearUrl: navigation, message: null })
+      return
+    }
+    if (route.kind === 'chat-conversation') {
+      const current = conversationStateRef.current
+      setActiveModule('对话')
+      if (current.type === 'persisted' && current.id === route.id) return
+      void loadConversation(route.id, navigation)
+      return
+    }
+    if (route.kind === 'knowledge-list') {
+      enterKnowledgeBaseList(navigation)
+      return
+    }
+    if (route.kind === 'knowledge-detail') {
+      openKnowledgeBase(route.id, navigation)
+      return
+    }
+    enterSkills(navigation)
   }
   async function switchAgent(agentId: string) {
     if (conversationState.type === 'draft') { setConversationState({ type: 'draft', agentId, knowledgeBaseId: agentId === 'general-chat' ? null : conversationState.knowledgeBaseId }); setChatError(null); return }
@@ -681,92 +778,6 @@ function App() {
     }
   }
 
-  function handleSSEEvent(event: SSEEvent) {
-    if (event.event === 'message-start') {
-      streamingAssistantIdRef.current = event.data.id
-      setMessages((current) => {
-        const exists = current.some((m) => m.id === event.data.id && m.role === 'assistant')
-        if (exists) return current
-        return [...current, { id: event.data.id, role: 'assistant', content: '', citations: [], status: 'streaming' }]
-      })
-    } else if (event.event === 'content-delta') {
-      setMessages((current) => {
-        const idx = current.findIndex((m) => m.id === event.data.messageId && m.role === 'assistant')
-        if (idx === -1) return current
-        const updated = current.slice()
-        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
-        updated[idx] = { ...assistant, content: assistant.content + event.data.text }
-        return updated
-      })
-    } else if (event.event === 'message-complete') {
-      streamingAssistantIdRef.current = null
-      abortControllerRef.current = null
-      setMessages((current) => {
-        const idx = current.findIndex((m) => m.id === event.data.id && m.role === 'assistant')
-        if (idx === -1) return current
-        const updated = current.slice()
-        updated[idx] = {
-          id: event.data.id,
-          role: 'assistant',
-          content: event.data.content,
-          citations: event.data.citations,
-          status: event.data.status as Extract<ChatMessage, { role: 'assistant' }>['status'],
-        }
-        return updated
-      })
-      // 列表刷新由 submitQuestion / handleRegenerate 的 finally 统一触发，
-      // 这里不重复调用，避免 message-complete + finally 双触发。
-    } else if (event.event === 'message-error') {
-      streamingAssistantIdRef.current = null
-      abortControllerRef.current = null
-      setMessages((current) => {
-        const idx = current.findIndex((m) => m.id === event.data.id && m.role === 'assistant')
-        if (idx === -1) return current
-        const updated = current.slice()
-        updated[idx] = {
-          id: event.data.id,
-          role: 'assistant',
-          content: event.data.content || '',
-          citations: [],
-          status: event.data.status as Extract<ChatMessage, { role: 'assistant' }>['status'],
-        }
-        return updated
-      })
-      setChatError(event.data.error?.message ?? '生成失败，请重试。')
-    } else if (event.event === 'tool-call-start') {
-      setMessages((current) => {
-        const idx = current.findIndex((m) => m.role === 'assistant' && (m.status === 'streaming' || m.status === 'pending'))
-        if (idx === -1) return current
-        const updated = current.slice()
-        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
-        const tools = [...(assistant.tools ?? [])]
-        tools.push({ status: 'running', toolCallId: event.data.toolCallId, toolName: event.data.toolName })
-        updated[idx] = { ...assistant, tools }
-        return updated
-      })
-    } else if (event.event === 'tool-call-complete') {
-      setMessages((current) => {
-        const idx = current.findIndex((m) => m.role === 'assistant')
-        if (idx === -1) return current
-        const updated = current.slice()
-        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
-        const tools = (assistant.tools ?? []).map((t) => t.toolCallId === event.data.toolCallId ? { ...t, status: 'completed' as const } : t)
-        updated[idx] = { ...assistant, tools }
-        return updated
-      })
-    } else if (event.event === 'tool-call-error') {
-      setMessages((current) => {
-        const idx = current.findIndex((m) => m.role === 'assistant')
-        if (idx === -1) return current
-        const updated = current.slice()
-        const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
-        const tools = (assistant.tools ?? []).map((t) => t.toolCallId === event.data.toolCallId ? { ...t, status: 'failed' as const, errorCode: event.data.errorCode } : t)
-        updated[idx] = { ...assistant, tools }
-        return updated
-      })
-    }
-  }
-
   async function submitQuestion(content: string) {
     const trimmed = content.trim()
     if (!trimmed || isSubmittingRef.current || streamingAssistantIdRef.current) return
@@ -774,6 +785,18 @@ function App() {
     if (currentAgent?.requiresKnowledgeBase && !currentKnowledgeBaseId) { setChatError('请先选择一个知识库。'); return }
     setChatError(null)
     isSubmittingRef.current = true
+    // 连服务端 draft 也可能有网络等待；先显示占位，避免用户点击发送后界面静止。
+    setIsAsking(true)
+    // 先渲染用户气泡，让等待占位从第一帧起就处于最终对话流的位置。
+    // 不能等 draft 创建完成再追加，否则空态 → 消息列表切换会让占位明显下跳。
+    const userMessageId = crypto.randomUUID()
+    setMessages((current) => [...current, {
+      id: userMessageId,
+      role: 'user',
+      content: trimmed,
+      status: 'completed',
+      createdAt: new Date().toISOString(),
+    }])
 
     // 阶段 2：`/chat/new` 已自动创建服务端 draft；这里保留单飞兜底，
     // 覆盖用户在初始化请求返回前立即发送第一条消息的场景。
@@ -781,15 +804,15 @@ function App() {
     if (conversationState.type === 'draft') {
       try {
         convId = await ensureServerDraftConversation()
-      } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); isSubmittingRef.current = false; return }; setChatError(toErrorMessage(error)); isSubmittingRef.current = false; return; }
+      } catch (error) {
+        setIsAsking(false)
+        setMessages((current) => current.map((message) => message.id === userMessageId && message.role === 'user' ? { ...message, status: 'failed' } : message))
+        if (error instanceof UnauthenticatedError) { handleUnauthenticated(); isSubmittingRef.current = false; return }
+        setChatError(toErrorMessage(error)); isSubmittingRef.current = false; return
+      }
     } else {
       convId = conversationState.id
     }
-
-    // 立刻把用户消息渲染到 UI，避免等待首条 SSE 事件带来的"空档"
-    const userMessageId = crypto.randomUUID()
-    setMessages((current) => [...current, { id: userMessageId, role: 'user', content: trimmed, status: 'completed' }])
-    setIsAsking(true)
 
     try {
       const result = await postMessage(convId, trimmed)
@@ -801,6 +824,8 @@ function App() {
         lastEventId: readPersistedLastEventId(result.runId),
       })
     } catch (error) {
+      setIsAsking(false)
+      setMessages((current) => current.map((message) => message.id === userMessageId && message.role === 'user' ? { ...message, status: 'failed' } : message))
       if (error instanceof UnauthenticatedError) {
         handleUnauthenticated()
       } else if ((error as Error).name === 'ConversationActiveRunError') {
@@ -823,80 +848,192 @@ function App() {
     if (streamingAssistantIdRef.current || isSubmittingRef.current) return
     isSubmittingRef.current = true
     setChatError(null)
-
-    const abortController = new AbortController()
-    abortControllerRef.current = abortController
     setIsAsking(true)
 
     try {
-      await regenerateMessage(assistantMessageId, (event) => handleSSEEvent(event), abortController.signal)
-    } catch (error) {
-      if ((error as Error).name === 'AbortError') {
-        const assistantId = streamingAssistantIdRef.current
-        if (assistantId) {
-          setMessages((current) => {
-            const idx = current.findIndex((m) => m.id === assistantId && m.role === 'assistant')
-            if (idx === -1) return current
-            const updated = current.slice()
-            const assistant = updated[idx] as Extract<ChatMessage, { role: 'assistant' }>
-            updated[idx] = { ...assistant, status: 'stopped' }
-            return updated
+      // V2 重新生成：服务端在单事务内替换 assistant 消息、创建新 Run 并返回 runId。
+      // 前端不再依赖旧 SSE；拿到 runId 后立即 EventSource 订阅，沿用 V2 渲染管线。
+      const result = await regenerateMessageV2(assistantMessageId)
+      // 替换本地 assistant message：旧条目切 stopped 并降权，新条目接入 streaming 渲染。
+      setMessages((current) => {
+        const idx = current.findIndex((m) => m.id === assistantMessageId && m.role === 'assistant')
+        if (idx === -1) return current
+        const updated = current.slice()
+        updated[idx] = { ...(updated[idx] as Extract<ChatMessage, { role: 'assistant' }>), status: 'stopped' }
+        if (!updated.some((m) => m.id === result.assistantMessageId && m.role === 'assistant')) {
+          updated.push({
+            id: result.assistantMessageId,
+            role: 'assistant',
+            content: '',
+            citations: [],
+            status: 'pending',
+            createdAt: new Date().toISOString(),
           })
         }
-      } else if (error instanceof UnauthenticatedError) {
+        return updated
+      })
+      startRunStream({
+        runId: result.runId,
+        eventsUrl: result.eventsUrl,
+        lastEventId: readPersistedLastEventId(result.runId),
+      })
+    } catch (error) {
+      // 请求失败时没有后续 Run 终态事件，必须立即收起加载占位。
+      setIsAsking(false)
+      if (error instanceof UnauthenticatedError) {
         handleUnauthenticated()
+      } else if ((error as Error).name === 'ConversationActiveRunError') {
+        setChatError((error as Error).message)
       } else {
         setChatError(toErrorMessage(error))
       }
     } finally {
-      setIsAsking(false)
       isSubmittingRef.current = false
-      streamingAssistantIdRef.current = null
-      abortControllerRef.current = null
       // 同 submitQuestion：保证任意终态都会触发一次会话列表同步。
       void refreshConversations()
     }
   }
 
+  // 重命名会话：仅触发 Dialog；实际提交由 RenameConversationDialog onSubmit 回调完成。
+  function handleRenameConversation(id: string, currentTitle: string) {
+    setRenameRequest({ id, initialTitle: currentTitle })
+  }
+  async function performRenameConversation(nextTitle: string) {
+    const request = renameRequest
+    if (!request) return
+    try {
+      const updated = await updateConversation(request.id, { title: nextTitle })
+      setConversations((prev) => prev.map((c) => (c.id === updated.id ? { ...c, title: updated.title, updatedAt: updated.updatedAt } : c)))
+      // 当前会话若被重命名，更新 document.title 让浏览器 tab 同步。
+      if (conversationState.type === 'persisted' && conversationState.id === request.id && typeof document !== 'undefined') {
+        document.title = `${updated.title} · ${appName}`
+      }
+      setChatError(null)
+    } catch (error) {
+      if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }
+      setChatError(toErrorMessage(error))
+    } finally {
+      setRenameRequest(null)
+    }
+  }
+
   async function handleDeleteConversation(id: string) {
     const conversation = conversations.find((item) => item.id === id)
-    if (!window.confirm(`确定删除“${conversation?.title ?? '此对话'}”吗？此操作无法撤销。`)) return
-    try { await deleteConversation(id); setConversations((prev) => prev.filter((c) => c.id !== id)); if (conversationState.type === 'persisted' && conversationState.id === id) newChat() } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }; setChatError(toErrorMessage(error)) }
+    setConfirmRequest({
+      title: '删除对话',
+      description: `确定删除“${conversation?.title ?? '此对话'}”吗？此操作无法撤销。`,
+      confirmLabel: '删除',
+      destructive: true,
+    })
+    // 把待删除 id 暂存到 component-level closure 用的 Promise resolve 里。
+    pendingDeleteRef.current = { kind: 'conversation', id }
+  }
+  async function performConfirm() {
+    if (isConfirming) return
+    const customAction = pendingConfirmActionRef.current
+    if (customAction) {
+      setIsConfirming(true)
+      try {
+        await customAction()
+      } finally {
+        pendingConfirmActionRef.current = null
+        setIsConfirming(false)
+        setConfirmRequest(null)
+      }
+      return
+    }
+    const pending = pendingDeleteRef.current
+    if (!pending) { setConfirmRequest(null); return }
+    setIsConfirming(true)
+    try {
+      if (pending.kind === 'conversation') {
+        await deleteConversation(pending.id)
+        setConversations((prev) => prev.filter((c) => c.id !== pending.id))
+        if (conversationState.type === 'persisted' && conversationState.id === pending.id) newChat()
+      } else if (pending.kind === 'knowledge-base') {
+        await deleteKnowledgeBase(pending.id)
+        setKnowledgeBases((current) => current.filter((item) => item.id !== pending.id))
+        setDocuments([])
+        if (selectedKnowledgeBaseId === pending.id) enterKnowledgeBaseList('replace')
+        if (currentKnowledgeBaseId === pending.id) {
+          if (conversationState.type === 'draft') setConversationState({ type: 'draft', agentId: 'knowledge-base', knowledgeBaseId: null })
+          else {
+            const updated = await updateConversation(conversationState.id, { knowledgeBaseId: null })
+            setConversations((current) => current.map((item) => item.id === updated.id ? { ...item, knowledgeBaseId: null, knowledgeBaseName: null } : item))
+          }
+        }
+      } else if (pending.kind === 'document') {
+        if (!selectedKnowledgeBaseId) return
+        await deleteDocument(pending.id)
+        await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()])
+      }
+    } catch (error) {
+      if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }
+      setKnowledgeError(toErrorMessage(error))
+    } finally {
+      pendingDeleteRef.current = null
+      setIsConfirming(false)
+      setConfirmRequest(null)
+    }
   }
   function enterChatFromKnowledgeBase(knowledgeBase: Pick<KnowledgeBase, 'id' | 'name'>) {
     enterDraft({ agentId: 'knowledge-base', knowledgeBaseId: knowledgeBase.id, clearUrl: 'push', message: null })
-    setActiveModule('对话')
   }
   function startChatWithAgent(agentId: string) {
     enterDraft({ agentId, knowledgeBaseId: null, clearUrl: 'push', message: null })
-    setActiveModule('对话')
   }
-  async function createKnowledgeBaseFromForm(name: string, description: string) { setKnowledgeError(null); const created = await createKnowledgeBase({ name, ...(description ? { description } : {}) }); setKnowledgeBases((current) => [created, ...current]); setSelectedKnowledgeBaseId(created.id); setShowCreateKnowledgeBase(false) }
+  async function createKnowledgeBaseFromForm(name: string, description: string) {
+    setKnowledgeError(null)
+    const created = await createKnowledgeBase({ name, ...(description ? { description } : {}) })
+    // 作废在创建前启动的列表请求，避免旧结果把刚创建的详情误判为不存在。
+    refreshKnowledgeBasesSeqRef.current += 1
+    setKnowledgeBases((current) => [created, ...current])
+    openKnowledgeBase(created.id, 'push')
+  }
   async function handleUpload(file: File | undefined) { if (!file || !selectedKnowledgeBaseId || isUploading) return; setIsUploading(true); setKnowledgeError(null); try { await uploadDocument(selectedKnowledgeBaseId, file); await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()]) } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); setIsUploading(false); return }; setKnowledgeError(toErrorMessage(error)); } finally { setIsUploading(false) } }
   async function handleDeleteKnowledgeBase(id: string) {
     const knowledgeBase = knowledgeBases.find((item) => item.id === id)
-    if (!window.confirm(`确定删除知识库“${knowledgeBase?.name ?? ''}”吗？其中的文档也会被删除。`)) return
-    setKnowledgeError(null)
-    try {
-      await deleteKnowledgeBase(id)
-      setKnowledgeBases((current) => current.filter((item) => item.id !== id))
-      setDocuments([])
-      if (selectedKnowledgeBaseId === id) setSelectedKnowledgeBaseId(null)
-      if (currentKnowledgeBaseId === id) {
-        if (conversationState.type === 'draft') setConversationState({ type: 'draft', agentId: 'knowledge-base', knowledgeBaseId: null })
-        else {
-          const updated = await updateConversation(conversationState.id, { knowledgeBaseId: null })
-          setConversations((current) => current.map((item) => item.id === updated.id ? { ...item, knowledgeBaseId: null, knowledgeBaseName: null } : item))
-        }
-      }
-    } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }; setKnowledgeError(toErrorMessage(error)) }
+    setConfirmRequest({
+      title: '删除知识库',
+      description: `确定删除知识库“${knowledgeBase?.name ?? ''}”吗？其中的文档也会被删除。`,
+      confirmLabel: '删除',
+      destructive: true,
+    })
+    pendingDeleteRef.current = { kind: 'knowledge-base', id }
   }
-  async function handleDeleteDocument(id: string) { if (!selectedKnowledgeBaseId || !window.confirm('确定删除此文档吗？')) return; setKnowledgeError(null); try { await deleteDocument(id); await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()]) } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }; setKnowledgeError(toErrorMessage(error)) } }
+  async function handleDeleteDocument(id: string) {
+    if (!selectedKnowledgeBaseId) return
+    setConfirmRequest({
+      title: '删除文档',
+      description: '确定删除此文档吗？此操作无法撤销。',
+      confirmLabel: '删除',
+      destructive: true,
+    })
+    pendingDeleteRef.current = { kind: 'document', id }
+  }
+  function requestSkillRemoval(name: string, action: () => Promise<void>) {
+    pendingDeleteRef.current = null
+    pendingConfirmActionRef.current = action
+    setConfirmRequest({
+      title: '卸载技能',
+      description: `确定卸载技能“${name}”吗？此操作会移除本地安装内容。`,
+      confirmLabel: '卸载',
+      destructive: true,
+    })
+  }
   function selectModule(module: Module) {
-    if (module !== '对话' && streamingAssistantIdRef.current) {
-      void handleStop()
+    if (module === '对话') {
+      const current = conversationStateRef.current
+      setActiveModule('对话')
+      setSelectedCitation(null)
+      writeRoute(current.type === 'persisted' ? { kind: 'chat-conversation', id: current.id } : { kind: 'chat-draft' }, 'push')
+      return
     }
-    setActiveModule(module); setSelectedCitation(null); if (module === '知识库') setKnowledgeError(null)
+    if (module === '知识库') {
+      enterKnowledgeBaseList('push')
+      return
+    }
+    enterSkills('push')
   }
   const selectedKnowledgeBase = knowledgeBases.find((item) => item.id === selectedKnowledgeBaseId) ?? null
   const isStreaming = !!streamingAssistantIdRef.current
@@ -972,22 +1109,21 @@ function App() {
       appName={appName}
       avatarInitial={avatarInitial}
       activeModule={activeModule}
-      knowledgeBases={knowledgeBases}
-      selectedKnowledgeBaseId={selectedKnowledgeBaseId}
       conversations={conversations}
       currentConversationId={conversationState.type === 'persisted' ? conversationState.id : null}
       onSelectModule={(module) => { selectModule(module); setIsSidebarOpen(false) }}
-      onSelectKnowledgeBase={(id) => { setSelectedKnowledgeBaseId(id); setShowCreateKnowledgeBase(false); setIsSidebarOpen(false) }}
       onNewChat={() => { newChat(); setIsSidebarOpen(false) }}
       onOpenConversation={(id) => { void openConversation(id); setIsSidebarOpen(false) }}
       onDeleteConversation={handleDeleteConversation}
-      onNewKnowledgeBase={() => { setSelectedKnowledgeBaseId(null); setShowCreateKnowledgeBase(true) }}
+      onRenameConversation={handleRenameConversation}
       theme={theme}
       onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
       currentUser={currentUser}
       onLogout={() => void handleLogout()}
       mobileOpen={isSidebarOpen}
       onCloseMobile={() => setIsSidebarOpen(false)}
+      collapsed={sidebarCollapsed}
+      onToggleCollapsed={toggleSidebarCollapsed}
     />
     {activeModule === '对话' && <AssistantChatWorkspace
       appShortName={appShortName}
@@ -999,6 +1135,7 @@ function App() {
       knowledgeBases={knowledgeBases}
       selectedAgentId={currentAgentId}
       defaultChatModel={capabilities.defaultChatModel}
+      llmDisplayName={capabilities.llm?.displayName}
       activeKnowledgeBase={activeKnowledgeBase}
       onSubmit={(text) => void submitQuestion(text)}
       onStop={() => void handleStop()}
@@ -1011,15 +1148,40 @@ function App() {
       busyApprovalId={approvals.busyApprovalId}
       onApproveApproval={(approval) => void approvals.approve(approval)}
       onDeclineApproval={(approval) => void approvals.decline(approval)}
+      sidebarCollapsed={sidebarCollapsed}
+      onExpandSidebar={toggleSidebarCollapsed}
     />}
-    {activeModule === '知识库' && <KnowledgeBaseWorkspace selectedKnowledgeBase={selectedKnowledgeBase} documents={documents} isLoading={isKnowledgeLoading} isUploading={isUploading} showCreate={showCreateKnowledgeBase} error={knowledgeError} capabilities={capabilities} onCreate={createKnowledgeBaseFromForm} onBack={() => { setSelectedKnowledgeBaseId(null); setShowCreateKnowledgeBase(false) }} onEnterChat={enterChatFromKnowledgeBase} onUpload={handleUpload} onDeleteDocument={handleDeleteDocument} onDeleteKnowledgeBase={handleDeleteKnowledgeBase} />}
-    {activeModule === '能力' && <SkillsWorkspace onStartChat={startChatWithAgent} />}
-    {selectedCitation && <CitationPanel citation={selectedCitation} onClose={() => setSelectedCitation(null)} />}
+    {activeModule === '知识库' && <KnowledgeBaseWorkspace knowledgeBases={knowledgeBases} selectedKnowledgeBase={selectedKnowledgeBase} documents={documents} isLoading={isKnowledgeLoading} isUploading={isUploading} showCreate={showCreateKnowledgeBase} error={knowledgeError} capabilities={capabilities} onCreate={createKnowledgeBaseFromForm} onSelectKnowledgeBase={(id) => openKnowledgeBase(id, 'push')} onShowCreate={() => enterKnowledgeBaseList('push', true)} onBack={() => enterKnowledgeBaseList('push')} onEnterChat={enterChatFromKnowledgeBase} onUpload={handleUpload} onDeleteDocument={handleDeleteDocument} onDeleteKnowledgeBase={handleDeleteKnowledgeBase} />}
+    {activeModule === '能力' && <SkillsWorkspace onStartChat={startChatWithAgent} onRequestRemoveSkill={requestSkillRemoval} />}
+    {selectedCitation && <CitationResponsive citation={selectedCitation} onClose={() => setSelectedCitation(null)} />}
+    <ConfirmDialog
+      request={confirmRequest}
+      busy={isConfirming}
+      onCancel={() => { pendingDeleteRef.current = null; pendingConfirmActionRef.current = null; setIsConfirming(false); setConfirmRequest(null) }}
+      onConfirm={() => void performConfirm()}
+    />
+    <RenameConversationDialog
+      open={renameRequest !== null}
+      initialTitle={renameRequest?.initialTitle ?? ''}
+      onCancel={() => setRenameRequest(null)}
+      onSubmit={(nextTitle) => void performRenameConversation(nextTitle)}
+    />
   </main>
 }
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败，请稍后重试。';
+}
+
+/**
+ * 引用详情响应式分发：窄屏 → Base UI Dialog；宽屏 → 桌面侧栏。
+ * 断点 900px 与 CitationPanel 内部一致；切换瞬间的 flicker 由父组件引用
+ * 是否仍挂载决定（selectedCitation 由父组件管理）。
+ */
+function CitationResponsive({ citation, onClose }: { citation: Citation; onClose: () => void }) {
+  const isNarrow = useMediaQuery('(max-width: 1180px)', { defaultMatches: false })
+  if (isNarrow) return <MobileCitationDialog citation={citation} onClose={onClose} />
+  return <CitationPanel citation={citation} onClose={onClose} />
 }
 
 export default App

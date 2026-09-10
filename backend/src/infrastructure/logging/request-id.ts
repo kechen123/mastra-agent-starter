@@ -61,6 +61,11 @@ export interface RequestLogContext {
   conversationId?: string;
   runId?: string;
   assistantMessageId?: string;
+  /**
+   * 被替换的 assistant message id（regenerate 专用：被收敛到 stopped 状态
+   * 的旧 assistant）。与 assistantMessageId（指新生成的 pending 消息）成对。
+   */
+  replacedAssistantMessageId?: string;
   provider?: string;
   model?: string;
   durationMs?: number;

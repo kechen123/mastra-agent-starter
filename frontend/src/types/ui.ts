@@ -10,13 +10,14 @@ export type ToolCallState =
   | { status: 'failed'; toolCallId: string; toolName: string; errorCode: string };
 
 export type ChatMessage =
-  | { id: string; role: 'user'; content: string; status: 'completed' | 'failed' }
+  | { id: string; role: 'user'; content: string; status: 'completed' | 'failed'; createdAt: string }
   | {
       id: string;
       role: 'assistant';
       content: string;
       citations: Citation[];
       status: 'pending' | 'streaming' | 'completed' | 'stopped' | 'failed';
+      createdAt: string;
       tools?: ToolCallState[];
     };
 

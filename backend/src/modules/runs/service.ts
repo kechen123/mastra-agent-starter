@@ -125,6 +125,7 @@ export async function createUserMessageAndQueuedRun(
         workspaceId: input.workspaceId,
         conversationId: conv.id,
         assistantMessageId,
+        userMessageId,
         agentId: input.agentId,
         provider: input.provider,
         model: input.model,
@@ -273,7 +274,7 @@ export async function stopRunByMessageId(
 
   // 2. 锁住 Run 行
   const runRow = await client.query<Record<string, unknown>>(
-    `SELECT id, workspace_id, conversation_id, assistant_message_id, agent_id,
+    `SELECT id, workspace_id, conversation_id, assistant_message_id, user_message_id, agent_id,
             provider, model, status, input_tokens, output_tokens,
             estimated_cost_usd, started_at, completed_at, error_code,
             parent_run_id, request_id, lease_owner, lease_expires_at,
@@ -292,6 +293,7 @@ export async function stopRunByMessageId(
     workspaceId: row.workspace_id as string,
     conversationId: row.conversation_id as string,
     assistantMessageId: row.assistant_message_id as string,
+    userMessageId: row.user_message_id as string,
     agentId: row.agent_id as string,
     provider: row.provider as string,
     model: row.model as string,
@@ -361,4 +363,217 @@ export async function stopRunByMessageId(
   });
 
   return { stopped: true, run, eventId, contentLength: args.partialContent.length };
+}
+
+/**
+ * V2 重新生成（regenerate）的事务核心。
+ *
+ * 设计：
+ *   - 输入 assistantMessageId：必须归属当前 workspace，且所在会话当前没有活跃 Run。
+ *   - 找到 assistant 的直接上一条 user message（按 created_at 倒序第一条 role=user）；
+ *     重新生成走的是"同一 user 上下文重新跑一遍"，因此 user message 不动。
+ *   - 把目标 assistant message 收敛到 stopped 终态（保留 content / citations，
+ *     避免刷新页面后看到空白；status=stopped 表明已弃用），
+ *     并 INSERT 一条新的 assistant pending message 接收新 Run 输出。
+ *   - 新建 agent_runs（status=queued）→ run-queued 事件 → 回填
+ *     messages.current_run_id → 整事务提交。run executor 后续从队列
+ *     claim、推 run-started / content-* / 终态事件。
+ *
+ * 错误码：
+ *   - 404：assistantMessageId 不存在 / 跨 workspace / 找不到紧邻的 user 父消息。
+ *   - 409 CONVERSATION_CONFLICT_ACTIVE_RUN：同会话仍有活跃 Run，强制用户先停止。
+ *
+ * 调用方负责：开 / 提交 / 回滚事务 + 写 idempotency_keys。
+ */
+export async function createRegenerateRun(
+  client: PoolClient,
+  input: {
+    workspaceId: string;
+    assistantMessageId: string;
+    provider: string;
+    model: string;
+    userId: string;
+    requestId?: string;
+  },
+): Promise<{
+  conversation: { id: string; agentId: string };
+  userMessage: { id: string };
+  oldAssistantMessage: { id: string };
+  assistantMessage: { id: string };
+  run: RunRow;
+  runEventId: number;
+}> {
+  const requestId = input.requestId ?? getRequestId() ?? '';
+
+  // 1. 锁住目标 assistant message 行 + 校验 workspace。
+  const targetRow = await client.query<{
+    id: string;
+    conversation_id: string;
+    role: string;
+    status: string;
+    workspace_id: string;
+    created_at: string;
+  }>(
+    `SELECT id, conversation_id, role, status, workspace_id, created_at
+       FROM messages
+      WHERE id = $1
+      FOR UPDATE`,
+    [input.assistantMessageId],
+  );
+  const target = targetRow.rows[0];
+  if (!target || target.workspace_id !== input.workspaceId || target.role !== 'assistant') {
+    const e = new Error('目标消息不存在或不属于当前 Workspace。') as Error & { name: string };
+    e.name = 'NotFoundError';
+    throw e;
+  }
+
+  // 2. 锁住会话 + 校验 workspace + 取 agentId。
+  const convRow = await client.query<{
+    id: string;
+    agent_id: string;
+  }>(
+    `SELECT id, agent_id FROM conversations
+      WHERE id = $1 AND workspace_id = $2
+      FOR UPDATE`,
+    [target.conversation_id, input.workspaceId],
+  );
+  const conv = convRow.rows[0];
+  if (!conv) {
+    const e = new Error('会话不存在。') as Error & { name: string };
+    e.name = 'NotFoundError';
+    throw e;
+  }
+
+  // 3. 找 assistant 响应的原始 user message：直接读 agent_runs.user_message_id 稳定 FK。
+  //
+  // 历史背景：旧实现用 `created_at < target.created_at` 在 messages 表里查最近
+  // 的 user 消息，但 PG `now()` 在同一事务内固定，正常"发送一问一答"事务里
+  // user 与 assistant 会拥有相同的 created_at，启发式会错误返回空。
+  //
+  // 当前数据模型约束（init.sql）：`agent_runs.user_message_id` 为 NOT NULL FK
+  // → messages(id)。任何由本系统产生的 assistant 消息必有对应 Run，所以唯一
+  // 权威关联是 agent_runs.user_message_id。
+  //
+  // 不再做"created_at / xmin / id"时序启发式兜底：
+  //   - 时序启发式无法稳定指向唯一一条 user，且在并发生改/历史数据/数据迁移
+  //     等场景下会指向错误的 user message，污染上下文；
+  //   - 兜底会掩盖数据完整性 bug（"assistant 没有对应 Run"是异常，不是正常
+  //     路径），应让其显式失败，便于定位修复，而不是被静默掩盖。
+  //
+  // 若确实需要支持历史无 Run 数据（例如旧库从其它系统导入而来），必须先做
+  // 一轮可验证的数据回填（写明关联规则 + 人工审阅 + 抽样验证），不要在
+  // service 层用启发式伪造关联。
+  const priorRunRow = await client.query<{ user_message_id: string }>(
+    `SELECT user_message_id FROM agent_runs
+      WHERE workspace_id = $1
+        AND assistant_message_id = $2
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [input.workspaceId, input.assistantMessageId],
+  );
+  const priorRun = priorRunRow.rows[0];
+  if (!priorRun) {
+    logRequest('warn', {
+      msg: 'regenerate 命中无 agent_runs 关联的 assistant message；视为数据完整性异常',
+      workspaceId: input.workspaceId,
+      assistantMessageId: input.assistantMessageId,
+    });
+    const e = new Error(
+      '该 assistant 消息没有可识别的原始 user 消息（无对应 agent_runs 记录）。',
+    ) as Error & { name: string };
+    e.name = 'NotFoundError';
+    throw e;
+  }
+  const userMessage = { id: priorRun.user_message_id };
+
+  // 4. 同会话活跃 Run 检查（与 createUserMessageAndQueuedRun 同样的 partial unique 兜底）。
+  const activeRow = await client.query<{ id: string }>(
+    `SELECT id FROM agent_runs
+      WHERE conversation_id = $1
+        AND workspace_id = $2
+        AND status IN ('queued', 'running', 'waiting_approval')
+      LIMIT 1`,
+    [conv.id, input.workspaceId],
+  );
+  if (activeRow.rows.length > 0) {
+    const e = new Error('该会话已有正在进行的生成，请等待完成或停止后再试。') as Error & { name: string };
+    e.name = 'ConversationActiveRunError';
+    throw e;
+  }
+
+  // 5. 把旧 assistant message 收敛到 stopped 终态（保留 content 与 citations）。
+  await client.query(
+    `UPDATE messages
+        SET status = 'stopped',
+            current_run_id = NULL,
+            updated_at = now()
+      WHERE id = $1 AND workspace_id = $2`,
+    [target.id, input.workspaceId],
+  );
+
+  // 6. 新建 assistant pending 消息。
+  const asstRow = await client.query<{ id: string }>(
+    `INSERT INTO messages (workspace_id, conversation_id, role, content, citations, status, current_run_id)
+     VALUES ($1, $2, 'assistant', '', '[]'::jsonb, 'pending', NULL)
+     RETURNING id`,
+    [input.workspaceId, conv.id],
+  );
+  const newAssistantMessageId = asstRow.rows[0]!.id;
+
+  // 7. queued run；同会话 partial unique 冲突 → PG 抛 23505 → 上层翻译 409。
+  let runRow: RunRow;
+  try {
+    runRow = await createQueuedRun(
+      {
+        workspaceId: input.workspaceId,
+        conversationId: conv.id,
+        assistantMessageId: newAssistantMessageId,
+        userMessageId: userMessage.id,
+        agentId: conv.agent_id,
+        provider: input.provider,
+        model: input.model,
+        requestId,
+        createdBy: input.userId,
+      },
+      client,
+    );
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === '23505') {
+      const e = new Error('该会话已有正在进行的生成，请等待完成或停止后再试。') as Error & { name: string };
+      e.name = 'ConversationActiveRunError';
+      throw e;
+    }
+    throw err;
+  }
+
+  // 8. run-queued 事件 + NOTIFY
+  const runEventId = await insertRunEvent(client, {
+    runId: runRow.id,
+    workspaceId: input.workspaceId,
+    type: 'run-queued',
+    payload: { assistantMessageId: newAssistantMessageId },
+  });
+
+  // 9. 回填 newAssistantMessage.current_run_id。
+  await client.query(
+    `UPDATE messages SET current_run_id = $2 WHERE id = $1`,
+    [newAssistantMessageId, runRow.id],
+  );
+
+  // 10. 更新会话 updated_at。
+  await client.query(
+    `UPDATE conversations SET updated_at = now()
+      WHERE id = $1 AND workspace_id = $2`,
+    [conv.id, input.workspaceId],
+  );
+
+  return {
+    conversation: { id: conv.id, agentId: conv.agent_id },
+    userMessage: { id: userMessage.id },
+    oldAssistantMessage: { id: target.id },
+    assistantMessage: { id: newAssistantMessageId },
+    run: runRow,
+    runEventId,
+  };
 }

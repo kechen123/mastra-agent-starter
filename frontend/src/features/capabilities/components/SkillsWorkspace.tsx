@@ -1,10 +1,8 @@
-import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listSkills, listTools, type ToolDefinition } from '../../../lib/api';
 import { listAgents } from '../../../lib/conversations';
 import type { AgentDefinition, SkillSummary } from '../../../types/conversation';
 import { AgentDetail } from './AgentDetail';
-import { AgentRail } from './AgentRail';
 import { MarketplaceTab } from './MarketplaceTab';
 
 function toErrorMessage(error: unknown): string {
@@ -14,6 +12,8 @@ function toErrorMessage(error: unknown): string {
 export interface SkillsWorkspaceProps {
   /** 触发"在对话中使用"按钮后回调，父组件负责切换 activeModule 与 agent 选择。 */
   onStartChat?: (agentId: string) => void;
+  /** 卸载前交给 App 的统一 ConfirmDialog 确认，避免浏览器原生确认框。 */
+  onRequestRemoveSkill?: (name: string, action: () => Promise<void>) => void;
 }
 
 /**
@@ -26,7 +26,7 @@ export interface SkillsWorkspaceProps {
  * 保留原 SkillsWorkspace 的所有市场 / 安装 / 卸载能力（MarketplaceTab），
  * 不删除任何已有功能，不造假数据。
  */
-export function SkillsWorkspace({ onStartChat }: SkillsWorkspaceProps = {}) {
+export function SkillsWorkspace({ onStartChat, onRequestRemoveSkill }: SkillsWorkspaceProps = {}) {
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [tools, setTools] = useState<ToolDefinition[]>([]);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
@@ -35,7 +35,6 @@ export function SkillsWorkspace({ onStartChat }: SkillsWorkspaceProps = {}) {
 
   // 用户主动选择的 Agent；为 null 时回退到第一个 Agent（避免额外渲染与 setState-in-effect）。
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [agentRailHost, setAgentRailHost] = useState<HTMLElement | null>(null);
   const effectiveSelectedId = selectedId ?? agents[0]?.id ?? null;
 
   const refreshAll = useCallback(async () => {
@@ -59,12 +58,6 @@ export function SkillsWorkspace({ onStartChat }: SkillsWorkspaceProps = {}) {
     // eslint-disable-next-line react/set-state-in-effect
     void refreshAll();
   }, [refreshAll]);
-
-  // 能力页的 Agent rail 复用 App 第一列侧边栏，避免出现空的全局栏和第二个平行栏。
-  useEffect(() => {
-    // eslint-disable-next-line react/set-state-in-effect -- 等待 sibling Sidebar 的 portal 容器挂载。
-    setAgentRailHost(document.getElementById('capability-agent-rail'));
-  }, []);
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === effectiveSelectedId) ?? null,
@@ -100,20 +93,11 @@ export function SkillsWorkspace({ onStartChat }: SkillsWorkspaceProps = {}) {
         </div>
       )}
 
-      {agentRailHost ? createPortal(<AgentRail
-        embedded
-        agents={agents}
-        selectedId={effectiveSelectedId}
-        loading={loading}
-        onSelect={setSelectedId}
-      />, agentRailHost) : <AgentRail
-        agents={agents}
-        selectedId={effectiveSelectedId}
-        loading={loading}
-        onSelect={setSelectedId}
-      />}
-
       <AgentDetail
+        agents={agents}
+        selectedId={effectiveSelectedId}
+        onSelect={setSelectedId}
+        loading={loading}
         agent={selectedAgent}
         tools={tools}
         skills={skills}
@@ -125,6 +109,7 @@ export function SkillsWorkspace({ onStartChat }: SkillsWorkspaceProps = {}) {
             onRefresh={refreshAll}
             onError={setError}
             onClearError={() => setError(null)}
+            onRequestRemoveSkill={onRequestRemoveSkill}
           />
         }
       />

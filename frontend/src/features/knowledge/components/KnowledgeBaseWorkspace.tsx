@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react';
-import { Bot, FileText, Library, Trash2, Upload } from 'lucide-react';
+import { Bot, FileText, Library, Plus, Search, Trash2, Upload } from 'lucide-react';
 import type { Capabilities, KnowledgeBase, KnowledgeDocument } from '../../../lib/api';
 
 export interface KnowledgeBaseWorkspaceProps {
+  knowledgeBases: KnowledgeBase[];
   selectedKnowledgeBase: KnowledgeBase | null;
   documents: KnowledgeDocument[];
   isLoading: boolean;
@@ -11,6 +12,8 @@ export interface KnowledgeBaseWorkspaceProps {
   error: string | null;
   capabilities: Capabilities;
   onCreate: (name: string, description: string) => Promise<void>;
+  onSelectKnowledgeBase: (id: string) => void;
+  onShowCreate: () => void;
   onBack: () => void;
   onEnterChat: (knowledgeBase: Pick<KnowledgeBase, 'id' | 'name'>) => void;
   onUpload: (file: File | undefined) => void;
@@ -55,6 +58,7 @@ function formatStatus(status: KnowledgeDocument['status']): string {
  * 状态由 App 注入：本组件只消费 props，不直接访问 SSE、Database 或 KnowledgeBase API。
  */
 export function KnowledgeBaseWorkspace({
+  knowledgeBases,
   selectedKnowledgeBase,
   documents,
   isLoading,
@@ -63,6 +67,8 @@ export function KnowledgeBaseWorkspace({
   error,
   capabilities,
   onCreate,
+  onSelectKnowledgeBase,
+  onShowCreate,
   onBack,
   onEnterChat,
   onUpload,
@@ -71,6 +77,7 @@ export function KnowledgeBaseWorkspace({
 }: KnowledgeBaseWorkspaceProps) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function submitCreate(event: React.FormEvent<HTMLFormElement>) {
@@ -85,9 +92,15 @@ export function KnowledgeBaseWorkspace({
   const supportedLabels = capabilities.documentFormats.map((f) => FORMAT_DISPLAY[f] ?? f.toUpperCase());
   const acceptAttr = capabilities.documentFormats.map((f) => ACCEPT_MAP[f]).filter(Boolean).join(',');
   const uploadHint = supportedLabels.length > 0 ? `支持 ${supportedLabels.join('、')}，单文件不超过 10 MB。` : '暂不支持文件上传。';
+  const filteredKnowledgeBases = knowledgeBases.filter((knowledgeBase) => {
+    const normalized = query.trim().toLocaleLowerCase();
+    return !normalized
+      || knowledgeBase.name.toLocaleLowerCase().includes(normalized)
+      || (knowledgeBase.description?.toLocaleLowerCase().includes(normalized) ?? false);
+  });
 
   return <section className="flex-1 min-w-0 min-h-0 overflow-y-auto py-8 max-[760px]:pt-16 px-5 sm:px-8 bg-app-bg app-scroll">
-    <div className="w-full max-w-[860px] mx-auto">
+    <div className="w-full max-w-[960px] mx-auto">
       <header className="flex flex-wrap items-start justify-between gap-5 mb-8">
         <div>
           <h1 className="m-0 text-[24px] leading-tight font-semibold tracking-[-0.03em] text-app-text">
@@ -96,10 +109,10 @@ export function KnowledgeBaseWorkspace({
           <p className="mt-2 text-app-muted text-[14px] leading-6">
             {selectedKnowledgeBase
               ? `${selectedKnowledgeBase.documentCount} 个文档 · ${selectedKnowledgeBase.chunkCount ?? 0} 个片段`
-              : '从左侧选择或新建一个知识库。'}
+              : '集中管理资料，并在对话中将它们作为可追溯的上下文。'}
           </p>
         </div>
-        {selectedKnowledgeBase && (
+        {selectedKnowledgeBase ? (
           <div className="flex flex-wrap items-center gap-2 ml-auto">
             <button
               className="inline-flex items-center justify-center min-h-9 px-3 rounded-lg text-[13px] text-app-muted bg-transparent border-0 transition-colors duration-150 hover:text-app-text hover:bg-app-hover focus-visible:bg-app-hover"
@@ -119,6 +132,26 @@ export function KnowledgeBaseWorkspace({
             >
               <Trash2 size={15} />
               删除
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 ml-auto max-[560px]:w-full">
+            <label className="relative flex-1 max-w-[280px] max-[560px]:max-w-none">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-app-muted pointer-events-none" aria-hidden />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索知识库"
+                aria-label="搜索知识库"
+                className="w-full h-10 py-2 pl-9 pr-3 text-[13px] text-app-text bg-app-surface border border-app-border rounded-xl outline-none placeholder:text-app-muted focus-visible:border-app-border-strong"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={onShowCreate}
+              className="inline-flex items-center justify-center gap-1.5 h-10 px-3.5 rounded-xl text-[13px] font-medium text-app-bg bg-app-text border-0 transition-[transform,opacity] duration-150 active:scale-[0.98] hover:opacity-90"
+            >
+              <Plus size={15} />新建
             </button>
           </div>
         )}
@@ -158,11 +191,36 @@ export function KnowledgeBaseWorkspace({
               </button>
             </form>
           )}
-          <div className="grid place-items-center gap-2.5 py-16 px-6 text-app-muted bg-app-surface-muted rounded-2xl text-center">
-            <span className="grid place-items-center w-10 h-10 rounded-full bg-app-bg"><Library size={19} /></span>
-            <strong className="text-app-text text-[15px]">还没有知识库</strong>
-            <p className="max-w-md m-0 text-[14px] leading-6">创建知识库后，可以上传资料，并让回答基于可追溯的原文内容。</p>
-          </div>
+          {isLoading ? (
+            <p className="py-16 px-6 text-app-muted bg-app-surface-muted rounded-2xl text-center text-[14px]">正在加载知识库…</p>
+          ) : filteredKnowledgeBases.length === 0 ? (
+            <div className="grid place-items-center gap-2.5 py-16 px-6 text-app-muted bg-app-surface-muted rounded-2xl text-center">
+              <span className="grid place-items-center w-10 h-10 rounded-full bg-app-bg"><Library size={19} /></span>
+              <strong className="text-app-text text-[15px]">{knowledgeBases.length === 0 ? '还没有知识库' : '没有匹配的知识库'}</strong>
+              <p className="max-w-md m-0 text-[14px] leading-6">{knowledgeBases.length === 0 ? '创建知识库后，可以上传资料，并让回答基于可追溯的原文内容。' : '换一个关键词试试。'}</p>
+            </div>
+          ) : (
+            <div className="overflow-hidden border border-app-border rounded-2xl bg-app-surface">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-4 px-4 py-2.5 text-[12px] text-app-muted border-b border-app-border max-[560px]:grid-cols-[minmax(0,1fr)_auto]">
+                <span>名称</span><span>文档</span><span className="max-[560px]:hidden">片段</span>
+              </div>
+              {filteredKnowledgeBases.map((knowledgeBase) => (
+                <button
+                  key={knowledgeBase.id}
+                  type="button"
+                  onClick={() => onSelectKnowledgeBase(knowledgeBase.id)}
+                  className="grid w-full grid-cols-[minmax(0,1fr)_auto_auto] gap-4 items-center px-4 py-3.5 text-left text-app-text bg-transparent border-0 border-b border-app-border last:border-b-0 transition-colors duration-150 hover:bg-app-hover focus-visible:bg-app-hover max-[560px]:grid-cols-[minmax(0,1fr)_auto]"
+                >
+                  <span className="flex items-center gap-3 min-w-0">
+                    <span className="grid place-items-center w-9 h-9 shrink-0 rounded-lg bg-app-surface-muted"><Library size={17} className="text-app-muted" /></span>
+                    <span className="grid gap-0.5 min-w-0"><strong className="truncate text-[14px] font-medium">{knowledgeBase.name}</strong>{knowledgeBase.description && <small className="truncate text-[12px] text-app-muted">{knowledgeBase.description}</small>}</span>
+                  </span>
+                  <span className="text-[13px] text-app-muted whitespace-nowrap">{knowledgeBase.documentCount} 个</span>
+                  <span className="text-[13px] text-app-muted whitespace-nowrap max-[560px]:hidden">{knowledgeBase.chunkCount ?? 0}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </>
       )}
       {selectedKnowledgeBase && (
