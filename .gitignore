@@ -148,5 +148,16 @@ vite.config.ts.timestamp-*
 
 # 本地运行数据（缓存目录、下载的技能、安装产物）
 backend/.mastra/
+# `storage/` 通配曾误忽略 backend/src/infrastructure/storage/*.ts 生产源码；
+# 用精确反忽略把它从忽略集合中放回（只放开源码与目录本身，不放开运行时数据）。
 storage/
+!backend/src/infrastructure/storage/
+!backend/src/infrastructure/storage/*.ts
 backend/market-skills/
+
+# PR-4.2：本地文档存储（LocalFSStorage 默认根）
+backend/data/
+data/
+
+# 学习文档草稿区：不属于 PR-4，不入库。
+learning/

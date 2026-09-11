@@ -120,7 +120,7 @@ async function main(): Promise<void> {
   // (1)(2)(4) 首次创建 + 幂等 + owner_user_id 非空
   // ===========================================================================
   await withIsolatedSchema(async ({ client, pool }) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     await seedAppUser(client, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'alice');
 
     const first = await ensurePersonalWorkspace(
@@ -189,7 +189,7 @@ async function main(): Promise<void> {
     const { schema, pool: setupPool } = await createIsolatedSchema();
     const setupClient = await setupPool.connect();
     try {
-      await ensureSchema(setupPool);
+      await ensureSchema(setupPool, { ragEnabled: false });
       await seedAppUser(setupClient, 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'bob');
     } finally {
       setupClient.release();
@@ -250,7 +250,7 @@ async function main(): Promise<void> {
   // (5)(6) CHECK 约束：shared + owner / personal + null
   // ===========================================================================
   await withIsolatedSchema(async ({ client, pool }) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     await seedAppUser(client, 'cccccccc-cccc-cccc-cccc-cccccccccccc', 'carol');
 
     let sharedErr: unknown = null;
@@ -294,7 +294,7 @@ async function main(): Promise<void> {
   // (7) partial unique: 同一 userId 第二个 personal 被 unique 拒绝
   // ===========================================================================
   await withIsolatedSchema(async ({ client, pool }) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     await seedAppUser(client, 'dddddddd-dddd-dddd-dddd-dddddddddddd', 'dave');
     const { workspaceId } = await ensurePersonalWorkspace(
       'dddddddd-dddd-dddd-dddd-dddddddddddd',
@@ -324,7 +324,7 @@ async function main(): Promise<void> {
   // (8) 修复缺失的 owner 成员行
   // ===========================================================================
   await withIsolatedSchema(async ({ client, pool }) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     await seedAppUser(client, 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'erin');
     await client.query(
       `INSERT INTO workspaces (kind, name, owner_user_id)
@@ -361,7 +361,7 @@ async function main(): Promise<void> {
   // (9) 已有 Shared 成员关系 — ensurePersonalWorkspace 不返回 Shared ID
   // ===========================================================================
   await withIsolatedSchema(async ({ client, pool }) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     await seedAppUser(client, 'ffffffff-ffff-ffff-ffff-ffffffffffff', 'frank');
     const shared = await client.query<{ id: string }>(
       `INSERT INTO workspaces (kind, name, owner_user_id)
@@ -397,7 +397,7 @@ async function main(): Promise<void> {
   // (10) 用户不存在 / 被禁用 → UserNotFoundError
   // ===========================================================================
   await withIsolatedSchema(async ({ client, pool }) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     try {
       await ensurePersonalWorkspace(
         '99999999-9999-9999-9999-999999999999',
@@ -456,7 +456,7 @@ async function main(): Promise<void> {
       await assertSearchPathIsolated(setupClient, schema);
       // 先跑 ensureSchema（建 app_users / auth_sessions / workspaces 等表），
       // 再插用户——保证后续 insert 命中本 schema 的同名表，不会落到 public。
-      await ensureSchema(setupPool);
+      await ensureSchema(setupPool, { ragEnabled: false });
       const hashed = await hashPassword('correct horse battery staple');
       await setupClient.query(
         `INSERT INTO app_users (id, username, username_normalized, password_hash)
@@ -567,7 +567,7 @@ async function main(): Promise<void> {
     try {
       // 回归守卫 + 先跑迁移：与 (11)/(14) 一致。
       await assertSearchPathIsolated(setupClient, schema);
-      await ensureSchema(setupPool);
+      await ensureSchema(setupPool, { ragEnabled: false });
       const hashed = await hashPassword(password);
       await setupClient.query(
         `INSERT INTO app_users (id, username, username_normalized, password_hash)
@@ -663,7 +663,7 @@ async function main(): Promise<void> {
   // (13) Personal owner 成员行 role 错误时自动修复为 'owner'
   // ===========================================================================
   await withIsolatedSchema(async ({ client, pool }) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     await seedAppUser(client, 'd3d3d3d3-d3d3-d3d3-d3d3-d3d3d3d3d3d3', 'dora');
     const ws = await client.query<{ id: string }>(
       `INSERT INTO workspaces (kind, name, owner_user_id)
@@ -746,7 +746,7 @@ async function main(): Promise<void> {
       await assertSearchPathIsolated(setupClient, schema);
       // 先跑 ensureSchema（建 app_users / auth_sessions / workspaces 等表），
       // 再插用户——保证后续 insert 命中本 schema 的同名表，不会落到 public。
-      await ensureSchema(setupPool);
+      await ensureSchema(setupPool, { ragEnabled: false });
       const hashed = await hashPassword('correct horse battery staple');
       await setupClient.query(
         `INSERT INTO app_users (id, username, username_normalized, password_hash)

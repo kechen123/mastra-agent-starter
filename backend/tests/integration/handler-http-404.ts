@@ -233,7 +233,7 @@ async function main(): Promise<void> {
     // 回归守卫：确保 setupClient 真实落在隔离 schema，再做任何写入。
     await assertSearchPathIsolated(setupClient, schema);
     // 直接跑真实生产 ensureSchema —— 应用 init.sql + 写入 _init_meta
-    await ensureSchema(setupPool);
+    await ensureSchema(setupPool, { ragEnabled: false });
 
     const hashed = await hashPassword('correct horse battery staple');
     await setupClient.query(

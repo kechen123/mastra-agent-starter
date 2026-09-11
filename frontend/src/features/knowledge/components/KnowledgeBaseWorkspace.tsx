@@ -22,13 +22,21 @@ export interface KnowledgeBaseWorkspaceProps {
 }
 
 const STATUS_LABEL: Record<KnowledgeDocument['status'], string> = {
-  uploaded: '已上传',
+  queued: '排队中',
   parsing: '解析中',
   chunking: '切分中',
   embedding: '向量生成中',
-  completed: '已完成',
+  finalizing: '收尾中',
+  ready: '已就绪',
   failed: '处理失败',
+  cancelled: '已取消',
 };
+
+const TERMINAL_STATUSES: ReadonlySet<KnowledgeDocument['status']> = new Set([
+  'ready',
+  'failed',
+  'cancelled',
+]);
 
 const ACCEPT_MAP: Record<string, string> = {
   txt: '.txt,text/plain',
@@ -268,14 +276,23 @@ export function KnowledgeBaseWorkspace({
                     <small className="text-app-muted text-[12.5px]">
                       {formatBytes(document.size)} · {document.chunkCount} 个片段 · {formatStatus(document.status)}
                     </small>
-                    {document.errorMessage && (
-                      <small className="text-app-danger text-[12.5px]">{document.errorMessage}</small>
+                    {/* PR-4.2：真实进度（仅当 totalChunks > 0 时显示）。不计算百分比。 */}
+                    {!TERMINAL_STATUSES.has(document.status) && document.totalChunks > 0 && (
+                      <small className="text-app-muted text-[12.5px]">
+                        进度 {document.completedChunks} / {document.totalChunks}
+                      </small>
+                    )}
+                    {(document.failureReason || document.errorMessage) && (
+                      <small className="text-app-danger text-[12.5px]">
+                        {document.failureReason || document.errorMessage}
+                      </small>
                     )}
                   </div>
                   <button
-                    className="grid place-items-center ml-auto w-9 h-9 text-app-muted bg-transparent border-0 rounded-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100 hover:text-app-danger hover:bg-app-danger/10 focus-visible:opacity-100 focus-visible:text-app-danger focus-visible:bg-app-danger/10"
+                    className="grid place-items-center ml-auto w-9 h-9 text-app-muted bg-transparent border-0 rounded-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100 hover:text-app-danger hover:bg-app-danger/10 focus-visible:opacity-100 focus-visible:text-app-danger focus-visible:bg-app-danger/10 disabled:opacity-0 disabled:pointer-events-none"
                     onClick={() => onDeleteDocument(document.id)}
                     aria-label={`删除 ${document.name}`}
+                    disabled={document.status === 'cancelled'}
                   >
                     <Trash2 size={15} />
                   </button>

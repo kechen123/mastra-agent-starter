@@ -9,7 +9,13 @@
 -- ────────────────────────────────────────────────────────────────────
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS vector;
+-- PR-4.1 §8.4.1（整改）：Core Schema 不创建 `vector` 扩展；RAG 启用时由
+-- `schema-init.ts` / `migrate.ts` 在 init 事务内、init.sql 跑之前以
+-- **顶层 SQL** 形式 `CREATE EXTENSION IF NOT EXISTS vector`（DO 块内
+-- 不允许该操作；必须放在受控的 bootstrap 路径上）。同步在同一事务内
+-- `SET LOCAL app.rag_enabled = 'on' | 'off'`，让文件末尾的 RAG 条件块
+-- 读到正确状态。Core-only 部署完全不需要 pgvector；fresh-init 仅决定
+-- 一次 Core 或 RAG 形态，之后不再无迁移切换。
 
 CREATE TABLE app_users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -101,17 +107,46 @@ CREATE TABLE documents (
   name TEXT NOT NULL,
   type TEXT NOT NULL,
   size BIGINT NOT NULL DEFAULT 0,
-  -- status 取值集合对齐 DocumentStatus（documents-service.ts:7）：
-  --   'uploaded' | 'parsing' | 'chunking' | 'embedding' |
-  --   'completed' | 'failed'。原声明 `'pending'/'ingesting'/'ready'/...`
-  -- 与 Service 实际写入的 'uploaded' / 'parsing' 等不符。
-  status TEXT NOT NULL DEFAULT 'uploaded'
-    CHECK (status IN ('uploaded', 'parsing', 'chunking', 'embedding', 'completed', 'failed')),
+  -- PR-4.1：状态机切到 8 态（queued / parsing / chunking / embedding /
+  --   finalizing / ready / failed / cancelled）。`finalizing` 与 `ready`
+  --   是 PR-4.2 ingestion worker 收敛路径新增；`cancelled` 由软删除事务
+  --   写。其余语义不变。
+  -- storage_status 描述对象存储侧生命周期：uploaded → storage_pending
+  --   → ready / storage_failed。`ready` 是 ingestion worker 拾取的前置
+  --   条件。Core 与 RAG 都用 storage_status（不依赖 vector 扩展）。
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'parsing', 'chunking', 'embedding', 'finalizing', 'ready', 'failed', 'cancelled')),
+  storage_status TEXT NOT NULL DEFAULT 'storage_pending'
+    CHECK (storage_status IN ('storage_pending', 'ready', 'storage_failed')),
+  -- 终态 finalKey（与 V2 §8.1 一致：DB 直接落 finalKey，stagingKey 仅
+  -- 存在于 `storage_finalize_jobs`）。worker 不会通过 documents 读到
+  -- stagingKey，避免"finalize 后 DB 指针失效"的旧矛盾。
+  storage_key TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  -- 真实进度（仅当 total_chunks > 0 时可信）。Worker 在 chunking 阶段
+  -- 写 total_chunks；embedding 阶段每写完一个 chunk 就 completed_chunks++。
+  -- 前端用 completed/total 渲染；不计算 percent，避免前端假百分比。
+  total_chunks INTEGER NOT NULL DEFAULT 0,
+  completed_chunks INTEGER NOT NULL DEFAULT 0,
   error_message TEXT,
+  failure_reason TEXT,
+  deleted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX documents_workspace_kb_idx ON documents(workspace_id, knowledge_base_id);
+CREATE INDEX documents_storage_status_idx ON documents(workspace_id, storage_status)
+  WHERE deleted_at IS NULL;
+-- PR-4.1 §8.1：去重粒度 (workspace_id, knowledge_base_id, sha256) 部分
+-- 唯一索引，软删除行不阻塞重传。partial 让 `deleted_at IS NULL` 行唯一；
+-- 30 天后维护者硬删软删除行释放唯一约束历史。
+CREATE UNIQUE INDEX documents_dedup_unique_idx
+  ON documents(workspace_id, knowledge_base_id, sha256)
+  WHERE deleted_at IS NULL;
+-- ingestion worker 抢占 SQL 的核心索引：仅扫描 ready + 未删除文档。
+CREATE INDEX documents_status_progress_idx
+  ON documents(status, updated_at DESC)
+  WHERE deleted_at IS NULL AND status IN ('queued','parsing','chunking','embedding','finalizing');
 
 CREATE TABLE document_chunks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -121,8 +156,12 @@ CREATE TABLE document_chunks (
   chunk_index INTEGER NOT NULL,
   content TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-  embedding vector(2048),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- PR-4.1 §8.4.1：`embedding` 列**已迁出** document_chunks。
+  --   RAG 向量改由独立的 `document_embeddings`（受 RAG 块门控）持有，
+  --   Core Schema 启动不需要 `vector` 扩展。
+  --   同一 chunk 可对应多个 profile 的向量（在 document_embeddings 上）。
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (document_id, chunk_index)
 );
 CREATE INDEX document_chunks_workspace_kb_idx ON document_chunks(workspace_id, knowledge_base_id);
 CREATE INDEX document_chunks_document_idx ON document_chunks(document_id);
@@ -542,3 +581,214 @@ VALUES (
   now()
 )
 ON CONFLICT (username_normalized) DO NOTHING;
+
+-- ════════════════════════════════════════════════════════════════════
+-- 阶段 4 追加段：异步文档管线（PR-4.2 ingestion job + storage outbox）
+-- 协议依据：docs/architecture-v2.md §8.1 / §8.2 / §8.7
+-- 本段落地的不变量：
+--   1. 上传请求 202 立即返回 `documentId` + `jobId`，不阻塞网络/embedding。
+--   2. ingestion worker 通过 `FOR UPDATE SKIP LOCKED` 抢占同一时刻
+--      只有一个 active job（partial unique）。
+--   3. Worker 进程崩溃后 lease 自然过期；下一轮 worker 接管。
+--   4. 软删除事务串联 4 个动作（documents / outbox / finalize_jobs /
+--      ingestion_jobs），任意失败回滚整事务。
+--   5. 删除走 outbox 持久重试 + 幂等 deleteObject；finalKey 必须最终清零。
+--   6. Core Schema 启动不需要 `vector` 扩展；RAG 启用由末尾条件块判断。
+-- ────────────────────────────────────────────────────────────────────
+
+-- 1. document_ingestion_jobs：异步 ingestion 的核心状态机。
+--    status 与 documents.status 同步（worker 推进时同事务写两份）。
+--    lease_owner / lease_expires_at / heartbeat_at：120s lease + 15s
+--    心跳；next_attempt_at + attempts + max_attempts 负责失败退避。
+--    partial unique：同一 document 同一时刻只允许一个 active job。
+CREATE TABLE document_ingestion_jobs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  status          TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN (
+                      'queued', 'parsing', 'chunking', 'embedding',
+                      'finalizing', 'ready', 'failed', 'cancelled'
+                    )),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  max_attempts    INTEGER NOT NULL DEFAULT 3,
+  lease_owner     TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  heartbeat_at    TIMESTAMPTZ,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  error_code      TEXT,
+  error_detail    TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX document_ingestion_jobs_queue_idx
+  ON document_ingestion_jobs(next_attempt_at)
+  WHERE status IN ('queued', 'failed') AND attempts < max_attempts;
+CREATE UNIQUE INDEX one_active_ingestion_per_document
+  ON document_ingestion_jobs(document_id)
+  WHERE status IN ('queued', 'parsing', 'chunking', 'embedding', 'finalizing');
+CREATE INDEX document_ingestion_jobs_lease_idx
+  ON document_ingestion_jobs(lease_expires_at)
+  WHERE status IN ('queued', 'parsing', 'chunking', 'embedding', 'finalizing');
+
+-- 2. storage_finalize_jobs：上传 → finalKey 的 finalize worker 队列。
+--    staging_key 仅存在于本表（V2.3.2 关键不变式），进程崩溃后重试
+--    worker 仍可定位 staging 对象。final_key 即 documents.storage_key。
+--    处理失败重试超过 max_attempts=5 → status='failed'。
+--    PR-4.2 §8.1（整改）：'processing' 是 worker 抢占后的瞬态；partial
+--    unique 与 lease_idx 都要把 'pending' + 'processing' 同时纳入 —
+--    'processing' 行已持有 lease，sweeper 才能据此识别"孤儿抢占"并回收。
+CREATE TABLE storage_finalize_jobs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  staging_key     TEXT NOT NULL,
+  final_key       TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'processing', 'done', 'failed', 'cancelled')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  max_attempts    INTEGER NOT NULL DEFAULT 5,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  lease_owner     TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  -- PR-4 第二轮 Codex 整改（2026-09-11）：long IO（rename 跨 GB 对象）
+  -- 必须有 heartbeat；否则 lease 在 IO 期间过期会被 sweeper 错误收回。
+  heartbeat_at    TIMESTAMPTZ,
+  last_error      TEXT,
+  processed_at    TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX one_active_finalize_per_document
+  ON storage_finalize_jobs(document_id)
+  WHERE status IN ('pending', 'processing');
+CREATE INDEX storage_finalize_jobs_retry_idx
+  ON storage_finalize_jobs(next_attempt_at)
+  WHERE status = 'pending' AND attempts < max_attempts;
+CREATE INDEX storage_finalize_jobs_lease_idx
+  ON storage_finalize_jobs(lease_expires_at)
+  WHERE status = 'processing';
+
+-- 3. storage_deletion_outbox：删除走 outbox 持久重试。
+--    document_id 用 SET NULL 而非 CASCADE，避免硬删 document 把
+--    未处理的 outbox 带走（导致 storage 对象永远不被清理）。
+--    TTL GC 仅枚举 staging 命名空间，**不能**兜底 finalKey 对象；
+--    只有 outbox worker 的持久重试能保证 finalKey 最终被清零。
+--    PR-4.2 §8.1（整改）：原表只有 processed_at + attempts；现在加上
+--    status / lease_owner / lease_expires_at / next_attempt_at 让 outbox
+--    也有严格 lease fencing + 真实退避（避免 attempts 消耗过快）。
+--    'processing' = worker 抢占中（lease 持有）；'pending' = 等下次 tick。
+CREATE TABLE storage_deletion_outbox (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  storage_key     TEXT NOT NULL,
+  document_id     UUID REFERENCES documents(id) ON DELETE SET NULL,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+  enqueued_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed_at    TIMESTAMPTZ,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  max_attempts    INTEGER NOT NULL DEFAULT 5,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  lease_owner     TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  -- PR-4 第二轮 Codex 整改（2026-09-11）：storage.remove 是远端 S3/
+  -- Azure blob API 调用，需要 heartbeat；与 finalize 一致设计。
+  heartbeat_at    TIMESTAMPTZ,
+  last_error      TEXT,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX storage_deletion_outbox_pending_idx
+  ON storage_deletion_outbox(next_attempt_at)
+  WHERE status = 'pending' AND attempts < max_attempts;
+CREATE INDEX storage_deletion_outbox_lease_idx
+  ON storage_deletion_outbox(lease_expires_at)
+  WHERE status = 'processing';
+CREATE INDEX storage_deletion_outbox_document_idx
+  ON storage_deletion_outbox(document_id)
+  WHERE processed_at IS NULL;
+
+-- ════════════════════════════════════════════════════════════════════
+-- 阶段 4 RAG 条件块（PR-4.1 §8.4.1 / §8.4.2 / §8.5）
+--   - 由 `migrate.ts` 启动期 `SET LOCAL app.rag_enabled = 'on'` 后跑。
+--   - Core-only 部署不执行此块 → `vector` 扩展、`embedding_profiles`、
+--     `document_embeddings` 全部不存在。
+--   - 检测方式：`current_setting('app.rag_enabled', true) = 'on'`；
+--     缺省为 off（与 Core 默认一致），不抛错。
+--   - 同一脚本既支持 fresh init，又支持 RAG 模块后启用（删库重建路径
+--     仍由用户手动触发，本脚本不引入迁移链）。
+-- ────────────────────────────────────────────────────────────────────
+
+DO $$
+BEGIN
+  IF current_setting('app.rag_enabled', true) IS DISTINCT FROM 'on' THEN
+    RAISE NOTICE 'PR-4 RAG 块跳过：app.rag_enabled != on（Core-only 模式）';
+    RETURN;
+  END IF;
+
+  RAISE NOTICE 'PR-4 RAG 块启用：创建 embedding_profiles + document_embeddings（vector 扩展已在 bootstrap 顶层创建）';
+
+  -- 1) embedding_profiles：每个 Workspace 拥有若干 profile，标记哪个
+  --    是当前激活的（用于 RAG 检索）。后续要切换 Provider / Model /
+  --    dimensions：创建新 profile，激活新 + 失活旧，再触发存量向量
+  --    重 embedding。**禁止**伪造旧向量归属。
+  EXECUTE $E$
+    CREATE TABLE embedding_profiles (
+      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      provider    TEXT NOT NULL,
+      model       TEXT NOT NULL,
+      dimensions  INTEGER NOT NULL CHECK (dimensions > 0),
+      version     TEXT NOT NULL DEFAULT 'v1',
+      status      TEXT NOT NULL DEFAULT 'inactive'
+                    CHECK (status IN ('active','inactive','migrating','legacy')),
+      is_active   BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (workspace_id, provider, model, version)
+    );
+  $E$;
+  -- partial unique：同一 workspace 最多一个 active profile
+  EXECUTE $E$
+    CREATE UNIQUE INDEX one_active_embedding_profile_per_workspace
+      ON embedding_profiles(workspace_id) WHERE is_active = TRUE;
+  $E$;
+
+  -- 3) document_embeddings：每个 chunk 可以有多个 profile 的向量。
+  --    chunk_id 维度唯一（chunk 已 uniq on (document_id, chunk_index)）。
+  --    content_hash 用于切读时校验"同 chunk 同 hash 才覆盖"语义。
+  --    profile 切换时通过新 profile 重 embedding + UPSERT 完成。
+  EXECUTE $E$
+    CREATE TABLE document_embeddings (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      document_id  UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      chunk_id     UUID NOT NULL REFERENCES document_chunks(id) ON DELETE CASCADE,
+      profile_id   UUID NOT NULL REFERENCES embedding_profiles(id) ON DELETE CASCADE,
+      embedding    vector NOT NULL,
+      dimensions   INTEGER NOT NULL CHECK (dimensions > 0),
+      content_hash TEXT NOT NULL,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (chunk_id, profile_id)
+    );
+  $E$;
+  -- 跨 workspace 完整性 + 检索路径加速索引
+  EXECUTE $E$
+    CREATE INDEX document_embeddings_workspace_chunk_idx
+      ON document_embeddings(workspace_id, chunk_id);
+  $E$;
+
+  -- 4) 普通过滤索引：精确检索阶段用（`<=>` 全表 scan + LIMIT）。
+  --    **不再**在 init.sql 里建通用 HNSW 索引：`embedding vector` 是
+  --    可变维度列，HNSW 必须绑定固定 dimensions 才能 DDL；一个全局
+  --    HNSW 既不可创建、也会把后续切维度卡死。后续 HNSW 由 profile
+  --    生命周期在维度固定后按 (profile_id, dimensions) 建 partial
+  --    index（PR-4.3+ 待办，本轮不做）。
+  EXECUTE $E$
+    CREATE INDEX document_embeddings_profile_chunk_idx
+      ON document_embeddings(profile_id, chunk_id);
+  $E$;
+
+  RAISE NOTICE 'PR-4 RAG 块完成：embedding_profiles + document_embeddings 已建（无全局 HNSW）';
+END
+$$;

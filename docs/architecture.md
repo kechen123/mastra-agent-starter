@@ -1,10 +1,12 @@
 # Mastra Agent Starter 架构文档
 
-> **2026-09-04 收尾基线**：PR-3.3.1 已完成本机真实 Mastra 1.61 + DeepSeek 的 approve / decline / timeout HTTP/SSE 验证，并通过 pending 后真实进程重启再批准的工具结果校验。下文历史条目中的“仅 fake / staging 全部未验证”不再代表当前基础路径状态；真实故障全矩阵、多实例和浏览器联动仍未验收。修正内容、证据与下次起点见 [Codex 实测记录](runbooks/2026-09-04-approval-verification.md)。PR-4 尚未开始编码。
+> **2026-09-11 收尾基线**：PR-4.1 / PR-4.2 / PR-4.3 **代码已完成**，**真实 PostgreSQL 端到端 18 passed、0 failed**（Core-only 16 + RAG 2，分别调 `runIngestionWorkerOnce` / `_runFinalizeOnce` / `_runOutboxOnce` / `transitionIngestionStatus` / `getOrCreateActiveEmbeddingProfile` / `createUploadBundle` 等生产入口；详见 §7）。PR-4.4（存量向量迁移）已**取消**——本模板采用 fresh DB + `backend/database/init.sql` 单一来源，不维护旧库迁移。**staging / production readiness 仍需在四类边界完成演练**：(1) 多进程 Worker 真并行 `FOR UPDATE SKIP LOCKED` 单飞 / heartbeat 续约 / hard-crash sweeper 接管；(2) 真实 MinerU 解析失败 / 网络抖动；(3) 真实 Embedding Provider HTTP 接入；(4) 浏览器前后端端到端联调。
 
 > **文档定位**：本文描述 **当前已实现** 的系统架构（as-built）——文中出现的每个模块、表、路由都对应仓库里真实存在的代码。
 > 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
-> 本文与 V2 文档冲突时，**以本文为当前代码事实**；阶段 1 的 `workspaces` 与 Skill 三表、阶段 2 的 `agent_runs`、`agent_run_events`、幂等 POST、SSE 断点续传与双通道实时流均通过合约测试。**Phase 3.0（Durable Agent Runtime）已落地**：`@mastra/pg` PostgresStore 接到 `mastra_runtime` schema；`streamOptions.runId / memory.thread / memory.resource` 透传到 stream 调用。**Phase 3.1（Tool Policy / Approval Schema 与 Repository）已落地**：`tool_policy_rules` + `tool_approval_requests` 两表已在 `init.sql` 阶段 3.1 段落实；`agent_runs` 持有 `UNIQUE(id, workspace_id)`，`tool_approval_requests` 走复合外键 `(run_id, workspace_id) → agent_runs(id, workspace_id)`，**审批请求与 Run 在数据库层强制同 Workspace**（跨 workspace 写入会被 PG 拒绝）；`modules/tool-policy/` 暴露最小数据访问层（参数化 SQL / workspace 隔离 / 原子 resolve）。**Phase 3.2（Tool Policy Evaluator + Policy-aware Tool Resolver）已落地策略评估与可用工具过滤**：`modules/tool-policy/evaluator.ts` 实现 `allowed` / `requires-approval` / `forbidden` 三态决策，`resolver.ts` 把 `runtime.ts` 的 activeTools 计算从"按 ID 存在性过滤"升级为"按 workspace 策略逐 Tool 决策、仅 allowed 入列"。**Phase 3.3（Tool Approval Closed-Loop）已落地**：`requires-approval` Tool 通过 Tool Gateway 包装层 + `requireToolApproval` 接入 Mastra 1.61 `approveToolCall` / `declineToolCall` 闭环；`/v1/approvals` REST API（list / detail / resolve approve|decline）；15 秒超时 worker（`expireApproval`）+ 启动一次跨重启 reconcile（`reconcileInflightApprovals` + `listSuspendedRuns`）；前端 `useApprovals` hook + `ApprovalCard` 组件订阅 SSE `approval-requested` / `approval-resolved`。`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等仍**未**实现；本次仅为 Phase 3.x 的前置条件。
+> 本文与 V2 文档冲突时，**以本文为当前代码事实**；阶段 1 的 `workspaces` 与 Skill 三表、阶段 2 的 `agent_runs`、`agent_run_events`、幂等 POST、SSE 断点续传与双通道实时流均通过合约测试。**Phase 3.0（Durable Agent Runtime）已落地**：`@mastra/pg` PostgresStore 接到 `mastra_runtime` schema；`streamOptions.runId / memory.thread / memory.resource` 透传到 stream 调用。**Phase 3.1（Tool Policy / Approval Schema 与 Repository）已落地**：`tool_policy_rules` + `tool_approval_requests` 两表已在 `init.sql` 阶段 3.1 段落实；`agent_runs` 持有 `UNIQUE(id, workspace_id)`，`tool_approval_requests` 走复合外键 `(run_id, workspace_id) → agent_runs(id, workspace_id)`，**审批请求与 Run 在数据库层强制同 Workspace**（跨 workspace 写入会被 PG 拒绝）；`modules/tool-policy/` 暴露最小数据访问层（参数化 SQL / workspace 隔离 / 原子 resolve）。**Phase 3.2（Tool Policy Evaluator + Policy-aware Tool Resolver）已落地策略评估与可用工具过滤**：`modules/tool-policy/evaluator.ts` 实现 `allowed` / `requires-approval` / `forbidden` 三态决策，`resolver.ts` 把 `runtime.ts` 的 activeTools 计算从"按 ID 存在性过滤"升级为"按 workspace 策略逐 Tool 决策、仅 allowed 入列"。**Phase 3.3（Tool Approval Closed-Loop）已落地**：`requires-approval` Tool 通过 Tool Gateway 包装层 + `requireToolApproval` 接入 Mastra 1.61 `approveToolCall` / `declineToolCall` 闭环；`/v1/approvals` REST API（list / detail / resolve approve|decline）；15 秒超时 worker（`expireApproval`）+ 启动一次跨重启 reconcile（`reconcileInflightApprovals` + `listSuspendedRuns`）；前端 `useApprovals` hook + `ApprovalCard` 组件订阅 SSE `approval-requested` / `approval-resolved`。`storage_finalize_jobs`、`embedding_profiles`、`document_embeddings` 等已**由 PR-4 落地**（详见下方 §7 与 Phase 4 节）。
+
+> **PR-4 状态（2026-09-11，第二轮 Codex review 后）**：PR-4.1 / PR-4.2 / PR-4.3 **代码已完成**；**真实 PostgreSQL 端到端 18 passed、0 failed**（Core-only 16 + RAG 2，两套用例分别在独立进程运行：`config.ragEnabled` 由本进程 env 决定，跟生产路径语义完全一致；不修改生产 `config` 模块，不调用真实 embedding API，不泄露真实 key）。本节关于 Phase 3.x 的描述维持原状；PR-4 协议与已验证事实见下文 §7。**staging / production readiness 仍需在 4 类边界完成演练**：(1) 多进程 Worker 真并行；(2) 真实 MinerU；(3) 真实 Embedding Provider HTTP；(4) 浏览器前后端端到端联调。
 
 ## 概述
 
@@ -119,6 +121,25 @@ Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持
 - 在提问时将用户问题向量化
 - 从绑定的知识库中检索相关片段（Citation）
 - 返回带元数据的引文列表
+
+**PR-4.2 验证状态（2026-09-11，第二轮 Codex review 后）**：异步 ingestion / RAG 路径**代码已落**，**真实 PostgreSQL 端到端已验证 18 passed、0 failed**（Core-only 16 + RAG 2）；**多进程并发恢复 / 真实 embedding provider 接入 / 真实 MinerU 解析失败路径仍待 staging e2e**——本节列出的协议与代码事实可以参考，但**这些边界不能视为已稳定可用**。
+
+- **检索路径重写**：从 `document_chunks.embedding` 切到 JOIN `document_embeddings + document_chunks + documents`；维度按 `embedding_profiles.is_active=true` profile 校验（不再硬编码 `DATABASE_EMBEDDING_DIM`）；`documents.status='ready'` 过滤保证 RAG 不读 ingestion 中间态。
+- **RAG 表创建**：PR-4 整改后，`embedding_profiles` / `document_embeddings` 由 bootstrap **顶层 SQL** `CREATE EXTENSION IF NOT EXISTS vector` 触发（DO 块内**禁止** `CREATE EXTENSION`），同事务内 `SET LOCAL app.rag_enabled='on'` 让 init.sql 末尾的条件块读到正确状态。Core-only 部署 ragEnabled=false → vector 扩展 / 两张 RAG 表**全部不存在**；fresh-init 决定一次 Core 或 RAG 形态，**之后不再无迁移切换**。
+- **HTTP 202 异步 ingestion**：单事务串 documents + ingestion_jobs + finalize_jobs（partial unique 兜底跨并发 race）。Worker 1s tick + 15s heartbeat + 30s lease sweeper，阶段推进 queued → parsing → chunking → embedding → finalizing → ready；ingestion claim **必须** `documents.storage_status='ready' AND deleted_at IS NULL`。失败按 `2^(n-1) × 1s` 退避（封顶 5min）→ 终态 failed；Core-only 跳过 embedding 写但仍写 `document_chunks`。
+- **finalize + outbox 严格 lease fencing**：两 worker 都加 `processing` 状态机；claim 单事务内 SELECT FOR UPDATE SKIP LOCKED → UPDATE status='processing' + lease_owner + lease_expires_at + attempts++；IO 在事务外；sweeper 按 lease 过期收回 processing → pending + 小退避。Outbox 表新增 status / lease_owner / lease_expires_at / next_attempt_at。
+- **软删除 4 动作单事务**：documents 软删除 + finalize (pending/processing) 取消 + ingestion (active) 取消 + outbox 入队；缺一会全部回滚。
+
+详细协议见
+[`docs/superpowers/plans/2026-09-10-pr4-async-doc-rag.md`](superpowers/plans/2026-09-10-pr4-async-doc-rag.md)
+与 [`docs/architecture-v2.md` §8](architecture-v2.md)。
+
+**真实 PG 集成测试**（2026-09-11，第二轮整改后重跑）：
+
+- [`backend/tests/integration/pr4-async-doc-rag-core.ts`](../backend/tests/integration/pr4-async-doc-rag-core.ts) — 16 用例，进程以空 `EMBEDDING_API_KEY` 启动，`config.ragEnabled=false`（生产 Core-only 边界）。
+- [`backend/tests/integration/pr4-async-doc-rag-rag.ts`](../backend/tests/integration/pr4-async-doc-rag-rag.ts) — 2 用例，进程以非空无敏感占位 `EMBEDDING_API_KEY` 启动，`config.ragEnabled=true`（生产 RAG 边界）。
+- 两套用例分别以**独立进程**运行，`config.ragEnabled` 由本进程 env 决定，与生产路径语义完全一致；**不**修改生产 `config` 模块，不调用真实 embedding API，不泄露真实 key。
+- 沙箱无 PG 时两个文件按各自用例数干净 SKIP；当前 PG 端到端已 **18 passed、0 failed**（Core-only 16 + RAG 2，分别调 `runIngestionWorkerOnce` / `_runFinalizeOnce` / `_runOutboxOnce` / `transitionIngestionStatus` / `getOrCreateActiveEmbeddingProfile` / `createUploadBundle` 等生产入口）。
 
 ### 8. 工具执行审计
 

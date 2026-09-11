@@ -113,11 +113,49 @@ export interface KnowledgeDocument {
   name: string;
   type: string;
   size: number;
-  status: 'uploaded' | 'parsing' | 'chunking' | 'embedding' | 'completed' | 'failed';
+  /**
+   * PR-4.2 §8.1：8 态状态机。
+   * - queued / parsing / chunking / embedding / finalizing 是中间态，前端轮询；
+   * - ready / failed / cancelled 是终态。
+   */
+  status:
+    | 'queued'
+    | 'parsing'
+    | 'chunking'
+    | 'embedding'
+    | 'finalizing'
+    | 'ready'
+    | 'failed'
+    | 'cancelled';
+  /** PR-4.2 §8.1：对象存储侧状态。Core 与 RAG 都用。 */
+  storageStatus: 'storage_pending' | 'ready' | 'storage_failed';
+  storageKey: string;
+  sha256: string;
+  /** 真实进度（仅当 totalChunks > 0 时可信）。 */
+  totalChunks: number;
+  completedChunks: number;
   errorMessage: string | null;
+  /** 终态失败原因（用户可见、已脱敏）。 */
+  failureReason: string | null;
   chunkCount: number;
+  deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * PR-4.2：HTTP 202 路径返回的最小占位 record。
+ *
+ * 注意：uploadDocument 不再返回完整 KnowledgeDocument（解析异步进行），
+ * 而是返回 `documentId` + `jobId` + 状态字段；前端拿到后继续轮询
+ * `getDocument` 直至 status ∈ {ready, failed, cancelled}。
+ */
+export interface DocumentUploadAck {
+  documentId: string;
+  jobId: string;
+  status: KnowledgeDocument['status'];
+  stage: KnowledgeDocument['status'];
+  storageStatus: KnowledgeDocument['storageStatus'];
 }
 
 export async function askKnowledge(
@@ -156,10 +194,17 @@ export function listDocuments(knowledgeBaseId: string): Promise<KnowledgeDocumen
   return request(`/knowledge-bases/${knowledgeBaseId}/documents`);
 }
 
-export function uploadDocument(knowledgeBaseId: string, file: File): Promise<KnowledgeDocument> {
+/**
+ * PR-4.2 §8.1：单文档查询。轮询 KnowledgeDocument 用，每 1.5s 一次。
+ */
+export function getDocument(id: string): Promise<KnowledgeDocument> {
+  return request(`/documents/${id}`);
+}
+
+export function uploadDocument(knowledgeBaseId: string, file: File): Promise<DocumentUploadAck> {
   const formData = new FormData();
   formData.append('file', file);
-  return request(`/knowledge-bases/${knowledgeBaseId}/documents`, {
+  return request<DocumentUploadAck>(`/knowledge-bases/${knowledgeBaseId}/documents`, {
     method: 'POST',
     body: formData,
     credentials: DEFAULT_CREDENTIALS,

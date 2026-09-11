@@ -75,7 +75,7 @@ async function withFreshSchema<T>(
 // ─── #1 fresh → applied ──────────────────────────────────────────────
 test('ensureSchema: fresh → action=applied', { skip: !RUN }, async () => {
   await withFreshSchema(async (pool) => {
-    const result = await ensureSchema(pool);
+    const result = await ensureSchema(pool, { ragEnabled: false });
     assert.equal(result.action, 'applied');
     assert.match(
       result.checksum,
@@ -96,9 +96,9 @@ test('ensureSchema: fresh → action=applied', { skip: !RUN }, async () => {
 // ─── #2 同 checksum 二次跑 → skipped ────────────────────────────────
 test('ensureSchema: same checksum → action=skipped', { skip: !RUN }, async () => {
   await withFreshSchema(async (pool) => {
-    const first = await ensureSchema(pool);
+    const first = await ensureSchema(pool, { ragEnabled: false });
     assert.equal(first.action, 'applied');
-    const second = await ensureSchema(pool);
+    const second = await ensureSchema(pool, { ragEnabled: false });
     assert.equal(second.action, 'skipped');
     assert.equal(
       second.checksum,
@@ -111,12 +111,12 @@ test('ensureSchema: same checksum → action=skipped', { skip: !RUN }, async () 
 // ─── #3 checksum 漂移 → drift action ────────────────────────────────
 test('ensureSchema: checksum drift → action=drift', { skip: !RUN }, async () => {
   await withFreshSchema(async (pool) => {
-    await ensureSchema(pool);
+    await ensureSchema(pool, { ragEnabled: false });
     // 改 _init_meta 模拟漂移
     await pool.query(
       `UPDATE _init_meta SET checksum = 'baddrift' WHERE id = 'singleton'`,
     );
-    const result = await ensureSchema(pool);
+    const result = await ensureSchema(pool, { ragEnabled: false });
     assert.equal(result.action, 'drift');
     if (result.action !== 'drift') return; // type guard
     assert.equal(result.expected, 'baddrift');
@@ -137,7 +137,7 @@ test('ensureSchema: mid-flight failure → transaction rolled back', { skip: !RU
     // 注入会失败的 SQL —— 让真实 ensureSchema 在事务内 query 抛错。
     // initSql 走生产路径被 query 一次，与真实事故一致。
     await assert.rejects(
-      () => ensureSchema(pool, { initSql: 'THIS IS NOT VALID SQL' }),
+      () => ensureSchema(pool, { ragEnabled: false, initSql: 'THIS IS NOT VALID SQL' }),
       // pg 抛错信息含 syntax error；这里只断言"必须 reject"，不强匹配文本
     );
     // 关键断言：_init_meta 在事务回滚后不存在（to_regclass 返回 null）。
@@ -198,14 +198,14 @@ test('ensureSchema source still rolls back on error', () => {
 test('ensureSchema: singleton row missing → InitSchemaIntegrityError', { skip: !RUN }, async () => {
   await withFreshSchema(async (pool, schema) => {
     // 1. 真实跑一次 ensureSchema，让 _init_meta 落地并写入 singleton 行
-    const first = await ensureSchema(pool);
+    const first = await ensureSchema(pool, { ragEnabled: false });
     assert.equal(first.action, 'applied');
     // 2. 模拟"完整性破坏"：删掉 singleton 行，但保留 _init_meta 关系
     await pool.query(`DELETE FROM _init_meta WHERE id = 'singleton'`);
     // 3. 再次跑 ensureSchema —— 应抛 InitSchemaIntegrityError
     let caught: unknown = null;
     try {
-      await ensureSchema(pool);
+      await ensureSchema(pool, { ragEnabled: false });
     } catch (err) {
       caught = err;
     }
@@ -273,8 +273,8 @@ test(
       // ensureSchema 各自进入 BEGIN → advisory_xact_lock → init.sql 的
       // 真正并发路径。这是真正能复现 `pg_extension_name_index` 竞争的形态。
       const results = await Promise.all([
-        ensureSchema(poolA),
-        ensureSchema(poolB),
+        ensureSchema(poolA, { ragEnabled: false }),
+        ensureSchema(poolB, { ragEnabled: false }),
       ]);
       assert.equal(results[0]?.action, 'applied', 'schemaA 应 action=applied');
       assert.equal(results[1]?.action, 'applied', 'schemaB 应 action=applied');
@@ -354,8 +354,8 @@ test(
       // advisory_xact_lock → 再次 inspect 的真正并发路径，不依赖
       // sleep / setTimeout 弱化竞争形态。
       const results = await Promise.all([
-        ensureSchema(poolA),
-        ensureSchema(poolB),
+        ensureSchema(poolA, { ragEnabled: false }),
+        ensureSchema(poolB, { ragEnabled: false }),
       ]);
       // 必须两边都不抛错（"两者都不抛错"是这一行天然断言 —— 一旦任一 reject
       // Promise.all 整体 reject，下面的 assert 不会执行）。
@@ -368,8 +368,8 @@ test(
       // 第二次跑（双方都已 settle 后再串行各跑一次）必须双双 skipped——
       // 这是"幂等"的基础；同时也间接证明 _init_meta.singleton 已经被
       // 先到的 worker 写入。
-      const secondA = await ensureSchema(poolA);
-      const secondB = await ensureSchema(poolB);
+      const secondA = await ensureSchema(poolA, { ragEnabled: false });
+      const secondB = await ensureSchema(poolB, { ragEnabled: false });
       assert.equal(secondA.action, 'skipped', 'worker A 第二次跑应 skipped');
       assert.equal(secondB.action, 'skipped', 'worker B 第二次跑应 skipped');
       // _init_meta.singleton 恰好 1 行（既不是 0、也不是 2 —— 0 说明

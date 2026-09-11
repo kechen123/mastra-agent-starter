@@ -92,7 +92,7 @@ async function setupHarness(): Promise<Harness> {
     connectionString: URL,
     options: `-c search_path=${schema},public`,
   });
-  await ensureSchema(pool);
+  await ensureSchema(pool, { ragEnabled: false });
 
   // 注入 workspace + 用户 + 会话 + 两条消息（user + assistant）。
   // agent_id 是字符串（registry 中已注册），无需 INSERT。

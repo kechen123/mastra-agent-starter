@@ -11,11 +11,11 @@
 >   - `hard-crash-lease-recovery.ts` —— 覆盖 W4 hard-crash sweeper 7 项验收（含跨实例并发场景）；
 >   - `approval-reconcile-safety.ts` —— 覆盖 reconciler lease fencing / backoff / 非幂等 Tool 拒绝自动重试 / 原子回滚 / 终态手工介入行退出扫描集。
 >
-> **仍不是完整生产容灾验收**：网络抖动 / 真实 SDK 并发去重 / 多实例 SSE 跨实例扇出 / 浏览器端到端仍未验证。已按用户要求停止继续开发，**PR-4 尚未开始编码**。涉及 Mastra resume SDK/stream 边界的 PG 集成测试（`tool-policy-pg.ts` / `multi-process-resume.ts` / `executor-terminal-lease-fence.ts` / `approval-reconcile-safety.ts`）使用 `FakeAgentFacade` / fake stream——验证的是 worker 抢占层 + SDK 边界协议 + lease fencing + 跨进程资源抢占；`hard-crash-lease-recovery.ts` 直接验证生产 sweeper 的 PostgreSQL 状态收敛（不依赖 facade）。本机真实 Mastra Core 1.61.0 + DeepSeek 的 approve / decline / timeout 三条 HTTP/SSE 基础路径及 pending 后重启再 approve 已有验证记录；**完整容灾与多实例真实 SDK e2e 尚未验证**——这是 PR-3.3 staging e2e 待办，**不是** PR-3.3.2 / 3.3.2.1 的功能缺口。详见 [实测与交接记录](runbooks/2026-09-04-approval-verification.md)。下次先核对当前未提交改动及 PR-3.3 剩余风险，再校正 PR-4 计划；不要直接照旧迁移链执行。
+> **仍不是完整生产容灾验收**：网络抖动 / 真实 SDK 并发去重 / 多实例 SSE 跨实例扇出 / 浏览器端到端仍未验证（属 PR-3.3 staging e2e 待办）。**PR-4 状态（2026-09-11，第二轮 Codex review 后）**：PR-4.1 / PR-4.2 / PR-4.3 **代码已完成**；**真实 PostgreSQL 端到端 18 passed、0 failed**（Core-only 16 + RAG 2，分别调 `runIngestionWorkerOnce` / `_runFinalizeOnce` / `_runOutboxOnce` / `transitionIngestionStatus` / `getOrCreateActiveEmbeddingProfile` / `createUploadBundle` 等生产入口；详见 `architecture.md` §7 与 PR-4.x 各小节）。**staging 演练未完成**（仅 4 类边界）：多进程 Worker 真并行 / 真实 MinerU / 真实 Embedding Provider HTTP / 浏览器前后端端到端联调。**PR-4.4（存量向量迁移）已取消**：本模板采用 fresh DB + `backend/database/init.sql` 单一来源，不维护旧库迁移。涉及 Mastra resume SDK/stream 边界的 PG 集成测试（`tool-policy-pg.ts` / `multi-process-resume.ts` / `executor-terminal-lease-fence.ts` / `approval-reconcile-safety.ts`）使用 `FakeAgentFacade` / fake stream——验证的是 worker 抢占层 + SDK 边界协议 + lease fencing + 跨进程资源抢占；`hard-crash-lease-recovery.ts` 直接验证生产 sweeper 的 PostgreSQL 状态收敛（不依赖 facade）。本机真实 Mastra Core 1.61.0 + DeepSeek 的 approve / decline / timeout 三条 HTTP/SSE 基础路径及 pending 后重启再 approve 已有验证记录；**完整容灾与多实例真实 SDK e2e 尚未验证**——这是 PR-3.3 staging e2e 待办，**不是** PR-3.3.2 / 3.3.2.1 的功能缺口。详见 [实测与交接记录](runbooks/2026-09-04-approval-verification.md)。
 
 > **本版本已被本次裁决覆盖**：迁移链 / 增量迁移 / `LEGACY_WORKSPACE_OWNER_USER_ID` ——以 `docs/superpowers/specs/2026-08-28-workspace-id-isolation-design.md` §5 为准。PR-1.2 / PR-1.3 / PR-1.4 / PR-1.5 已合并落地。
 
-> **状态：基于 V2.3.6（2026-08-28）** —— `architecture-v2.md` 已升版至 V2.3.6，五项定向修正全部落定（含 §8.4.1 Core/RAG Schema 边界与 §8.4.2 存量内联向量迁移）。本文档据此拆解阶段 0～5 的 PR 切片。**仍为文档/计划阶段，不进入代码开发。**
+> **状态：基于 V2.3.6（2026-08-28）** —— `architecture-v2.md` 已升版至 V2.3.6，五项定向修正全部落定（含 §8.4.1 Core/RAG Schema 边界与 §8.4.2 存量内联向量迁移）。本文档据此拆解阶段 0～5 的 PR 切片。**自此进入代码开发**：阶段 0–3 已落地（PR-1.x / PR-2 / PR-3.0–3.3）；阶段 4 的 PR-4.1 / PR-4.2 / PR-4.3 代码已完成并经真实 PostgreSQL 端到端 18 passed、0 failed（详见下方阶段 4 节）；PR-4.4 已取消，模板统一走 fresh DB + init.sql。
 
 ## 本文档的定位
 
@@ -47,7 +47,7 @@
 
 **Schema 分层**
 - 新安装 **Core Schema 不创建** `vector` 扩展、**不创建** `document_chunks.embedding`。
-- **RAG 启用时**才创建 `vector` 扩展 + `embedding_profiles` + `document_embeddings` + HNSW 索引。
+- **RAG 启用时**才创建 `vector` 扩展 + `embedding_profiles` + `document_embeddings` 及普通过滤索引（`document_embeddings_workspace_chunk_idx` / `document_embeddings_profile_chunk_idx`）；**本轮不建 HNSW 索引**——`embedding vector` 是可变维度列，HNSW 必须绑定固定 dimensions 才能 DDL，全局 HNSW 既不可创建、也会把后续切维度卡死；未来如需按 `(profile_id, dimensions)` 建 partial HNSW 属 profile 生命周期职责，本轮不在 init.sql 里做。
 - Core 路径 SQL 禁止引用 `vector` 类型 / `<=>` / `document_embeddings`。
 
 **存量库迁移**
@@ -847,70 +847,100 @@ npx tsx src/scripts/staging-tool-approval-e2e.ts
 
 **目标**：把当前同步 Document 流程改成异步 Staging → Finalize 管线；RAG 启用时按 §8.4.1 拆 Schema；存量库按 §8.4.2 六步迁移；Outbox + Worker Lease 全部按 V2.3.5 + V2.3.6 落定。
 
+> **PR-4 验证状态（2026-09-11，第二轮 Codex review 后）**：本轮 PR-4.x（PR-4.1 / 4.2 / 4.3）
+> **代码已完成**；**真实 PostgreSQL 端到端 18 passed、0 failed**（Core-only 16 + RAG 2）。
+> 静态 `npm run typecheck`（backend）+ `npm run build`（frontend）已通过。
+> **staging 演练未完成**（仅 4 类边界）：多进程 Worker 真并行 / 真实 MinerU /
+> 真实 Embedding Provider HTTP / 浏览器前后端端到端联调。
+> 按用户裁决，本轮 PR-4.x 全部以 **`backend/database/init.sql` 单一来源 +
+> fresh DB init** 路径落地——**不**创建 `migrations/0008-rag-extensions.sql` /
+> `0009-storage-jobs.sql` 等迁移文件；**不**为旧数据库写兼容 / 回填 / 迁移
+> 路径（与本计划 G-2 / §5.3 "不维护迁移链；删库重建是接受路径" 完全一致）。
+> PR-4.4「存量内联向量迁移」在本轮**已取消**——§8.4.2 六步迁移依赖旧库，
+> 本项目模板统一以 init.sql 为起点，存量数据不存在，需要时由维护者按 V2
+> §8.4.2 手动跑 init.sql 重建。
+> 完整落地清单与未验证项见
+> `docs/superpowers/plans/2026-09-10-pr4-async-doc-rag.md`。
+>
+> **真实 PG 集成测试**（2026-09-11 第二轮整改后重跑）已**18 passed、0 failed**：
+>
+> - [`backend/tests/integration/pr4-async-doc-rag-core.ts`](../backend/tests/integration/pr4-async-doc-rag-core.ts) — 16 用例；进程以空 `EMBEDDING_API_KEY` 启动，`config.ragEnabled=false`（生产 Core-only 边界）。
+> - [`backend/tests/integration/pr4-async-doc-rag-rag.ts`](../backend/tests/integration/pr4-async-doc-rag-rag.ts) — 2 用例；进程以非空无敏感占位 `EMBEDDING_API_KEY` 启动，`config.ragEnabled=true`（生产 RAG 边界）。
+> - 两套用例分别以**独立进程**运行，`config.ragEnabled` 由本进程 env 决定，**不**修改生产 `config` 模块；不调用真实 embedding API；不泄露真实 key。沙箱无 PG 时两文件按各自用例数干净 SKIP。
+
 ### PR-4.1：RAG 扩展与拆分表启用（Core 模式不引入）
 
 **Files**
-- Create: `backend/database/migrations/0008-rag-extensions.sql`
+- Modify: `backend/database/init.sql`（删除顶层 `CREATE EXTENSION vector`（搬到 bootstrap 顶层 SQL）；新增 `document_ingestion_jobs` / `storage_finalize_jobs` / `storage_deletion_outbox`；`storage_finalize_jobs` / `storage_deletion_outbox` 各加 `processing` 状态 + lease columns；末尾 DO 条件块创建 `embedding_profiles` / `document_embeddings` 及普通过滤索引；**本轮不建 HNSW**）
+- Modify: `backend/src/test-utils/schema-init.ts`（`ensureSchema` 接受 `{ ragEnabled: boolean }` 必需参数；first-time 路径同一事务内 `CREATE EXTENSION IF NOT EXISTS vector` 顶层 + `SET LOCAL app.rag_enabled`）
+- Modify: `backend/src/scripts/migrate.ts`（显式传 `config.ragEnabled`）
+- Modify: `backend/src/config.ts`（`ragEnabled` 由 `EMBEDDING_API_KEY` 派生）
+- Modify: `backend/src/modules/documents/service.ts`（`DocumentStatus` 8 态 + `softDeleteDocument` 4 动作单事务 + `findActiveDocumentBySha`）
 
-> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
+**Schema**（落地在 `init.sql` 而非 `migrations/`）
 
-**Schema**
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
--- 其余 RAG 表已在 PR-1.3 创建，此处不重复
-```
+- `documents.status` CHECK 改为 8 态（`queued / parsing / chunking / embedding / finalizing / ready / failed / cancelled`）。
+- `documents` 新增 `storage_status` / `storage_key` / `sha256` / `total_chunks` / `completed_chunks` / `failure_reason` / `deleted_at` 列；新增 partial unique `documents_dedup_unique_idx`（`workspace_id, knowledge_base_id, sha256` WHERE `deleted_at IS NULL`）。
+- `document_chunks` 删除 `embedding vector(2048)` 列；新增 `UNIQUE (document_id, chunk_index)`。
+- 三张 Core-only 新表按 V2 §8.1 / §8.2 字段创建；含 lease_owner / lease_expires_at / heartbeat_at / partial unique / pending 索引。`storage_finalize_jobs.status` 加 `processing`；`storage_deletion_outbox` 加 status / lease_owner / lease_expires_at / next_attempt_at 列。
+- 末尾 DO 块：`current_setting('app.rag_enabled', true) = 'on'` 才创建 `embedding_profiles` + `document_embeddings` 及普通过滤索引（`document_embeddings_workspace_chunk_idx` / `document_embeddings_profile_chunk_idx`）；**本轮不建 HNSW**——`embedding vector` 是可变维度列，HNSW 必须绑定固定 dimensions 才能 DDL，全局 HNSW 既不可创建、也会把后续切维度卡死；未来如需按 `(profile_id, dimensions)` 建 partial HNSW 属 profile 生命周期职责，本轮不在 init.sql 里做。**vector 扩展**已搬到 bootstrap 顶层 SQL，**不在** DO 块内。
 
-**注意**：本期**只创建扩展**。RAG-only 安装从此 PR 开始可工作；Core-only 安装到本 PR 仍不依赖 pgvector（PR-0.1 的承诺维持）。
-
-**测试**：Core-only 沙盒（无此迁移）跑 `SELECT extname FROM pg_extension` 不含 `vector`。
+**验证状态**：typecheck 通过；真实 PG 集成测试已落并跑通——见 `pr4-async-doc-rag-core.ts` #1（Core-only 不建 vector / RAG 表）+ `pr4-async-doc-rag-rag.ts` #2（RAG 全建）。两文件分别以空 / 非空 `EMBEDDING_API_KEY` 在独立进程跑，**18 passed、0 failed**（详见本节顶部"真实 PG 集成测试"段）。
 
 ### PR-4.2：Staging → Finalize + Storage Outbox（Worker Lease）
 
 **Files**
-- Create: `backend/database/migrations/0009-storage-jobs.sql`（`document_ingestion_jobs` / `storage_finalize_jobs` / `storage_deletion_outbox`）
+- Create: `backend/src/infrastructure/storage/document-storage.ts`（接口 + 单例工厂）
+- Create: `backend/src/infrastructure/storage/local-storage.ts`（本地 FS：`staging/` 与 `final/` 命名空间隔离 + tmp + rename 原子晋升 + ENOENT 容忍）
+- Create: `backend/src/modules/documents/text-splitter.ts`（抽出共享 `splitText`，消除 PR-3 时期 inline TODO）
+- Create: `backend/src/modules/documents/jobs-repository.ts`（enqueue / claimNext / heartbeat / transitionIngestionStatus / markFailedTerminal / cancelJobsForDocument；requeue 已在 `transitionIngestionStatus` 内单事务收敛——本轮**不**单独保留 `flushRequeueToQueued` 入口）
+- Create: `backend/src/modules/documents/ingestion-worker.ts`（1s tick + 15s heartbeat + 30s lease sweeper；阶段推进 + 退避重试 + Core-only 跳过 embedding）
+- Create: `backend/src/modules/documents/storage-workers.ts`（finalize + outbox 两组 worker；**严格 lease fencing + processing 状态机 + 真实退避**）
+- Modify: `backend/src/server/bootstrap.ts`（注入 `LocalFsStorage` 单例 + 启动 3 组 worker）
+- Modify: `backend/src/server/routes/documents.ts`（POST 改 202，**单事务串 documents + ingestion_jobs + finalize_jobs，23505 catch 触发 dedup-race 重查**；DELETE 改 `softDeleteDocument`）
+- Modify: `backend/.gitignore`（忽略 `data/` 与 `backend/data/`；精确反忽略 `backend/src/infrastructure/storage/`）
 
-> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
-- Modify: 文档上传路径切到 staging
-- Create: `backend/src/workers/finalize-worker.ts`
+**实现要点（PR-4.2 整改后）**：
+- claim 单事务内 SELECT FOR UPDATE SKIP LOCKED → UPDATE 切 `processing` + lease_owner + lease_expires_at + attempts++；IO 在事务外。
+- finalize lease 过期 → sweeper 收回 processing → pending + 5s 退避。
+- ingestion claim JOIN documents 加 `deleted_at IS NULL AND storage_status='ready'` 守卫；transitionIngestionStatus 单事务串 job + doc，attempts 单点 ++。
+- outbox claim 加 lease + 真实退避 `2^(n-1) × 1s` 封顶 5min；sweeper 按 lease 收回。
+- soft delete 4 动作单事务：documents 软删除 + finalize (pending/processing) 取消 + ingestion (active) 取消 + outbox 入队。
 
-**实现要点**：严格按 V2.3.5 SQL + V2.3.6 §8.7 租约判据；Step B 走权威状态四分支（cancelled/软删 → Outbox；其它 → 不删）；TTL GC 仅扫 staging 命名空间。
-
-**测试**：包含第 1 项所述全部边界测试（Step B 影响 0 行四分类、TTL GC 不删 finalKey、Outbox 重试幂等）。
+**验证状态**：typecheck 通过；真实 PG 集成测试已落并跑通——`pr4-async-doc-rag-core.ts` 含 #3 并发上传 race、#4 ingestion claim storage_pending 不抢、#5 finalize 跨实例并发、#6 finalize lease 过期 sweeper、#7 ingestion transition 事务回滚、#8 soft delete 串联、#9 outbox lease sweeper、#10 outbox 删除成功、#11 requeue attempts 单点 ++、#12 删除后旧 worker 无法 ready、#13 lease 过期 worker 拒绝写 done/failed、#14 finalize 成功 + DB 写回失败 → 二次重试幂等收敛、#16 outbox 两 worker 并发仅一个 remove、#17 ingestion worker 真实跑全链路、#18 transitionIngestionStatus 非 requeue 全路径真实 PG 覆盖。**16 passed、0 failed**（详见本节顶部"真实 PG 集成测试"段）。
 
 ### PR-4.3：Async Document 写读切换
 
 **Files**
-- Modify: 文档查询路径（pending 文档仍可读，但前端用 ready/processing 标签渲染）
+- Modify: `backend/src/modules/knowledge/rag/retriever.ts`（JOIN `document_embeddings + document_chunks + documents`；按 active profile + `documents.status='ready'` 过滤）
+- Modify: `frontend/src/lib/api.ts`（`KnowledgeDocument` 8 态 + 进度字段；新增 `DocumentUploadAck` + `getDocument`）
+- Modify: `frontend/src/features/knowledge/components/KnowledgeBaseWorkspace.tsx`（`STATUS_LABEL` 全翻译；中间态显示 `completed/total` 进度文本；失败态显示 `failureReason`；`cancelled` 状态禁用删除）
+- Modify: `frontend/src/app/App.tsx`（1.5s 轮询 effect 仅对中间态文档触发；离开 KB 视图或全部终态时清理 timer）
 
-**测试**：上传后立即查询 → `processing`；轮询 → 切到 `ready`。
+**验证状态**：前端仅 build 通过；浏览器端到端联调留待后续。RAG 检索的 PG 验证依赖 #2 已落测试 fixture；本节顶部"真实 PG 集成测试"段的 **18 passed、0 failed** 涵盖 schema + 后端 worker 协议；**多进程并发恢复 / 真实 embedding provider 接入 / 真实 MinerU 解析失败路径仍待 staging e2e**，不能视为已稳定可用。
 
 ### PR-4.4：存量内联向量迁移（§8.4.2 六步）
 
-**Files**
-- Create: `backend/database/migrations/0010-legacy-embeddings-migration.sql`
+**状态：已取消**（2026-09-11）。
 
-> 实际未创建此文件——PR-1.2 / PR-1.3 / PR-1.5 已在 `backend/database/init.sql` 单文件中合并落地（见 G-2 / §5.3）。
-- （已撤销）应用层 migration runner 与 §5.3 / G-2 "不维护迁移链" 冲突；如需 embedding profile 调整，改 init.sql + 删库重建
-
-**步骤**（按 §8.4.2 顺序，逐 PR 子任务）：
-- Step 1：`CREATE EXTENSION` + 插入 Legacy Profile (`status='migrating', is_active=false`)
-- Step 2：判定函数（环境变量 + 维度匹配）
-- Step 3：`INSERT INTO document_embeddings SELECT ... ON CONFLICT DO NOTHING`
-- Step 4：四项校验 SQL（`legacy_vectors` / `migrated_vectors` / `uncovered_chunks` / `dimension_mismatch` / `hash_mismatch`）
-- Step 5：`UPDATE embedding_profiles SET status='active', is_active=true WHERE id=:pid;`（**唯一切换点**）
-- Step 6：7 天回滚窗口，每日重新校验，全部通过后才 `ALTER TABLE document_chunks DROP COLUMN embedding;`
-
-**测试**：
-- 维度不匹配 → Step 2 直接拒搬迁，要求重 embed
-- 维度匹配但 `content_hash` 不匹配 → Step 4 报错，禁止切读
-- 切读后回滚 → `is_active=false` 且旧列重获读取权重
+- **本模板采用 fresh DB**——`backend/database/init.sql` 是 Schema 单一来源。
+- **不维护旧库迁移、兼容、回填**（与 G-2 / §5.3 "不维护迁移链；删库重建是接受路径" 一致）。
+- 如需 embedding profile 调整，改 `init.sql` + 删库重建即可。
+- **V2 §8.4.2 六步迁移保留在 `docs/architecture-v2.md` 作为未来旧库场景参考**，本仓库不再实现。
 
 ### 阶段 4 验收（映射 V2 §8.7）
 
-- [ ] Core 模式启动不需要 pgvector（PR-4.1 不应用时仍可工作）
-- [ ] §8.4.2 六步迁移 + 7 天回滚窗口全部自动化
-- [ ] 切读后立即 DROP 列被 SQL 注释显式禁止且 CI 失败
-- [ ] 旧向量 `provider`/`model` 不可确认时强制重 embed
+- ✅ **PR-4.1 / PR-4.2 / PR-4.3 已完成**：异步文档管线 + RAG/Core 分层代码已落仓库；真实 PostgreSQL 端到端 **18 passed、0 failed**（Core-only 16 + RAG 2，分别在独立进程运行：`config.ragEnabled` 由本进程 env 决定，调用 `runIngestionWorkerOnce` / `_runFinalizeOnce` / `_runOutboxOnce` / `transitionIngestionStatus` / `getOrCreateActiveEmbeddingProfile` / `createUploadBundle` 等生产入口）。详细 18 用例清单与两套隔离进程说明见 `architecture.md` §7 与 PR-4 顶部验证状态块。
+- ⚠️ **Core 模式服务器在一个完全未安装 pgvector 的 PostgreSQL 实例上启动** —— **staging 未验证项**（不在 PR-4.1 / 4.2 / 4.3 真实 PG 18/18 覆盖范围内）。本轮 #1 用例断言 RAG 表不存在 + `app.rag_enabled='off'`，但所属 fixture schema 已 `CREATE EXTENSION vector`，**未**测真实"完全无 pgvector 的 PG 实例 + Core 部署"边界；属剩余 staging 演练边界，**不是**代码缺口。
+- ⚠️ **剩余 staging 边界**（仍待演练，**不**视为已稳定可用）：
+  - 多进程 Worker 真并行 `FOR UPDATE SKIP LOCKED` 单飞 / heartbeat 续约 / hard-crash sweeper 接管。
+  - 真实 MinerU 解析失败 / 网络抖动重试。
+  - 真实 Embedding Provider HTTP 接入。
+  - 浏览器前后端端到端联调。
+- ❌ **不适用**（PR-4.4 已取消，模板走 fresh init，不再作为 PR-4 待办；保留在 V2 §8.4.2 仅作未来旧库场景参考）：
+  - ~~§8.4.2 六步迁移 + 7 天回滚窗口全部自动化~~。
+  - ~~切读后立即 DROP 列被 SQL 注释显式禁止且 CI 失败~~。
+  - ~~旧向量 `provider`/`model` 不可确认时强制重 embed~~。
 
 ---
 
@@ -974,6 +1004,6 @@ CREATE EXTENSION IF NOT EXISTS vector;
 | §5.4 | 6 张归属表隔离（含 `document_chunks`）+ Skill 全局目录 | PR-1.2 / PR-1.3 / PR-1.4 / PR-1.5 | 1 |
 | §6.6 | 幂等 POST + SSE 续传 + `agent_runs` 生命周期 | PR-2.1 / PR-2.2 / PR-2.3 | 2 |
 | §7.4 | Tool 网关 + 审批 + 跨 workspace 404 | PR-3.1 / PR-3.2 / PR-3.3 | 3 |
-| §8.7 | Core/RAG 拆分 + 六步迁移 + 切读顺序 + 不伪造归属 | PR-4.1 / PR-4.2 / PR-4.4 | 4 |
+| §8.7 | Core/RAG 拆分 + 切读顺序 + 不伪造归属（六步迁移为 V2 参考项，本模板走 fresh init，PR-4.4 已取消） | PR-4.1 / PR-4.2 / PR-4.3 | 4 |
 | §9.8 | 评测定稿 + 多 Provider + production 解锁 | PR-5.1 / PR-5.2 / PR-5.3 / PR-5.4 | 5 |
 | §10 | 总体验收 | 全部 PR 闭合 | 全部 |

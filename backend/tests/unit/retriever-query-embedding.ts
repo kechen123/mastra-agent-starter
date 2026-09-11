@@ -60,28 +60,36 @@ const DIM = DATABASE_EMBEDDING_DIM;
   // 短 1
   assert.throws(
     () => assertQueryEmbeddingValid(new Array(DIM - 1).fill(0)),
-    new RegExp(`queryEmbedding 长度必须为 ${DIM}，实际: ${DIM - 1}`),
+    new RegExp(
+      `queryEmbedding 长度必须为 ${DIM}（active profile dimensions），实际: ${DIM - 1}`,
+    ),
     '短 1 维应当被拒绝',
   );
 
   // 长 1
   assert.throws(
     () => assertQueryEmbeddingValid(new Array(DIM + 1).fill(0)),
-    new RegExp(`queryEmbedding 长度必须为 ${DIM}，实际: ${DIM + 1}`),
+    new RegExp(
+      `queryEmbedding 长度必须为 ${DIM}（active profile dimensions），实际: ${DIM + 1}`,
+    ),
     '长 1 维应当被拒绝',
   );
 
   // 空数组
   assert.throws(
     () => assertQueryEmbeddingValid([]),
-    new RegExp(`queryEmbedding 长度必须为 ${DIM}，实际: 0`),
+    new RegExp(
+      `queryEmbedding 长度必须为 ${DIM}（active profile dimensions），实际: 0`,
+    ),
     '空数组应当被拒绝',
   );
 
   // 单元素
   assert.throws(
     () => assertQueryEmbeddingValid([0.5]),
-    new RegExp(`queryEmbedding 长度必须为 ${DIM}，实际: 1`),
+    new RegExp(
+      `queryEmbedding 长度必须为 ${DIM}（active profile dimensions），实际: 1`,
+    ),
     '单元素向量应当被拒绝',
   );
 }

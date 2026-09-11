@@ -84,8 +84,8 @@ async function withTwoWorkspaces<T>(
     connectionString: URL,
     options: `-c search_path=${sb},public`,
   });
-  await ensureSchema(a);
-  await ensureSchema(b);
+  await ensureSchema(a, { ragEnabled: false });
+  await ensureSchema(b, { ragEnabled: false });
   try {
     return await fn(a, b);
   } finally {

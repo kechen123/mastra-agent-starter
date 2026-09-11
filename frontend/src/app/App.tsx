@@ -383,6 +383,29 @@ function App() {
     }
   }, [authStatus, activeModule, selectedKnowledgeBaseId, handleUnauthenticated])
 
+  // PR-4.2 §8.1：仅对处于中间态（queued / parsing / chunking / embedding /
+  // finalizing）的文档做 1.5s 轮询；所有文档终态（ready / failed / cancelled）
+  // 后停止轮询，避免无谓请求。离开知识库视图或切换 KB 时清空计时器。
+  useEffect(() => {
+    if (authStatus !== 'authenticated') return
+    if (activeModule !== '知识库' || !selectedKnowledgeBaseId) return
+    const hasInFlight = documents.some(
+      (doc) =>
+        doc.status === 'queued' ||
+        doc.status === 'parsing' ||
+        doc.status === 'chunking' ||
+        doc.status === 'embedding' ||
+        doc.status === 'finalizing',
+    )
+    if (!hasInFlight) return
+    const timer = window.setInterval(() => {
+      void refreshDocuments(selectedKnowledgeBaseId).catch((error) => {
+        if (error instanceof UnauthenticatedError) handleUnauthenticated()
+      })
+    }, 1_500)
+    return () => window.clearInterval(timer)
+  }, [authStatus, activeModule, selectedKnowledgeBaseId, documents, handleUnauthenticated])
+
   // 启动恢复：认证完成后由 URL 决定当前一级页面与详情选择。
   // 非法地址统一 replace 到聊天草稿，避免把未知路径伪装成有效页面。
   useEffect(() => {
@@ -990,7 +1013,22 @@ function App() {
     setKnowledgeBases((current) => [created, ...current])
     openKnowledgeBase(created.id, 'push')
   }
-  async function handleUpload(file: File | undefined) { if (!file || !selectedKnowledgeBaseId || isUploading) return; setIsUploading(true); setKnowledgeError(null); try { await uploadDocument(selectedKnowledgeBaseId, file); await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()]) } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); setIsUploading(false); return }; setKnowledgeError(toErrorMessage(error)); } finally { setIsUploading(false) } }
+  async function handleUpload(file: File | undefined) {
+    if (!file || !selectedKnowledgeBaseId || isUploading) return
+    setIsUploading(true)
+    setKnowledgeError(null)
+    try {
+      // PR-4.2 §8.1：HTTP 202 异步路径——上传只返回 documentId + jobId +
+      // 当前 status。轮询由 KnowledgeBaseWorkspace 之外的 1.5s 定时器接管。
+      await uploadDocument(selectedKnowledgeBaseId, file)
+      await Promise.all([refreshDocuments(selectedKnowledgeBaseId), refreshKnowledgeBases()])
+    } catch (error) {
+      if (error instanceof UnauthenticatedError) { handleUnauthenticated(); setIsUploading(false); return }
+      setKnowledgeError(toErrorMessage(error))
+    } finally {
+      setIsUploading(false)
+    }
+  }
   async function handleDeleteKnowledgeBase(id: string) {
     const knowledgeBase = knowledgeBases.find((item) => item.id === id)
     setConfirmRequest({

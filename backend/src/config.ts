@@ -4,14 +4,16 @@ import 'dotenv/config';
  * 数据库向量维度硬约束。
  *
  * 原因：
- * - `backend/database/init.sql` 中 `document_chunks.embedding` 的列定义
- *   固定为 `vector(2048)`，是数据库 schema 的事实。
+ * - `backend/database/init.sql` 中 `document_embeddings.embedding`（RAG 块内）
+ *   的列定义固定为 `vector`，dimensions 由 `embedding_profiles.dimensions` 提供，
+ *   不再把维度写死在数据库列宽。
  * - 当前 Starter 不引入迁移机制；切换 Embedding 模型维度必须先把
  *   `database/init.sql` 与真实数据库同步迁移，再放宽本常量。
  *
  * 因此：
- * - `DATABASE_EMBEDDING_DIM` 是数据库 schema 的镜像，是不可变的真值。
- * - `EMBEDDING_DIM` 只是为了让运维一眼看清"模型必须与 schema 对齐"。
+ * - `DATABASE_EMBEDDING_DIM` 保留作为"未启用 RAG 时的运行时兜底"，用于
+ *   Embedding service 在 `ragEnabled=false` 模式下做行内校验。
+ * - `EMBEDDING_DIM` 只是为了让运维一眼看清"模型必须与 profile 对齐"。
  * - 两个值不一致时，启动直接抛错，绝不静默继续。
  */
 export const DATABASE_EMBEDDING_DIM = 2048;
@@ -156,11 +158,32 @@ function resolveLlmConfig(): { chatProvider: string; chatModel: string; deprecat
 const embeddingDim = positiveInteger('EMBEDDING_DIM', DATABASE_EMBEDDING_DIM);
 if (embeddingDim !== DATABASE_EMBEDDING_DIM) {
   throw new Error(
-    `Embedding 维度不一致：当前 EMBEDDING_DIM=${embeddingDim}，但数据库 schema 固定为 ${DATABASE_EMBEDDING_DIM}（document_chunks.embedding=vector(${DATABASE_EMBEDDING_DIM})）。` +
+    `Embedding 维度不一致：当前 EMBEDDING_DIM=${embeddingDim}，但兜底值固定为 ${DATABASE_EMBEDDING_DIM}（RAG 模式下 schema 由 embedding_profiles.dimensions 决定）。` +
       '切换 Embedding 模型维度需要单独的数据迁移阶段，本 Starter 仅支持把 EMBEDDING_DIM 显式设置为 ' +
       `${DATABASE_EMBEDDING_DIM}。请勿通过修改环境变量绕过本检查。`,
   );
 }
+
+/**
+ * PR-4.1 §8.5：Core / RAG 分层开关。
+ *
+ * 规则：
+ * - `EMBEDDING_API_KEY` **存在**（非空字符串）→ 视为 RAG 启用；
+ *   `ragEnabled=true` 时 `migrate.ts` 在 init.sql 执行前会
+ *   `SET LOCAL app.rag_enabled = 'on'`，让末尾条件块创建
+ *   `vector` 扩展 / `embedding_profiles` / `document_embeddings`。
+ * - 全部缺失 → Core-only；`ragEnabled=false`，不会触发 RAG 块。
+ *
+ * 注意：`EMBEDDING_BASE_URL` 与 `EMBEDDING_MODEL` 缺失但
+ * `EMBEDDING_API_KEY` 存在时，仍按 RAG 启用处理（API key 是触发
+ * 条件），但下游 embedding service 必须在第一次调用前自己校验 base
+ * url 与 model；本配置层不替你"补齐"。
+ */
+function resolveRagEnabled(): boolean {
+  const apiKey = process.env.EMBEDDING_API_KEY;
+  return typeof apiKey === 'string' && apiKey.trim().length > 0;
+}
+const ragEnabled = resolveRagEnabled();
 
 const llm = resolveLlmConfig();
 const deploymentProfile = resolveDeploymentProfile();
@@ -173,8 +196,16 @@ export const config = {
   // `infrastructure/llm/registry.ts:resolveDefaultChatModel()` 构造。
   chatProvider: llm.chatProvider,
   chatModel: llm.chatModel,
+  // PR-4.1 §8.5：RAG 启用由 EMBEDDING_API_KEY 派生。
+  // Core 模式下仍可读取这些字段（用于 ingest 路径），但 `ragEnabled=false`
+  // 时所有 RAG-only 逻辑（vector 检索 / embedding 计算）必须跳过。
+  ragEnabled,
   embeddingApiKey: process.env.EMBEDDING_API_KEY ?? '',
   embeddingBaseUrl: process.env.EMBEDDING_BASE_URL ?? '',
+  // PR-4 整改：增加显式 EMBEDDING_PROVIDER（默认 'doubao'）作为
+  // embedding_profiles.provider 来源；之前只隐含在 base url 推断
+  // 容易在新建 active profile 时给错 provider 字符串。
+  embeddingProvider: process.env.EMBEDDING_PROVIDER ?? 'doubao',
   embeddingModel: process.env.EMBEDDING_MODEL ?? 'doubao-embedding-vision-251215',
   embeddingDim,
   databaseEmbeddingDim: DATABASE_EMBEDDING_DIM,

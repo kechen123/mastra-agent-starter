@@ -7,13 +7,67 @@
 ## 开箱即用
 
 - **可追溯的智能对话**：支持通用问答、SSE 流式输出、停止生成与重新生成。
-- **带引用的知识库问答**：文档经 PostgreSQL + pgvector 检索后生成回答，并保留来源引用。
+- **带引用的知识库问答**：文档异步入库（HTTP 202 → 后台 ingestion Worker 推进 parsing / chunking / embedding / finalizing）；Core 模式下 chunk 文本落库可被引用，RAG 启用时向量检索补充。**PR-4.1 / 4.2 / 4.3 已完成**——异步管线已落代码并经真实 PostgreSQL 端到端 18 passed、0 failed（详见下方 PR-4 验证状态块）；引用功能**未**达到 staging / production readiness，仍需在真实多进程 / 真实 Embedding Provider / 真实 MinerU / 浏览器端到端四项边界完成演练。
 - **可组合的 Agent 能力**：按 Agent 组合知识库、Tool 和 Skill，避免为不同业务复制运行时。
 - **受控的工具与技能体系**：Tool 统一注册、执行留痕；Skill 支持内置、本地业务和 skills.sh 市场来源。
 - **开箱即用的个人工作区**：本地账号登录后自动拥有独立 Workspace，业务数据按 Workspace 隔离。
 
 运行时已经具备持久化 Run、断点续传、Tool 策略（Workspace 隔离 + 三态评估 + activeTools 过滤）与 Tool 审批闭环（高风险 Tool 触发 `/v1/approvals` 收件箱；approve → Mastra `approveToolCall` 返回的 resume stream 接口、decline/expire → `declineToolCall` 返回的 resume stream 接口（代码通过 facade 调用 SDK，而**非** `streamAgent(prompt)` 重发）；超时 worker 仅做 DB-only `expired` 决策登记；Run Executor scheduler/reconciler 是唯一 SDK 调用与 stream 消费方）的能力；完整实现范围与仍在演进的能力请以 [当前架构](docs/architecture.md) 为准。
 
+> **PR-4 验证状态（2026-09-11，第二轮 Codex review 后）**：PR-4.1 / PR-4.2 / PR-4.3 **代码已完成**，**真实 PostgreSQL 端到端 18 passed、0 failed**（详见下方"已验证的真实 PG 集成测试"小节）。引用功能**未**达到 staging / production readiness，仍需在以下四类边界完成演练：
+>
+> 1. 多进程 Worker 真并行 `FOR UPDATE SKIP LOCKED` 单飞 / heartbeat 续约 / hard-crash sweeper 接管。
+> 2. 真实 MinerU 解析失败 / 网络抖动重试。
+> 3. 真实 Embedding Provider HTTP 接入。
+> 4. 浏览器前后端端到端联调。
+>
+> - **代码已落地**：
+>   - **Schema / Core-RAG 分层**：`backend/database/init.sql` 新增 `document_ingestion_jobs` / `storage_finalize_jobs` / `storage_deletion_outbox`（Core-only）；RAG 块（`vector` 扩展 + `embedding_profiles` + `document_embeddings`）由 bootstrap 顶层 `CREATE EXTENSION IF NOT EXISTS vector` + `SET LOCAL app.rag_enabled='on'` 触发；**PR-4.2 整改：HNSW 全局索引删除**（`embedding vector` 是可变维度列，必须按 profile 维度 partial 建；本轮不建）。
+>   - **schema-init.ts**：接受 `{ ragEnabled: boolean }`（**必需**），在 first-time 路径同一事务内完成扩展创建与 `SET LOCAL`，DO 块不再承担 `CREATE EXTENSION`。
+>   - **migrate.ts**：显式传 `config.ragEnabled` 给 `ensureSchema`。
+>   - **HTTP 202 上传**：单事务串 documents + ingestion_jobs + finalize_jobs；catch 23505 触发 partial unique race 重查 + 200 复用既有 record。**PR-4 第二轮整改把 `createUploadBundle` 公开导出**作为集成测试入口（生产路由仍只通过 HTTP 202 暴露）。
+>   - **ingestion claim**：JOIN documents 过滤 `deleted_at IS NULL AND storage_status='ready'`；claim / transition / markFailed 全部单事务 + lease fencing；**PR-4.2 整改：attempts 单点 ++**（仅 claim 时 +1，requeue 不再 +1）。
+>   - **PR-4.2 整改 4 重守卫**：transitionIngestionStatus / markFailedTerminal 全部带 `lease_owner=worker AND lease_expires_at>now() AND status IN active AND documents.deleted_at IS NULL`。
+>   - **PR-4 第二轮整改 参数位动态化**：`transitionIngestionStatus` 的 SQL placeholder 由 `params.push(...)` 后 `${params.length}` 生成，不再写死 `$4/$5/$6/$7`；覆盖 parsing / chunking / embedding / finalizing / ready / failed / requeue 全路径。
+>   - **PR-4.2 整改 requeue 合并**：transitionIngestionStatus requeue 直接 `status='queued'` 单事务返回，删除旧 `flushRequeueToQueued` 二次 autocommit。
+>   - **PR-4.2 整改 softDeleteDocument**：清 lease_owner / lease_expires_at / heartbeat_at（3 字段）防止旧 worker 推进已删文档。
+>   - **PR-4.2 整改 finalize / outbox 3 重守卫**：done / failed / requeue 全部带 `status='processing' AND lease_owner=worker AND lease_expires_at>now()`。
+>   - **PR-4.2 整改 finalize / outbox heartbeat**：storage_finalize_jobs + storage_deletion_outbox 都加 `heartbeat_at TIMESTAMPTZ`；worker 在长 IO（rename / S3 remove）期间每 `LEASE_MS/3` 续约 lease；sweeper 仅在 lease + heartbeat 都过期时收回；所有 heartbeat UPDATE 必须带 3 重守卫。
+>   - **PR-4 第二轮整改 finalize / outbox sweeper 单次入口**：`_runFinalizeLeaseSweeperOnce` / `_runOutboxLeaseSweeperOnce` 导出供集成测试调用真实生产 sweeper；`runFinalizeOnce` / `runOutboxOnce` 也在 `_runFinalizeOnce` / `_runOutboxOnce` 别名导出。
+>   - **PR-4.2 整改 finalize 幂等**：DocumentStorage 新增 `exists()`；local-storage / fake-storage 在"staging 不存在 + final 已存在"时静默成功，让"DB 写回失败后的下一轮 tick"幂等收敛。
+>   - **PR-4.2 整改 active profile 自动创建**：`getOrCreateActiveEmbeddingProfile`（partial unique `one_active_embedding_profile_per_workspace` 兜底）；config 新增显式 `embeddingProvider`。
+>   - **finalize + outbox**：claim 切 `processing` + lease + attempts++ + 真实退避 `2^(n-1)*1s` 封顶 5min；sweeper 按 lease 收回。
+>   - **前端最小状态展示**：8 态 + 进度字段；1.5s 轮询仅对中间态触发。
+> - **已验证的真实 PG 集成测试**（2026-09-11 第二轮整改后重跑，18 passed、0 failed）：
+>   - **Core-only 文件**：[`backend/tests/integration/pr4-async-doc-rag-core.ts`](backend/tests/integration/pr4-async-doc-rag-core.ts) — 16 用例；进程以空 `EMBEDDING_API_KEY` 启动，让 `config.ragEnabled=false`（生产 Core-only 边界）。
+>   - **RAG 文件**：[`backend/tests/integration/pr4-async-doc-rag-rag.ts`](backend/tests/integration/pr4-async-doc-rag-rag.ts) — 2 用例；进程以非空无敏感占位 `EMBEDDING_API_KEY` 启动，让 `config.ragEnabled=true`（生产 RAG 边界）。
+>   - 两套用例分别以**独立进程**运行，`config.ragEnabled` 由本进程 env 决定，跟生产路径语义完全一致；**不**修改生产 `config` 模块，不调用真实 embedding API，不泄露真实 key。
+>   - 沙箱无 PG 时两文件按各自用例数干净 SKIP；当前已 **18 passed、0 failed**：
+>     - **#1** Core-only fresh schema：RAG 表不存在 + `app.rag_enabled='off'`。
+>     - **#2** RAG fresh schema：RAG 表存在 + 无全局 HNSW。
+>     - **#3** 并发上传 partial unique race：走生产 `createUploadBundle` + abort staging。
+>     - **#4** ingestion claim 在 `storage_pending` 时抢不到：走生产 `claimNextIngestionJob`。
+>     - **#5** finalize claim 跨实例并发 → 恰好一个 `processing`：走生产 `_runFinalizeOnce`。
+>     - **#6 / #9** finalize / outbox lease 过期 sweeper 回收：走生产 `_runFinalizeLeaseSweeperOnce` / `_runOutboxLeaseSweeperOnce`，不复刻 SQL。
+>     - **#7** ingestion transition 失败时整事务回滚：走生产 `transitionIngestionStatus`。
+>     - **#8** soft delete 4 表串联原子性 + 清 lease 三字段：走生产 `softDeleteDocument`。
+>     - **#10** outbox 删除成功 → `status=done + processed_at=now`：走生产 `_runOutboxOnce`。
+>     - **#11** requeue attempts 只 +1（claim 单点 ++）；**#12** 删除后旧 worker 无法 ready；**#13** lease 过期 worker 拒绝写 done/failed。
+>     - **#14** finalize 成功 + DB 写回失败 → 触发器注入重试幂等收敛。
+>     - **#15** RAG 自动 active profile + 并发收敛（生产 `getOrCreateActiveEmbeddingProfile`）。
+>     - **#16** outbox 两 worker 并发仅一个 remove。
+>     - **#17** ingestion worker 真实跑全链路（生产 `runIngestionWorkerOnce`，Core-only 跳过 embedding）。
+>     - **#18** transitionIngestionStatus 非 requeue 全路径真实 PG 覆盖（含 ready / failed 终态）。
+> - **未验证（仍需在 staging 演练边界完成）**：
+>   - 多进程 Worker 真并行下 `FOR UPDATE SKIP LOCKED` 单飞 / heartbeat 续约 / hard-crash sweeper 接管。
+>   - MinerU 真实解析失败 / 网络抖动重试。
+>   - Embedding Provider 真实 HTTP 接入。
+>   - 浏览器前后端端到端联调。
+> - **静态验证**：本轮通过 `npm run typecheck`（backend）+ `npm run build`（frontend）+ `git diff --check`。PR-4 fixture 在未配置 `TEST_DATABASE_URL` 时经 `tsx --test tests/integration/pr4-async-doc-rag-{core,rag}.ts` 干净 SKIP；**真实 PostgreSQL 端到端 18 passed、0 failed**（Core-only 16 + RAG 2；两套用例分别在独立进程跑 —— Core-only 文件以空 `EMBEDDING_API_KEY` 启动让 `config.ragEnabled=false`，RAG 文件以非空无敏感占位 `EMBEDDING_API_KEY` 启动让 `config.ragEnabled=true`；全程调 `runIngestionWorkerOnce` / `_runFinalizeOnce` / `_runOutboxOnce` / `transitionIngestionStatus` / `getOrCreateActiveEmbeddingProfile` / `createUploadBundle` 等生产入口，不调用真实 embedding API、不泄露真实 key、不修改生产 `config` 模块）。
+> - **retriever-query-embedding.ts 整改（2026-09-11）**：`assertQueryEmbeddingValid` 第二参数 `expectedDimensions` 改为 optional，默认回退到 `DATABASE_EMBEDDING_DIM`，与 unit fixture 单参调用对齐。**之前** fixture 单参调用被误传 `undefined`，触发"Got unwanted exception... 长度必须为 undefined"——被 `node:test` 的"resource generated asynchronous activity after the test ended"机制吞掉，呈现 0 failed 的虚假干净验证。**已修正**：`expectedDimensions` 默认值让 fixture 与生产路径同时跑通；fixture 错误信息正则同步对齐为带"active profile dimensions" 的生产文案。
+> - **旧 sync ingestion 死代码已删除**：`backend/src/modules/documents/ingestion.ts`（写已删除列 `document_chunks.embedding` + 写无效 `documents.status='completed'`），无生产调用方。
+> - **范围外**：`learning/`（学习草稿）已加入 `.gitignore`，不属于 PR-4 提交范围。
+>
 > **PR-3.3.2 / 3.3.2.1 验证状态（2026-09-08）**：本仓库 `backend/tests/integration/tool-policy-pg.ts` 在真实 PostgreSQL + `FakeAgentFacade`（fake resume stream）下覆盖 (a) waiting_approval 保留、(b) approve 后真实消费 resume stream 推 Run → completed、(c) decline 终态、(c-2) expire 走 `system-approval-worker` 平台身份、(d) W2 SDK transient fail → approve 进入 `approved_resume_indeterminate` + Run 推回 `waiting_approval` 等 reconciler 接管、(e) scheduler 原子事务单飞、(f) `listSuspendedRuns` fail-closed、(g) 跨重启接管、(h) W2 attempts 耗尽 → `APPROVAL_RECONCILE_MANUAL_INTERVENTION_ATTEMPTS_EXHAUSTED` 收敛、(x) `created_by` NULL 拒绝创建审批，**107 passed, 0 failed**（Codex 于 2026-09-08 使用真实 PostgreSQL 本轮重跑通过；测试 facade / resume stream 为 fake）。
 >
 > 本轮（PR-3.3.2 / 3.3.2.1）：

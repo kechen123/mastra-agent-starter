@@ -37,6 +37,12 @@ import { startRunExecutor } from '../core/execution/run-executor.js';
 import { startApprovalTimeoutWorker } from '../modules/tool-policy/timeout-worker.js';
 import { installProductionMastraFacade } from '../modules/tool-policy/mastra-facade.js';
 import { getAgentIdByRun } from '../modules/tool-policy/repository.js';
+import { startIngestionWorker } from '../modules/documents/ingestion-worker.js';
+import { startStorageWorkers } from '../modules/documents/storage-workers.js';
+import {
+  setDocumentStorage,
+} from '../infrastructure/storage/document-storage.js';
+import { LocalFsStorage } from '../infrastructure/storage/local-storage.js';
 
 import { askRoute, stopMessageRoute, regenerateMessageRoute } from './routes/messages/index.js';
 import {
@@ -101,11 +107,15 @@ preloadSkillRegistry();
 initializeApp()
   .then(() => installProductionMastraFacade({ getAgentIdByRun }))
   .then(async () => {
+    // PR-4.2：DocumentStorage 单例必须在 worker / route 启动前注入。
+    setDocumentStorage(new LocalFsStorage());
     await startRunExecutor();
     await startApprovalTimeoutWorker();
+    await startIngestionWorker();
+    await startStorageWorkers();
   })
   .catch((err) => {
-    console.error('approval timeout worker 启动失败：', err);
+    console.error('worker 启动失败：', err);
   });
 
 /**

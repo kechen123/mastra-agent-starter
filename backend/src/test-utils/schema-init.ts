@@ -98,6 +98,30 @@ export type EnsureSchemaResult =
   | { action: 'drift'; expected: string; actual: string };
 
 /**
+ * `ensureSchema` 的可选参数。
+ *
+ * PR-4.1 §8.4.1（整改）：`ragEnabled` 是**必需**字段（不让默认掩盖调用方
+ * 的意图）。`true` 时 bootstrap 会在 init 事务内、`init.sql` 跑之前先以
+ * 顶层 SQL 执行 `CREATE EXTENSION IF NOT EXISTS vector`；再在同一事务
+ * 内 `SET LOCAL app.rag_enabled = 'on'`，让文件末尾的 DO 块读到正确
+ * 状态、创建 `embedding_profiles` + `document_embeddings` 表及普通过滤
+ * 索引（`document_embeddings_workspace_chunk_idx` /
+ * `document_embeddings_profile_chunk_idx`）。**本轮不建 HNSW 索引**：
+ * `embedding vector` 是可变维度列，HNSW 必须绑定固定 dimensions 才能
+ * DDL，全局 HNSW 既不可创建、也会把后续切维度卡死；未来如需按
+ * `(profile_id, dimensions)` 建 partial HNSW 属 profile 生命周期职责，
+ * 本轮不在 init.sql 里做。`false` 时不创建 pgvector 扩展、不执行 RAG
+ * 块，schema 完全是 Core-only。
+ *
+ * `initSql` 仅供测试用例注入（让"事务中途失败"用例构造一个故意失败的
+ * DDL），让真实生产代码路径完整走一遍 BEGIN / SQL / ROLLBACK。
+ */
+export interface EnsureSchemaOptions {
+  ragEnabled: boolean;
+  initSql?: string;
+}
+
+/**
  * 计算 init.sql 的 sha256 hex（64 位小写）。
  *
  * 纯函数：只读 `backend/database/init.sql`，不连库、不读 env。
@@ -224,10 +248,21 @@ async function inspectInitMetaState(
  *         再次执行 initSql，触发 `relation "app_users" already exists`。
  *       - 第二次 inspect 的分支处理与第一次**完全一致**（同一份状态机
  *         inspectInitMetaState，避免两份漂移逻辑）。
+ *   - **PR-4.1 整改**：first-time 路径在跑 initSql 之前必须：
+ *       1. 若 `ragEnabled=true`：在事务顶层执行 `CREATE EXTENSION IF NOT
+ *          EXISTS vector`（**禁止**在 DO 块里执行）；RAG 块后续创建
+ *          `embedding_profiles` / `document_embeddings` 都依赖此扩展。
+ *       2. `SET LOCAL app.rag_enabled = 'on' | 'off'`：让 init.sql 末尾
+ *          的 DO 条件块读到正确的开关状态，决定是否走 RAG DDL 分支。
+ *       3. 再跑 initSql。
+ *       4. 写 _init_meta singleton。
+ *       5. COMMIT。
  *   - 任何异常：catch 内 best-effort ROLLBACK 后原样向上抛。
  *
  * 调用方注意：
  *   - 不要在事务里调用本函数（要求 pool 在 autocommit 状态）。
+ *   - `ragEnabled` 是必需字段 —— 调用方必须显式声明当前部署形态，避免
+ *     默认值掩盖"Core 与 RAG 部署形态不一致"的事故。
  *   - 返回 `drift` 时，调用方应拒绝继续（不抛 InitSchemaDriftError 的策略由调用方决定；
  *     本模块自身只返回 drift，不抛错，让"自动化脚本"也能拿到结构化结果）。
  *
@@ -236,8 +271,9 @@ async function inspectInitMetaState(
  */
 export async function ensureSchema(
   pool: Pool,
-  options: { initSql?: string } = {},
+  options: EnsureSchemaOptions,
 ): Promise<EnsureSchemaResult> {
+  const { ragEnabled } = options;
   const initSql = options.initSql ?? readFileSync(INIT_SQL_PATH, 'utf-8');
   const current = createHash('sha256').update(initSql).digest('hex');
   const client = await pool.connect();
@@ -279,7 +315,19 @@ export async function ensureSchema(
         );
       case 'first-time':
         // 两次 inspect 都返回 first-time —— 这一轮我们就是 init.sql 的
-        // 执行者。跑 DDL + 写 singleton 行 + COMMIT。
+        // 执行者。在跑 initSql 之前完成 RAG 启用形态的前置动作（必须与
+        // init.sql 在**同一事务**内，否则 SET LOCAL 在 COMMIT 后失效）：
+        //   1) ragEnabled 时顶层创建 vector 扩展（不在 DO 块内）；
+        //   2) SET LOCAL 让 init.sql 末尾的 DO 块读到正确状态。
+        if (ragEnabled) {
+          // 顶层 SQL：CREATE EXTENSION 不能放进 PL/pgSQL DO 块（用户约束
+          // 与可读性双重原因），所以 bootstrap 在受控路径上完成。
+          await client.query('CREATE EXTENSION IF NOT EXISTS vector');
+        }
+        await client.query(
+          `SELECT set_config('app.rag_enabled', $1, true)`,
+          [ragEnabled ? 'on' : 'off'],
+        );
         await client.query(initSql);
         await client.query(
           `CREATE TABLE IF NOT EXISTS _init_meta (
