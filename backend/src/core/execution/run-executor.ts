@@ -31,6 +31,10 @@ import {
   type RunRow,
   type RunEventType,
 } from '../../modules/runs/repository.js';
+import {
+  buildRunTerminalPayload,
+  mergeCitationsByChunkId,
+} from '../../modules/runs/citation-merge.js';
 import { getAgentDefinition } from '../agent/registry.js';
 import { getToolDefinition } from '../tool/registry.js';
 import {
@@ -43,8 +47,8 @@ import {
   getConversationWithMessages,
 } from '../../modules/conversations/service.js';
 import {
-  createToolExecution,
-  finalizeToolExecution,
+  upsertToolExecution,
+  finalizeToolExecutionByCallId,
 } from '../../modules/conversations/tool-executions.js';
 import type { Citation } from '../../modules/citations/types.js';
 import { logRequest } from '../../infrastructure/logging/request-id.js';
@@ -1077,7 +1081,10 @@ async function consumeResumeStream(
       }
       if (event.type === 'stopped') {
         exitType = 'stopped';
-        exitContent = event.content;
+        // V2 终态语义：content/citations 必须来自 execution 的 immutable
+        // 快照（delta 累积），不取 stream 的 stopped event 内部 content——
+        // 后者只是上游发出的中断信号，内容可能不完整。
+        exitContent = execution.fullText;
         break;
       }
       if (event.type === 'error') {
@@ -1238,7 +1245,13 @@ async function executeRun(row: Record<string, unknown>): Promise<void> {
     })) {
       await handleStreamEvent(event, execution);
       if (event.type === 'done') { exitType = 'done'; exitContent = event.content; execution.citations = event.citations; break; }
-      if (event.type === 'stopped') { exitType = 'stopped'; exitContent = event.content; break; }
+      if (event.type === 'stopped') {
+        exitType = 'stopped';
+        // V2 终态语义：content 来自 execution.fullText 快照，
+        // 不取 stream stopped event 的 content（可能为空）。
+        exitContent = execution.fullText;
+        break;
+      }
       if (event.type === 'error') { exitType = 'error'; exitError = event.error; break; }
       // PR-3.3: 工具调用挂起审批 → streamAgent 已经把 Run 推到
       // waiting_approval 并释放 lease；executor **不**写终止态，让审批
@@ -1322,13 +1335,16 @@ async function handleStreamEvent(event: StreamEvent, execution: ActiveExecution)
   }
   if (event.type === 'tool-call-start') {
     try {
-      const executionId = await createToolExecution(
-        execution.workspaceId,
-        execution.assistantMessageId,
-        event.toolName,
-        event.input,
-      );
-      execution.toolExecutionMap.set(event.toolCallId, executionId);
+      // upsertToolExecution 幂等：同 toolCallId 重复调用只产生 1 行；事件
+      // replay / SSE 重放不会重复 INSERT。
+      await upsertToolExecution({
+        workspaceId: execution.workspaceId,
+        messageId: execution.assistantMessageId,
+        runId: execution.runId,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        args: event.input as Record<string, unknown>,
+      });
     } catch (err) {
       logger.error({ msg: 'create tool execution failed', runId: execution.runId, err });
     }
@@ -1339,13 +1355,20 @@ async function handleStreamEvent(event: StreamEvent, execution: ActiveExecution)
     return;
   }
   if (event.type === 'tool-call-complete') {
-    const executionId = execution.toolExecutionMap.get(event.toolCallId);
-    if (executionId) {
-      try {
-        await finalizeToolExecution(execution.workspaceId, executionId, event.output, 'success');
-      } catch (err) {
-        logger.error({ msg: 'finalize tool execution failed', runId: execution.runId, err });
-      }
+    // finalize 走 toolCallId：缺失 start 行的 approval resume 也能安全收敛；
+    // 已终态的行不覆写。backfill 时通过 agent_runs 反查 messageId，
+    // toolName 由 event 显式提供（PR-review Item 4）。
+    try {
+      await finalizeToolExecutionByCallId({
+        workspaceId: execution.workspaceId,
+        runId: execution.runId,
+        toolCallId: event.toolCallId,
+        result: (event.output as Record<string, unknown> | null) ?? null,
+        status: 'success',
+        toolName: event.toolName,
+      });
+    } catch (err) {
+      logger.error({ msg: 'finalize tool execution failed', runId: execution.runId, err });
     }
     await writeRunEvent(execution, 'tool-call-completed', {
       toolCallId: event.toolCallId,
@@ -1354,13 +1377,18 @@ async function handleStreamEvent(event: StreamEvent, execution: ActiveExecution)
     return;
   }
   if (event.type === 'tool-call-error') {
-    const executionId = execution.toolExecutionMap.get(event.toolCallId);
-    if (executionId) {
-      try {
-        await finalizeToolExecution(execution.workspaceId, executionId, null, 'error', 'tool_error');
-      } catch (err) {
-        logger.error({ msg: 'finalize failed tool execution failed', runId: execution.runId, err });
-      }
+    try {
+      await finalizeToolExecutionByCallId({
+        workspaceId: execution.workspaceId,
+        runId: execution.runId,
+        toolCallId: event.toolCallId,
+        result: null,
+        status: 'error',
+        error: 'tool_error',
+        toolName: event.toolName,
+      });
+    } catch (err) {
+      logger.error({ msg: 'finalize failed tool execution failed', runId: execution.runId, err });
     }
     await writeRunEvent(execution, 'tool-call-failed', {
       toolCallId: event.toolCallId,
@@ -1479,7 +1507,10 @@ async function completeRun(r: QueuedRow, execution: ActiveExecution, content: st
       runId: r.id,
       workspaceId: r.workspace_id,
       type: 'run-completed',
-      payload: { contentLength: content.length },
+      // PR-review Round 2 Item 1：终态事件必须携带权威 citations，
+      // 前端不再依赖 messages 重拉。contentLength 仍保留做长度断言。
+      // PR-review Round 3 Item 3：payload 构造统一用 buildRunTerminalPayload。
+      payload: buildRunTerminalPayload(content, execution.citations ?? []),
     });
     await client.query('COMMIT');
   } catch (err) {
@@ -1514,20 +1545,80 @@ async function stopRun(r: QueuedRow, execution: ActiveExecution, content: string
       logger.warn({ msg: 'stopRun 跳过：Run 已终态或当前 worker 已丢失 lease', runId: r.id });
       return;
     }
-    await client.query(
-      `UPDATE messages
-          SET content = COALESCE(NULLIF($3, ''), ''),
-              citations = '[]'::jsonb,
-              status = 'stopped'
-        WHERE id = $1 AND workspace_id = $2`,
-      [r.assistant_message_id, r.workspace_id, content],
-    );
+    // V2 终态收敛：
+    //   - content 用 V2 ActiveExecution 的 immutable 文本快照（execution.fullText
+    //     或调用方传入的 content）。空字符串合法：contentLength=0。
+    //   - citations 仅在 incoming 快照非空时合并写入；若快照为空（[]）→ 保留
+    //     DB 现有引用，避免 COALESCE($4::jsonb, citations) 把空数组误覆盖
+    //     （PR-review Item 3）。合并策略（PR-review Round 2 Item 4 修复）：
+    //     按 `chunkId` 取并集，incoming 优先；同 chunkId 视作同一引用。
+    //
+    //   PR-review Round 5 Item 1 + Round 6 Item 1：先在变量层把
+    //   "最终 citations"统一为一个数组 `finalCitationsForPayload`，
+    //   随后 messages UPDATE（可能跳过 citations 列）/ SSE run-stopped
+    //   payload 都用同一个数组。SSE 与 HTTP 通道必须携带完全一致
+    //   的终态快照。
+    //
+    //   空 incoming 不代表最终 citations 为空：当 messages.citations
+    //   已有引用、execution.citations=[]（典型：abort 时只持有部分
+    //   快照或运行时从未累积引用）→ 跳过 UPDATE 让 DB 保留已有引用，
+    //   但 finalCitationsForPayload **必须**取 DB 当前值，而不是 []。
+    //   否则 SSE 会告知前端"无引用"，UI 与 DB 不一致直到用户刷新。
+    const incoming = Array.isArray(execution.citations) ? execution.citations : null;
+    let finalCitationsForPayload: ReadonlyArray<unknown>;
+    if (incoming && incoming.length > 0) {
+      const existingRow = await client.query<{ citations: unknown }>(
+        `SELECT citations FROM messages WHERE id = $1 AND workspace_id = $2`,
+        [r.assistant_message_id, r.workspace_id],
+      );
+      const existing = Array.isArray(existingRow.rows[0]?.citations)
+        ? (existingRow.rows[0].citations as Array<Record<string, unknown>>)
+        : [];
+      // PR-review Round 3 Item 3：合并逻辑提取至 citation-merge.ts，
+      // service.ts / run-executor.ts / 测试三者共用同一实现。
+      const merged = mergeCitationsByChunkId(existing, incoming).merged as Array<
+        Record<string, unknown>
+      >;
+      finalCitationsForPayload = merged;
+      await client.query(
+        `UPDATE messages
+            SET content = $3,
+                citations = $4::jsonb,
+                status = 'stopped'
+          WHERE id = $1 AND workspace_id = $2`,
+        [r.assistant_message_id, r.workspace_id, content, JSON.stringify(merged)],
+      );
+    } else {
+      // incoming 为空：不覆写 messages.citations（DB 已保留已有引用），
+      //   但 finalCitationsForPayload 必须取 DB 当前值 —— SSE payload
+      //   向 UI 报告"实际保留的最终引用"，与 messages 表保持一致。
+      const existingRow = await client.query<{ citations: unknown }>(
+        `SELECT citations FROM messages WHERE id = $1 AND workspace_id = $2`,
+        [r.assistant_message_id, r.workspace_id],
+      );
+      finalCitationsForPayload = Array.isArray(existingRow.rows[0]?.citations)
+        ? (existingRow.rows[0]?.citations as ReadonlyArray<unknown>)
+        : [];
+      await client.query(
+        `UPDATE messages
+            SET content = $3,
+                status = 'stopped'
+          WHERE id = $1 AND workspace_id = $2`,
+        [r.assistant_message_id, r.workspace_id, content],
+      );
+    }
     await writeFinalCheckpoint(client, r, execution, content);
     await insertRunEvent(client, {
       runId: r.id,
       workspaceId: r.workspace_id,
       type: 'run-stopped',
-      payload: { contentLength: content.length },
+      // PR-review Round 2 Item 1：stop 路径同样需要把 V2 终态收敛
+      // 写入的 content + citations 同步到 SSE 终态事件，前端不依赖
+      // 重拉 messages 就能拿到权威快照。
+      // PR-review Round 3 Item 3：payload 构造统一用 buildRunTerminalPayload。
+      // PR-review Round 5 Item 1：payload 使用 finalCitationsForPayload
+      // （已合并并持久化的最终数组），不再用 execution.citations。
+      payload: buildRunTerminalPayload(content, finalCitationsForPayload),
     });
     await client.query('COMMIT');
   } catch (err) {
@@ -1667,15 +1758,48 @@ export function listActiveExecutions(): Array<{ runId: string; assistantMessageI
   }));
 }
 
-/** 强制终止一个运行中的 Run（POST /messages/:id/stop 路径）。 */
-export function abortRunByMessage(messageId: string): boolean {
+/**
+ * 强制终止一个运行中的 Run（POST /messages/:id/stop 路径）。
+ *
+ * 单一 V2 终态收敛语义（PR-3.x → 本轮加固）：
+ *   - 命中活跃 execution → 调 AbortController 中断 stream，把当前的
+ *     `fullText` / `citations` 快照带回去；
+ *     这是 V2 ActiveExecution 的"权威 immutable 文本快照"——
+ *     HTTP 路由、stop 事件 payload、run-stopped 写入都必须共用同一个
+ *     snapshot，绝不混用 legacy controller 的 `partialContent`。
+ *   - 未命中 → `{ kind: 'not_hit' }`；路由层继续走 `stopRunByMessageId`
+ *     的事务收敛（DB 行 active 但 controller 已被 GC）路径。
+ *
+ * 不可重复调用就破坏终态：abort 只发信号，不直接落 DB；真正的
+ * `stopped` 收敛由 stream 的 finally → `stopRun`（run-executor 内
+ * 同事务路径）写一次；后续重复 abort 是 no-op。
+ */
+export type AbortRunResult =
+  | { kind: 'not_hit' }
+  | {
+      kind: 'aborted';
+      runId: string;
+      workspaceId: string;
+      /** 当前累积的文本快照。空字符串也是合法终态（contentLength=0）。 */
+      fullText: string;
+      /** 当前累积的引用。停止时只追加、不清除。 */
+      citations: Citation[];
+    };
+
+export function abortRunByMessage(messageId: string): AbortRunResult {
   for (const execution of activeExecutions.values()) {
     if (execution.assistantMessageId === messageId) {
       execution.abortController.abort();
-      return true;
+      return {
+        kind: 'aborted',
+        runId: execution.runId,
+        workspaceId: execution.workspaceId,
+        fullText: execution.fullText,
+        citations: execution.citations,
+      };
     }
   }
-  return false;
+  return { kind: 'not_hit' };
 }
 
 // 兼容：让 ask-driver / 旧路由不依赖本模块的 config（config 已经导入）

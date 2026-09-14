@@ -24,17 +24,20 @@ import type { Citation } from '../../modules/citations/types.js';
  * 行为契约：
  *   - `knowledgeBaseId` 不属于 `workspaceId` → `CrossWorkspaceAccessError`（404）。
  *   - KB 存在但无 chunk → 返 `[]`（与底层 retriever 行为一致）。
+ *   - AbortSignal 透传：用户停止 / 超时时上游 Embedding fetch 立即中断。
  *
  * @param workspaceId       当前会话所属工作区（来自 `authCtx.workspaceId`）。
  * @param knowledgeBaseId   待检索知识库 ID。
  * @param query             用户查询文本。
  * @param topK              返回片段上限（默认 5）。
+ * @param signal            可选 AbortSignal，向上游 Embedding API 透传。
  */
 export async function searchKnowledgeBase(
   workspaceId: string,
   knowledgeBaseId: string,
   query: string,
   topK = 5,
+  signal?: AbortSignal,
 ): Promise<Citation[]> {
   const pool = getDatabasePool();
   // 校验 KB 属于本 workspace —— 0 行 → CrossWorkspaceAccessError（404）。
@@ -45,5 +48,5 @@ export async function searchKnowledgeBase(
   if (r.rows.length === 0) {
     throw new CrossWorkspaceAccessError();
   }
-  return ragSearch(workspaceId, knowledgeBaseId, query, { topK });
+  return ragSearch(workspaceId, knowledgeBaseId, query, { topK, signal });
 }

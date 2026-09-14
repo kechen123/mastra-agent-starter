@@ -35,6 +35,9 @@ export const capabilitiesRoute = registerApiRoute('/capabilities', {
       },
       documentFormats: parserConfig.documentFormats,
       mineruEnabled: parserConfig.mineruEnabled,
+      // RAG / 向量检索总开关：false 时前端必须显式隐藏 KB Agent 选型与
+      // "知识库问答"提示，并在 Agent 选择页标注"未配置向量检索"。
+      ragEnabled: config.ragEnabled,
       chatAgents: defs.map((d) => ({
         id: d.id,
         name: d.name,

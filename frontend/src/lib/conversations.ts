@@ -223,8 +223,8 @@ export type V2RunEvent =
   | { id: number; type: 'tool-call-failed'; payload: { toolCallId: string; toolName: string; errorCode: string } }
   | { id: number; type: 'approval-requested'; payload: unknown }
   | { id: number; type: 'approval-resolved'; payload: unknown }
-  | { id: number; type: 'run-completed'; payload: { contentLength: number } }
-  | { id: number; type: 'run-stopped'; payload: { contentLength: number } }
+  | { id: number; type: 'run-completed'; payload: { contentLength: number; citations: import('./api').Citation[] } }
+  | { id: number; type: 'run-stopped'; payload: { contentLength: number; citations: import('./api').Citation[] } }
   | { id: number; type: 'run-failed'; payload: { errorCode: string; message?: string } };
 
 export interface RunStreamHandle {
@@ -429,7 +429,21 @@ export function regenerateMessage(
   return postSSE(`/messages/${assistantMessageId}/regenerate`, {}, onEvent, signal);
 }
 
-export async function stopMessage(assistantMessageId: string): Promise<void> {
+/**
+ * PR-review Round 3 Item 1：HTTP stop 必须返回权威 content + citations
+ * 快照，使前端能独立完成 finalize，不再依赖 SSE run-stopped 到达。
+ */
+export interface StopMessageResponse {
+  status: 'stopped' | string;
+  contentLength: number;
+  content: string;
+  citations: ReadonlyArray<import('./api').Citation>;
+  idempotent?: boolean;
+  runId?: string;
+  controllerAlive?: boolean;
+}
+
+export async function stopMessage(assistantMessageId: string): Promise<StopMessageResponse> {
   const baseUrl = getApiBaseUrl();
   const response = await fetch(`${baseUrl}${V2_PREFIX}/messages/${assistantMessageId}/stop`, {
     method: 'POST',
@@ -442,6 +456,18 @@ export async function stopMessage(assistantMessageId: string): Promise<void> {
     const data = (await response.json().catch(() => null)) as { message?: string; error?: string } | null;
     throw new Error(data?.message ?? data?.error ?? '停止失败。');
   }
+  const data = (await response.json().catch(() => null)) as Partial<StopMessageResponse> | null;
+  // 兼容旧的 /messages/:id/stop（仅返回 message + status），缺字段时
+  // 用空值兜底，前端在 awaitingRunStoppedOnPage=true 时仍会等 SSE 兜底。
+  return {
+    status: data?.status ?? 'stopped',
+    contentLength: data?.contentLength ?? 0,
+    content: data?.content ?? '',
+    citations: Array.isArray(data?.citations) ? data!.citations! : [],
+    idempotent: data?.idempotent,
+    runId: data?.runId,
+    controllerAlive: data?.controllerAlive,
+  };
 }
 
 async function postSSE(

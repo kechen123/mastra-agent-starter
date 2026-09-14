@@ -74,6 +74,10 @@ export interface RequestLogContext {
   stopped?: boolean;
   controllerAlive?: boolean;
   eventId?: number;
+  contentLength?: number;
+  currentStatus?: string;
+  messageStatus?: string;
+  idempotent?: boolean;
   msg: string;
 }
 

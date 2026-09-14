@@ -1,18 +1,20 @@
 /**
- * ask / regenerate 路由共用的工具调用事件处理。
+ * ask / regenerate 路由共用的工具调用事件处理（legacy / V1 兼容路径）。
  *
  * HTTP 层绝对不能把 `input` / `output` / 原始 error 字符串透传给客户端——
  * 这些内容只落到 `tool_executions` 表。仅 `toolCallId` / `toolName` /
  * `status`（加上固定的 `safeErrorCode`）可以走 SSE。
  *
- * V2.3.6 §5.1：所有 `tool_executions` 写入必须携带 `workspaceId`——
- * `createToolExecution` / `finalizeToolExecution`（Task 9）已经把
- * `workspace_id` 列为必填首参，本文件把 `workspaceId` 透传给 sink，
- * 再由 sink 透传给底层 `tool-executions.ts` 模块。`conversationId`
- * 在新链路里不再需要：`createToolExecution` 通过 message_id 反查父
- * 工作区，省去了对话级二次校验。
+ * V2.3.6 §5.1：所有 `tool_executions` 写入必须携带 `workspaceId`。
+ *
+ * 注意：本文件是 V1 ask / regenerate 兼容路径。V2 run-executor 已切换到
+ * `upsertToolExecution` / `finalizeToolExecutionByCallId`（按 toolCallId
+ * 幂等 upsert）。legacy 路径也保持同样的稳定 ID 语义。
  */
-import { createToolExecution, finalizeToolExecution } from '../../modules/conversations/tool-executions.js';
+import {
+  upsertToolExecution,
+  finalizeToolExecutionByCallId,
+} from '../../modules/conversations/tool-executions.js';
 import type { StreamEvent } from './stream-events.js';
 import type { SseController } from './sse.js';
 
@@ -26,29 +28,49 @@ export const SAFE_TOOL_ERROR_CODE = 'tool_error';
 
 /** 可注入的工具执行写入器；测试可注入内存假实现以避免连接真实 DB。 */
 export interface ToolExecutionSink {
+  /** upsert by toolCallId：返回 DB id（仅做兼容日志用，新路径不再依赖）。 */
   createToolExecution(
     workspaceId: string,
     messageId: string,
     toolName: string,
+    toolCallId: string,
     input: Record<string, unknown>,
   ): Promise<string>;
   finalizeToolExecution(
     workspaceId: string,
-    id: string,
-    output: Record<string, unknown>,
+    toolCallId: string,
+    output: Record<string, unknown> | null,
     status: 'completed' | 'failed',
     errorCode?: string,
+    /** backfill 缺失 start 行时必填：toolName + messageId。 */
+    backfillHint?: { toolName: string; messageId: string },
   ): Promise<void>;
 }
 
 const productionSink: ToolExecutionSink = {
-  async createToolExecution(workspaceId, messageId, toolName, input) {
-    // workspaceId 必填（Task 9 已重排签名）；conversationId 不再需要——
-    // 底层按 messageId + workspaceId 反查父 message 完成跨工作区校验。
-    return createToolExecution(workspaceId, messageId, toolName, input);
+  async createToolExecution(workspaceId, messageId, toolName, toolCallId, input) {
+    // V2 阶段 2：toolCallId 是稳定的业务 ID；upsert 同 toolCallId 幂等。
+    return upsertToolExecution({
+      workspaceId,
+      messageId,
+      runId: null,
+      toolCallId,
+      toolName,
+      args: input,
+    });
   },
-  async finalizeToolExecution(workspaceId, id, output, status, errorCode) {
-    await finalizeToolExecution(workspaceId, id, output, status === 'completed' ? 'success' : 'error', errorCode);
+  async finalizeToolExecution(workspaceId, toolCallId, output, status, errorCode, backfillHint) {
+    await finalizeToolExecutionByCallId({
+      workspaceId,
+      runId: null,
+      toolCallId,
+      result: output,
+      status: status === 'completed' ? 'success' : 'error',
+      error: errorCode,
+      // legacy sink 没有 runId 关联，backfill 必须由调用方显式提供
+      // messageId + toolName（PR-review Item 4 强制要求）。
+      ...(backfillHint ?? {}),
+    });
   },
 };
 
@@ -60,14 +82,14 @@ export function _setToolExecutionSinkForTesting(sink: ToolExecutionSink | null):
 }
 
 /**
- * 写入工具执行行 + 推送安全的 SSE 载荷。`toolExecutionMap` 由调用方持有，
- * 保证 tool-call-id ↔ DB-row id 在 start / complete / error 之间一致。
+ * 写入工具执行行 + 推送安全的 SSE 载荷。
+ *
+ * V2 阶段 2：稳定 ID = toolCallId；事件 replay 重复调用不重复 INSERT。
  *
  * DB 写入异常被吞掉（仅日志记录）——瞬时 DB 抖动不应中断整条 SSE 流。
  *
  * `workspaceId` 必填（V2.3.6 §5.1）——所有 `tool_executions` 写入的父
- * 资源（message）校验由底层 `createToolExecution` / `finalizeToolExecution`
- * 完成，传入的 workspaceId 必须与 message 所属工作区一致。
+ * 资源（message）校验由底层 `upsertToolExecution` 完成。
  */
 export async function handleToolEvent(
   event: ToolStreamEvent,
@@ -82,6 +104,7 @@ export async function handleToolEvent(
         workspaceId,
         assistantMessageId,
         event.toolName,
+        event.toolCallId,
         event.input,
       );
       toolExecutionMap.set(event.toolCallId, execId);
@@ -101,13 +124,19 @@ export async function handleToolEvent(
   }
 
   if (event.type === 'tool-call-complete') {
-    const execId = toolExecutionMap.get(event.toolCallId);
-    if (execId) {
-      try {
-        await activeSink.finalizeToolExecution(workspaceId, execId, event.output, 'completed');
-      } catch (err) {
-        console.error('Tool execution finalize failed:', err);
-      }
+    // finalize by toolCallId：缺失 start 行也能安全收敛；事件 replay 不重复写。
+    // backfillHint 让 finalize 在行不存在时也能落审计行（PR-review Item 4）。
+    try {
+      await activeSink.finalizeToolExecution(
+        workspaceId,
+        event.toolCallId,
+        event.output,
+        'completed',
+        undefined,
+        { toolName: event.toolName, messageId: assistantMessageId },
+      );
+    } catch (err) {
+      console.error('Tool execution finalize failed:', err);
     }
     try {
       sse.send('tool-call-complete', {
@@ -122,13 +151,17 @@ export async function handleToolEvent(
   }
 
   // tool-call-error
-  const execId = toolExecutionMap.get(event.toolCallId);
-  if (execId) {
-    try {
-      await activeSink.finalizeToolExecution(workspaceId, execId, {}, 'failed', SAFE_TOOL_ERROR_CODE);
-    } catch (err) {
-      console.error('Tool execution finalize failed:', err);
-    }
+  try {
+    await activeSink.finalizeToolExecution(
+      workspaceId,
+      event.toolCallId,
+      null,
+      'failed',
+      SAFE_TOOL_ERROR_CODE,
+      { toolName: event.toolName, messageId: assistantMessageId },
+    );
+  } catch (err) {
+    console.error('Tool execution finalize failed:', err);
   }
   try {
     sse.send('tool-call-error', {

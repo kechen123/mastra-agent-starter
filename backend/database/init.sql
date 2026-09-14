@@ -218,6 +218,15 @@ CREATE TABLE tool_executions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  -- run_id 在 agent_runs 建表后再追加外键（见本文件下方 ALTER TABLE）。
+  -- 允许 NULL：legacy sink 在缺乏 agent_runs 关联时仍可记录审计行；NULL
+  -- 行由 `tool_executions_null_run_unique` 部分唯一索引兜底，避免
+  -- UNIQUE(workspace_id, run_id, tool_call_id) 在 NULL run_id 下失效。
+  run_id UUID,
+  -- Mastra toolCallId：在 workspace + run + message 维度稳定唯一。
+  -- SSE / Mastra / approval resume / 历史恢复 / 前端卡片都用这个 ID。
+  -- 仅 fresh-DB 路径生效：不提供迁移 / backfill；既有库按需手动补列。
+  tool_call_id TEXT NOT NULL,
   tool_name TEXT NOT NULL,
   args JSONB NOT NULL,
   result JSONB,
@@ -225,9 +234,11 @@ CREATE TABLE tool_executions (
     CHECK (status IN ('pending', 'running', 'success', 'error', 'cancelled')),
   error TEXT,
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at TIMESTAMPTZ
+  finished_at TIMESTAMPTZ,
+  CONSTRAINT tool_executions_call_unique UNIQUE (workspace_id, run_id, tool_call_id)
 );
 CREATE INDEX tool_executions_workspace_message_idx ON tool_executions(workspace_id, message_id);
+CREATE INDEX tool_executions_call_idx ON tool_executions(tool_call_id);
 
 CREATE TABLE agent_skill_bindings (
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -340,6 +351,19 @@ ALTER TABLE messages
   FOREIGN KEY (current_run_id) REFERENCES agent_runs(id) ON DELETE SET NULL;
 CREATE INDEX messages_current_run_id_idx
   ON messages(current_run_id) WHERE current_run_id IS NOT NULL;
+
+-- tool_executions 同样在 agent_runs 之前建表；run_id 字段预留为无 FK 的 UUID，
+-- 在此追加正式外键 + 对 NULL run_id 的部分唯一索引（PR-review Item 1 / 5）：
+--   - 正常路径：UNIQUE(workspace_id, run_id, tool_call_id) 已覆盖；
+--   - legacy sink（run_id = NULL）场景需要单独的 NULL-safe 唯一约束，否则
+--     PostgreSQL 默认允许同一 (workspace, NULL, tool_call_id) 重复入库，
+--     触发历史重复落盘。
+ALTER TABLE tool_executions
+  ADD CONSTRAINT tool_executions_run_fk
+  FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE;
+CREATE UNIQUE INDEX tool_executions_null_run_unique
+  ON tool_executions(workspace_id, tool_call_id)
+  WHERE run_id IS NULL;
 
 -- 4. agent_run_events：事件 IDENTITY 全局 BIGINT，run 内按 id 升序；
 --    阶段 2 事件类型以 architecture-v2.md §决策 4 表为准，至少覆盖
@@ -708,6 +732,29 @@ CREATE INDEX storage_deletion_outbox_document_idx
   ON storage_deletion_outbox(document_id)
   WHERE processed_at IS NULL;
 
+-- 表级元数据：供 psql、数据库 IDE 和 schema inspection 直接查询。
+COMMENT ON TABLE app_users IS '应用本地认证用户账号。';
+COMMENT ON TABLE auth_sessions IS '登录会话及其撤销和过期状态。';
+COMMENT ON TABLE workspaces IS '数据隔离、资源归属和成员协作的工作区。';
+COMMENT ON TABLE workspace_members IS '工作区成员关系及其角色。';
+COMMENT ON TABLE skill_packages IS '已登记或已安装的 Skill 包元数据。';
+COMMENT ON TABLE knowledge_bases IS '工作区内的知识库容器。';
+COMMENT ON TABLE documents IS '知识库文档及其解析、存储和处理状态。';
+COMMENT ON TABLE document_chunks IS '文档切块及其检索和引用元数据。';
+COMMENT ON TABLE conversations IS '聊天会话及其所选 Agent 和知识库配置。';
+COMMENT ON TABLE messages IS '会话消息、生成状态、引用数据和当前 Run 关联。';
+COMMENT ON TABLE tool_executions IS '模型 Tool 调用的审计记录和执行状态；tool_call_id 是跨实时与历史视图的稳定调用标识。';
+COMMENT ON TABLE agent_skill_bindings IS 'Agent 与 Skill 包的绑定关系。';
+COMMENT ON TABLE workspace_skills IS '工作区启用的 Skill 包及其配置。';
+COMMENT ON TABLE agent_runs IS '异步 Agent Run 的持久化状态、租约和执行上下文。';
+COMMENT ON TABLE agent_run_events IS '可回放的 Agent Run 事件流，不保存高频实时文本增量。';
+COMMENT ON TABLE idempotency_keys IS '写操作的幂等请求键及其缓存响应。';
+COMMENT ON TABLE tool_policy_rules IS '工作区维度的 Tool 调用策略规则。';
+COMMENT ON TABLE tool_approval_requests IS '需要人工审批的 Tool 调用请求及其恢复状态。';
+COMMENT ON TABLE document_ingestion_jobs IS '文档解析、切块和向量化的异步任务。';
+COMMENT ON TABLE storage_finalize_jobs IS '文档入库后对象存储定稿的异步补偿任务。';
+COMMENT ON TABLE storage_deletion_outbox IS '文档删除时对象存储清理的可靠 outbox 任务。';
+
 -- ════════════════════════════════════════════════════════════════════
 -- 阶段 4 RAG 条件块（PR-4.1 §8.4.1 / §8.4.2 / §8.5）
 --   - 由 `migrate.ts` 启动期 `SET LOCAL app.rag_enabled = 'on'` 后跑。
@@ -753,6 +800,9 @@ BEGIN
     CREATE UNIQUE INDEX one_active_embedding_profile_per_workspace
       ON embedding_profiles(workspace_id) WHERE is_active = TRUE;
   $E$;
+  EXECUTE $E$
+    COMMENT ON TABLE embedding_profiles IS '工作区的 Embedding Provider 和模型配置，以及当前激活的 Profile。';
+  $E$;
 
   -- 3) document_embeddings：每个 chunk 可以有多个 profile 的向量。
   --    chunk_id 维度唯一（chunk 已 uniq on (document_id, chunk_index)）。
@@ -788,6 +838,9 @@ BEGIN
   EXECUTE $E$
     CREATE INDEX document_embeddings_profile_chunk_idx
       ON document_embeddings(profile_id, chunk_id);
+  $E$;
+  EXECUTE $E$
+    COMMENT ON TABLE document_embeddings IS '文档切块在指定 Embedding Profile 下的向量及版本信息。';
   $E$;
 
   RAISE NOTICE 'PR-4 RAG 块完成：embedding_profiles + document_embeddings 已建（无全局 HNSW）';

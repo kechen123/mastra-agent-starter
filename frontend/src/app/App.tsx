@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMediaQuery } from '@base-ui/react/unstable-use-media-query'
 import {
   DEFAULT_CAPABILITIES,
@@ -50,6 +50,13 @@ import {
   type RendererState,
 } from '../lib/streaming-renderer'
 import { cn } from '../lib/cn'
+import {
+  applyTerminalSnapshot,
+  createAssistantStopState,
+  finalizeAssistantStop,
+  shouldCloseStreamOnly,
+  type AssistantStopState,
+} from '../lib/stop-state-machine'
 import { Sidebar } from '../components/layout/Sidebar'
 import { CitationPanel, MobileCitationDialog } from '../features/chat/components/CitationPanel'
 import { AssistantChatWorkspace } from '../features/chat/components/AssistantChatWorkspace'
@@ -223,6 +230,13 @@ function App() {
   // V2 Run 流句柄（GET SSE）；由 streamRunEvents 持有，重连 / 切会话时关闭。
   const runStreamRef = useRef<RunStreamHandle | null>(null)
   const currentRunIdRef = useRef<string | null>(null)
+  // 停止 / 终态收敛闸门：本会话级 pure state machine（lib/stop-state-machine）。
+  // 用于协调 HTTP stop 200 与 SSE run-stopped 两条路径的幂等收敛，以及
+  // session switch / knowledge / capabilities 等"非用户主动停止"路径。
+  const stopStateRef = useRef<AssistantStopState | null>(null)
+  // 用户**显式**点击"停止生成"过：在 session switch 时必须保留 EventSource
+  // 直到 run-stopped 终态事件到达（避免提前关流丢失终态事件）。
+  const stopRequestedRef = useRef(false)
   // 双通道渲染状态机（PR-2.4 修复后）：单一权威 targetText + rAF flush；
   // 不再维护"实时文本末尾 / checkpoint 文本末尾"两个并行的字段以避免
   // 重复追加。详见 `lib/streaming-renderer.ts`。
@@ -234,6 +248,20 @@ function App() {
   const currentAgentId = conversationState.type === 'draft' ? conversationState.agentId : (conversations.find((c) => c.id === conversationState.id)?.agentId ?? 'general-chat')
   const currentKnowledgeBaseId = conversationState.type === 'draft' ? conversationState.knowledgeBaseId : (conversations.find((c) => c.id === conversationState.id)?.knowledgeBaseId ?? null)
   const activeKnowledgeBase = currentKnowledgeBaseId ? knowledgeBases.find((kb) => kb.id === currentKnowledgeBaseId) ?? null : null
+
+  // RAG / 向量检索门控（PR-review Item 7）：
+  //   - capabilities.ragEnabled=false 时 KB Agent 必须从可选列表中隐藏，
+  //     否则用户在 Core-only 模式下选到 KB Agent 会拿到空上下文。
+  //   - 同时强制：如果当前选中的 Agent 因 ragEnabled 关闭而变为不可用，
+  //     切回 general-chat（保留已存在的会话不被强行销毁）。
+  const availableChatAgents = useMemo(() => {
+    if (capabilities.ragEnabled) return chatAgents
+    return chatAgents.filter((a) => !a.requiresKnowledgeBase)
+  }, [chatAgents, capabilities.ragEnabled])
+  const fallbackAgentId = availableChatAgents[0]?.id ?? 'general-chat'
+  const effectiveAgentId = availableChatAgents.some((a) => a.id === currentAgentId)
+    ? currentAgentId
+    : fallbackAgentId
 
   const approvals = useApprovals({
     sessionKey: authStatus === 'authenticated' ? currentUser?.id ?? null : null,
@@ -269,6 +297,22 @@ function App() {
     setMessages((current) => current.map((message) => (
       message.role === 'assistant' && message.id === assistantId
         ? { ...message, content, status }
+        : message
+    )))
+  }
+
+  /**
+   * 终态快照携带权威 citations 时同步到当前 streaming assistant。
+   * HTTP stop 成功可独立收敛；run-stopped SSE 则是等价终态通道。二者
+   * 任一先到都可覆盖为同一后端快照，迟到的另一条路径只补齐 citations，
+   * 不重复关闭流或改变消息状态。
+   */
+  function updateStreamingAssistantCitations(citations: import('../lib/api').Citation[]) {
+    const assistantId = streamingAssistantIdRef.current
+    if (!assistantId) return
+    setMessages((current) => current.map((message) => (
+      message.role === 'assistant' && message.id === assistantId
+        ? { ...message, citations }
         : message
     )))
   }
@@ -466,6 +510,33 @@ function App() {
       console.error('加载会话列表失败', error)
     }
   }
+  // "仅关闭当前页面 EventSource，不调后端 stop"的统一入口。
+  // 用于 session switch / new chat / 知识库 / 能力页：旧 Run 留在后端
+  // 继续完成，下次回到该会话由 currentRunId + lastEventId 续上。
+  //
+  // PR-review Round 2 Item 5 修复：页面级 EventSource detach 永远允许——
+  // 即使 isStopRequested=true（用户在等待 SSE run-stopped），session-leave
+  // 也必须关闭前端 EventSource。理由：旧会话事件不应再写入新页面；
+  // 后端 Run 仍可在服务端自然完成，下次切回同一会话由 currentRunId 续上。
+  //
+  // 旧实现错误地用 "用户显式停止" 排除项保留 EventSource，导致 HTTP
+  //   失败 → isStopRequested=true 且 finalized=false 时，session switch
+  //   无法 detach 旧监听器，旧会话事件继续写入新页面。
+  function closeStreamOnly() {
+    if (!runStreamRef.current) return
+    if (shouldCloseStreamOnly({
+      isStreaming: streamingAssistantIdRef.current !== null,
+      isStopRequested: stopRequestedRef.current,
+      isFinalized: stopStateRef.current?.finalized ?? false,
+    })) {
+      runStreamRef.current.close()
+      runStreamRef.current = null
+      currentRunIdRef.current = null
+      stopStateRef.current = null
+      stopRequestedRef.current = false
+    }
+    // 否则保留：等 run-stopped；handleRunStreamEvent 终态分支会清流。
+  }
   // 统一进入 draft 的入口。所有"放弃当前会话回到空白"路径都必须走这里，
   // 避免 404 / 非法 URL / popstate / 新对话 / 删除当前会话各自复制代码。
   // options:
@@ -479,12 +550,8 @@ function App() {
     clearUrl?: 'push' | 'replace' | 'none';
     message?: string | null;
   }) {
-    if (streamingAssistantIdRef.current) void handleStop()
-    if (runStreamRef.current) {
-      runStreamRef.current.close()
-      runStreamRef.current = null
-    }
-    currentRunIdRef.current = null
+    // 切会话 / 新对话：仅关本地 EventSource，**不**调后端 stop。
+    closeStreamOnly()
     cancelStreamingRender()
     // 让任何还在飞的 getConversation 响应作废。
     loadConversationSeqRef.current += 1
@@ -563,14 +630,9 @@ function App() {
   // 404 / 跨 Workspace 静默清 URL + 友好提示，不抛未处理错误。
   async function loadConversation(id: string, navigation: 'push' | 'replace' | 'none') {
     const seq = ++loadConversationSeqRef.current
-    if (streamingAssistantIdRef.current) {
-      await handleStop()
-    }
-    if (runStreamRef.current) {
-      runStreamRef.current.close()
-      runStreamRef.current = null
-    }
-    currentRunIdRef.current = null
+    // 切换到另一个会话：仅关本地 EventSource，**不**调后端 stop。
+    // 旧 Run 留在后端自然完成；切回该会话由 currentRunId 续上。
+    closeStreamOnly()
     cancelStreamingRender()
     if (seq !== loadConversationSeqRef.current) return
     setChatError(null); setSelectedCitation(null)
@@ -616,6 +678,14 @@ function App() {
       runStreamRef.current = null
     }
     currentRunIdRef.current = args.runId
+    // 新 Run 起流：初始化 stop state machine。新 Run 不会 finalized。
+    stopStateRef.current = createAssistantStopState({
+      assistantId: streamingAssistantIdRef.current ?? '',
+      runId: args.runId,
+      initialStatus: 'streaming',
+      initialContent: rendererStateRef.current.targetText,
+    })
+    stopRequestedRef.current = false
     runStreamRef.current = streamRunEvents(
       args.eventsUrl,
       args.runId,
@@ -639,13 +709,54 @@ function App() {
         const failedPayload = event.payload
         setChatError(failedPayload.message ?? '生成失败，请重试。')
       }
-      if (event.type === 'run-completed' || event.type === 'run-stopped') {
+      // run-stopped：走 stop state machine 幂等收敛。
+      //   - HTTP stop 200 先到（state.finalized=true）→ resolveSseStoppedAction
+      //     返回 'duplicate'，本分支不做事；
+      //   - SSE run-stopped 先到 → 收敛到 stopped；
+      //   - HTTP 之后又触发 finalizeAssistantStop('sse_stopped') → 二次
+      //     finalize no-op（保留首次来源）。
+      if (event.type === 'run-stopped') {
+        const cur = stopStateRef.current
+        // PR-review Round 3 Item 1 + Round 4 SSE/HTTP 竞态修复：
+        //   SSE 与 HTTP 200 共享 applyTerminalSnapshot 函数幂等收敛。
+        //   - HTTP 已先 finalize（state.finalized=true）→ applied=false，
+        //     仅补 citations；不再二次调 markTerminalToRenderer。
+        //   - SSE 先 finalize → applied=true，正常收尾；
+        //     **不**把 stopStateRef 清空，保留 state 作为后续 HTTP 恢复
+        //     路径的幂等闸门（HTTP 后到时返回 applied=false）。
+        //   - state=null（异常路径，比如被外部代码清掉）→ applied=false，
+        //     不做任何 setState / 关流。
+        const stoppedPayload = event.payload as { contentLength: number; citations: import('../lib/api').Citation[] }
+        const snapshot = {
+          content: rendererStateRef.current.targetText,
+          contentLength: stoppedPayload.contentLength ?? rendererStateRef.current.targetText.length,
+          citations: Array.isArray(stoppedPayload.citations) ? stoppedPayload.citations : [],
+        }
+        const result = applyTerminalSnapshot(cur, { kind: 'sse_stopped', snapshot })
+        // 不论 applied 与否都写回 state（applied=false 时 result.state === cur），
+        // 保证后续 HTTP 恢复路径读到的是 finalized=true 的最新状态。
+        stopStateRef.current = result.state
+        if (result.applied) {
+          markTerminalToRenderer(
+            rendererStateRef.current,
+            'stopped',
+            rendererOpsRef.current!,
+          )
+        }
+        if (result.citationsChanged) {
+          updateStreamingAssistantCitations(snapshot.citations as import('../lib/api').Citation[])
+        }
+      } else if (event.type === 'run-completed') {
         // 最终 checkpoint 先于终态事件到达；flush 实时 delta 后再把消息置终态。
         markTerminalToRenderer(
           rendererStateRef.current,
-          event.type === 'run-completed' ? 'completed' : 'stopped',
+          'completed',
           rendererOpsRef.current!,
         )
+        const completedPayload = event.payload as { contentLength: number; citations: import('../lib/api').Citation[] }
+        if (Array.isArray(completedPayload.citations) && completedPayload.citations.length > 0) {
+          updateStreamingAssistantCitations(completedPayload.citations)
+        }
       } else {
         // run-failed：直接把当前 targetText 渲染并切到 stopped；error UX 在 PR-2.4 不变。
         flushRenderer(rendererStateRef.current, rendererOpsRef.current!)
@@ -659,6 +770,13 @@ function App() {
       runStreamRef.current?.close()
       runStreamRef.current = null
       currentRunIdRef.current = null
+      // run-stopped 终态事件已经收敛完；保留 stopStateRef（state 已 finalized=true），
+      // 让后续可能的 HTTP 恢复路径走幂等 no-op（applyTerminalSnapshot 返回
+      // applied=false）。下一次用户发送新问题起流时由 startRunStream 重新
+      // 初始化 stopStateRef。
+      if (event.type === 'run-stopped' || event.type === 'run-completed') {
+        stopRequestedRef.current = false
+      }
       void refreshConversations()
       return
     }
@@ -716,9 +834,8 @@ function App() {
   // 侧边栏点击：用户主动操作 → push URL。
   async function openConversation(id: string) {
     setActiveModule('对话')
-    if (streamingAssistantIdRef.current) {
-      await handleStop()
-    }
+    // 切会话只关本地流，不调后端 stop；loadConversation 内部也会调一次。
+    closeStreamOnly()
     if (conversationState.type === 'persisted' && conversationState.id === id) {
       // 点击当前会话：保持消息不动；如果 URL 还没写或不一致，补 push 一次。
       setConversationUrl(id)
@@ -732,7 +849,8 @@ function App() {
   }
 
   function enterKnowledgeBaseList(navigation: NavigationMode, showCreate = false) {
-    if (streamingAssistantIdRef.current) void handleStop()
+    // 切到知识库列表：仅关本地流，不调后端 stop；旧 Run 留在后端继续完成。
+    closeStreamOnly()
     setActiveModule('知识库')
     setSelectedCitation(null)
     setSelectedKnowledgeBaseId(null)
@@ -743,7 +861,8 @@ function App() {
   }
 
   function openKnowledgeBase(id: string, navigation: NavigationMode) {
-    if (streamingAssistantIdRef.current) void handleStop()
+    // 同上：仅关本地流。
+    closeStreamOnly()
     setActiveModule('知识库')
     setSelectedCitation(null)
     setSelectedKnowledgeBaseId(id)
@@ -754,7 +873,8 @@ function App() {
   }
 
   function enterSkills(navigation: NavigationMode) {
-    if (streamingAssistantIdRef.current) void handleStop()
+    // 切到能力页：仅关本地流。
+    closeStreamOnly()
     setActiveModule('能力')
     setSelectedCitation(null)
     if (navigation !== 'none') writeRoute({ kind: 'skills' }, navigation)
@@ -788,9 +908,37 @@ function App() {
     }
     enterSkills(navigation)
   }
-  async function switchAgent(agentId: string) {
-    if (conversationState.type === 'draft') { setConversationState({ type: 'draft', agentId, knowledgeBaseId: agentId === 'general-chat' ? null : conversationState.knowledgeBaseId }); setChatError(null); return }
-    try { const updated = await updateConversation(conversationState.id, { agentId }); setConversations((prev) => prev.map((c) => (c.id === updated.id ? { ...c, agentId: updated.agentId, knowledgeBaseId: updated.knowledgeBaseId } : c))); setChatError(null) } catch (error) { if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }; setChatError(toErrorMessage(error)) }
+  /**
+ * 切换会话的持久化 Agent。
+ *
+ * 返回 `true` 表示持久化已生效；返回 `false` 表示请求失败 / 401 /
+ * draft 路径外其它异常——调用方应**不**继续依赖持久化结果。
+ *
+ * PR-review Round 3 Item 2 修复：旧实现把所有错误吞进 chatError 并
+ * resolve()，调用方 `await switchAgent()` 后无法判断是否真的成功。
+ * submitQuestion 在 Core-only gating 失败时会继续发消息，造成 UI 显示
+ * 通用 Agent、后端却按 knowledge-base 执行。
+ */
+  async function switchAgent(agentId: string): Promise<boolean> {
+    if (conversationState.type === 'draft') {
+      setConversationState({ type: 'draft', agentId, knowledgeBaseId: agentId === 'general-chat' ? null : conversationState.knowledgeBaseId });
+      setChatError(null);
+      return true;
+    }
+    try {
+      const updated = await updateConversation(conversationState.id, { agentId });
+      setConversations((prev) => prev.map((c) => (c.id === updated.id ? { ...c, agentId: updated.agentId, knowledgeBaseId: updated.knowledgeBaseId } : c)));
+      setChatError(null);
+      return true;
+    } catch (error) {
+      if (error instanceof UnauthenticatedError) {
+        handleUnauthenticated();
+        return false;
+      }
+      // 不调用 setChatError(null)；让 submitQuestion 自己的错误处理决定。
+      setChatError(toErrorMessage(error));
+      return false;
+    }
   }
   async function selectKnowledgeBase(knowledgeBase: Pick<KnowledgeBase, 'id' | 'name'>) {
     if (conversationState.type === 'draft') { setConversationState({ type: 'draft', agentId: 'knowledge-base', knowledgeBaseId: knowledgeBase.id }); setChatError(null); return }
@@ -805,25 +953,113 @@ function App() {
     const assistantId = streamingAssistantIdRef.current
     if (!assistantId) return
     abortControllerRef.current?.abort()
+    // 标记用户**显式**请求停止。HTTP 成功会携带权威快照并独立收敛；
+    // 若 SSE 先到，则二者通过 stop state machine 幂等收敛。
+    stopRequestedRef.current = true
+    // PR-review Item 2 修复：不要在 HTTP 之前 finalize。
+    // HTTP 失败时直接 finalize 会错误地把 assistant 标成 stopped 并把
+    // EventSource 标为可关，造成 UI 与后端分裂。下面先翻请求闸门（不翻
+    // finalized、不翻 status），再按 HTTP 真实结果决定下一步。
+    const cur = stopStateRef.current ?? createAssistantStopState({
+      assistantId,
+      runId: currentRunIdRef.current,
+      initialStatus: 'streaming',
+      initialContent: rendererStateRef.current.targetText,
+    })
+    stopStateRef.current = finalizeAssistantStop(cur, 'stop_requested', {
+      content: rendererStateRef.current.targetText,
+    })
     try {
-      await stopMessage(assistantId)
+      // PR-review Round 3 Item 1 + Round 4 SSE/HTTP 竞态修复：
+      //   HTTP 200 现在返回权威 content + citations 快照
+      //   （stopRunByMessageId 同一事务 SELECT），前端用此快照**独立**
+      //   完成 finalize。SSE run-stopped 后到走幂等 no-op。
+      //
+      //   SSE-first-then-HTTP 顺序：若 SSE 在 await stopMessage() 之前
+      //   已经把 stopStateRef 标记为 finalized=true，HTTP 恢复路径必须
+      //   通过 applyTerminalSnapshot 返回 applied=false 完全 no-op；
+      //   不能用 `stopStateRef.current!` 非空断言（会被 null / 已 finalize
+      //   状态引发崩溃或重复副作用）。异常路径同理。
+      const response = await stopMessage(assistantId)
+      const snapshot = {
+        content: response.content ?? rendererStateRef.current.targetText,
+        contentLength: response.contentLength,
+        citations: response.citations ?? [],
+      }
+      const result = applyTerminalSnapshot(stopStateRef.current, {
+        kind: 'http_stop_ok',
+        snapshot,
+      })
+      stopStateRef.current = result.state
+      if (!result.applied) {
+        // SSE 已 finalize 完成收敛；HTTP 是事后到达的迟到响应。
+        // 终态副作用（status / content / isAsking=false / 关流）由
+        // SSE 路径执行过，本路径**不再重复**。但 HTTP 响应携带的是
+        // 后端事务内合并的最终 citations，可能比 SSE 早期事件更完整；
+        // 仍允许 updateStreamingAssistantCitations 补齐（PR-review
+        // Round 5 Item 1 修复 —— 不再因 applied=false 一刀切吞掉
+        // 引用更新，否则 UI 与 DB 会不一致）。
+        if (result.citationsChanged) {
+          updateStreamingAssistantCitations(snapshot.citations as import('../lib/api').Citation[])
+        }
+        return
+      }
+      // 同步 React state：assistant 标 stopped + content 收敛 + isAsking=false。
+      updateStreamingAssistantContent(snapshot.content, 'stopped')
+      if (result.citationsChanged) {
+        updateStreamingAssistantCitations(snapshot.citations as import('../lib/api').Citation[])
+      }
+      streamingAssistantIdRef.current = null
+      currentRunIdRef.current = null
+      setIsAsking(false)
+      // HTTP 200 已带权威快照，立即关流（与 SSE run-stopped 幂等）。
+      runStreamRef.current?.close()
+      runStreamRef.current = null
+      stopRequestedRef.current = false
     } catch (error) {
       if (error instanceof UnauthenticatedError) { handleUnauthenticated(); return }
       console.error('Stop failed:', error)
-    } finally {
-      // V2：关 SSE 流；终端事件 run-stopped 才会真正收尾。
-      runStreamRef.current?.close()
-      runStreamRef.current = null
-      currentRunIdRef.current = null
+      // HTTP 失败：保留 EventSource 兜底等 SSE run-stopped；同时上报
+      // 错误给用户，让用户能重试。状态机翻 http_stop_fail 标记，避免
+      // 重复报错。
+      //
+      // SSE-first 顺序：若 SSE 已在 catch 之前 finalize，state 可能
+      // 为 null 或 finalized=true，此时不应再走 http_stop_fail（会
+      // 错误地把已收敛状态又覆写一遍，且调用失败路径会 setChatError
+      // 与 SSE 已 finalize 事实冲突）。applyTerminalSnapshot 永远
+      // 返回 applied=false 时即 SSE-first 顺序，HTTP 失败信息不应上报。
+      const failed = stopStateRef.current
+      if (failed && !failed.hasReportedHttpFailure && !failed.finalized) {
+        stopStateRef.current = finalizeAssistantStop(failed, 'http_stop_fail')
+        setChatError(toErrorMessage(error))
+      }
+      // 不重置 stopRequestedRef——SSE run-stopped 仍可能到达兜底。
     }
   }
 
   async function submitQuestion(content: string) {
     const trimmed = content.trim()
     if (!trimmed || isSubmittingRef.current || streamingAssistantIdRef.current) return
-    const currentAgent = chatAgents.find((a) => a.id === currentAgentId)
+    // PR-review Round 3 Item 2 修复：当前持久化的 agent（currentAgentId）
+    //   在 Core-only 模式下可能是 knowledge-base（被 availableChatAgents
+    //   过滤掉），若直接放行 → 后端仍按 knowledge-base Agent 执行，与 UI
+    //   显示不一致。
+    //   解决：在 submit 前显式 sync，把持久化 agentId 改成 effectiveAgentId
+    //   （落库回写 + conversations state 同步），保证前后端一致。
+    //   switchAgent 现在返回 boolean；只有 true 才继续发送，否则阻断。
+    if (currentAgentId !== effectiveAgentId) {
+      const synced = await switchAgent(effectiveAgentId)
+      if (!synced) {
+        // switchAgent 失败：保留错误提示，**不**清除也不发送问题，
+        // 避免前后端 Agent 错配。
+        setChatError('Agent 同步失败：' + (chatError ?? '请刷新页面重试。'))
+        return
+      }
+    }
+    const currentAgent = availableChatAgents.find((a) => a.id === effectiveAgentId)
     if (currentAgent?.requiresKnowledgeBase && !currentKnowledgeBaseId) { setChatError('请先选择一个知识库。'); return }
-    setChatError(null)
+    // 注意：仅在所有前置检查通过后才清错误，避免覆盖 sync 失败的提示。
+    if (currentAgentId === effectiveAgentId) setChatError(null)
     isSubmittingRef.current = true
     // 连服务端 draft 也可能有网络等待；先显示占位，避免用户点击发送后界面静止。
     setIsAsking(true)
@@ -1186,9 +1422,10 @@ function App() {
       isAsking={isAsking}
       isStreaming={isStreaming}
       error={chatError ?? approvals.error}
-      chatAgents={chatAgents}
+      chatAgents={availableChatAgents}
       knowledgeBases={knowledgeBases}
-      selectedAgentId={currentAgentId}
+      selectedAgentId={effectiveAgentId}
+      ragEnabled={capabilities.ragEnabled}
       defaultChatModel={capabilities.defaultChatModel}
       llmDisplayName={capabilities.llm?.displayName}
       activeKnowledgeBase={activeKnowledgeBase}

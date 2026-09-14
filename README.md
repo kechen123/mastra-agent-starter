@@ -4,6 +4,15 @@
 
 > 当前仅适合本地开发或受信任网络中的已认证演示环境；生产级租户治理、Tool 审批等能力仍在演进中。详细边界见 [架构文档](docs/architecture.md)。
 
+> **2026-09-14 V2 Chat Runtime 修复（已实现并通过自动测试）**
+> 本轮在 PR-4 之上完成 V2 chat runtime 修复，所有改动**已通过** `npm run typecheck`（backend）+ `npm run lint`（backend / frontend）+ `npm run test:contracts` / `test:unit` / `test:fixtures`（backend）+ `npm test`（frontend，含 23 + 30 用例）+ `npm run build`（frontend）+ `git diff --check`：
+> - 后端停止一致性：`abortRunByMessage()` 返回结构化 discriminated union；HTTP stop / SSE run-stopped / final checkpoint / message.content 共用 V2 executor 不可变文本快照。**仅承诺同一进程实例内收敛；跨实例 stop 不在本轮范围**。
+> - 前端 stop 状态机：`src/lib/stop-state-machine.ts` 纯逻辑模块 + 30 用例单测；HTTP/SSE 任意顺序幂等；session switch / KB / capabilities 页面**不**调后端 stop。
+> - Tool call 稳定 ID：`tool_executions.tool_call_id` + UNIQUE(workspace_id, run_id, tool_call_id)；`upsertToolExecution` / `finalizeToolExecutionByCallId` 幂等；批量查消除 N+1。
+> - RAG 阈值 / AbortSignal / 错误归类：`RAG_MIN_SIMILARITY` 默认 0.5（严格 [0,1]）；`EMBEDDING_TIMEOUT_MS` 默认 15000ms；embedding provider 错误归一为内部 `EmbeddingError` 类，**不**抛原始 body / endpoint / key 字样。
+> - Test/CI：frontend `npm test` 用 tsx 直跑；integration runner 顶层 TEST_DATABASE_URL + safety-identifier 闸门守护，无 DB 时 SKIPPED（**不**算 passed）。
+> - 真实 PostgreSQL / 真实 DeepSeek / 真实 Embedding / 真实 MinerU / 浏览器前后端端到端联调：**本轮未授权 / 未在本流水线验证**，保留为 staging e2e 待办。
+
 ## 开箱即用
 
 - **可追溯的智能对话**：支持通用问答、SSE 流式输出、停止生成与重新生成。

@@ -59,6 +59,12 @@ export interface AssistantChatWorkspaceProps {
   /** 桌面 sidebar 折叠状态：折叠时在聊天头部渲染展开入口。 */
   sidebarCollapsed?: boolean;
   onExpandSidebar?: () => void;
+  /**
+   * RAG / 向量检索总开关。false 时 UI 必须显式提示"未配置向量检索"，
+   * 文档上传能力仍可用（解析/全文检索**不**提供，需要诚实标注）。
+   * 见 PR-review Item 7。
+   */
+  ragEnabled?: boolean;
 }
 
 const scrollbarStyle = {
@@ -143,6 +149,7 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
     onDeclineApproval,
     sidebarCollapsed,
     onExpandSidebar,
+    ragEnabled,
   } = props;
 
   const messageScrollRef = useRef<HTMLDivElement>(null);
@@ -190,6 +197,18 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
           </div>
         </div>
       </header>
+
+      {ragEnabled === false && (
+        <div
+          role="status"
+          className="shrink-0 mx-3 my-2 px-3 py-2 rounded-md border border-app-border bg-app-muted/30 text-[12px] text-app-muted leading-relaxed"
+          data-testid="rag-disabled-banner"
+        >
+          当前配置未启用向量知识库（<code>ragEnabled=false</code>）。
+          知识库问答 Agent 已隐藏；文档上传仍可用，但**不**提供向量检索
+          与全文搜索兜底——文档知识只能依赖模型自身参数。
+        </div>
+      )}
 
       <div className="relative flex-1 min-h-0 overflow-hidden">
         <ThreadPrimitive.Viewport

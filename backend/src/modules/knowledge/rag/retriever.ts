@@ -1,6 +1,6 @@
 import { getDatabasePool } from '../../../infrastructure/database/pool.js';
 import type { Citation } from '../../citations/types.js';
-import { DATABASE_EMBEDDING_DIM } from '../../../config.js';
+import { DATABASE_EMBEDDING_DIM, config } from '../../../config.js';
 import { embedQuery } from './embedding-service.js';
 
 interface EmbeddingRow {
@@ -15,10 +15,14 @@ interface EmbeddingRow {
 }
 
 /**
- * retriever 调用选项（PR-4.2 §8.4 / Spec §retriever）。
+ * retriever 调用选项。
  *
  * `topK` 默认 5；`queryEmbedding` 提供时跳过外部 Embedding 调用（集成
  * 测试 / CI 注入哑向量通道）。
+ *
+ * `signal` 用于把上层 Run / agent 的 AbortSignal 透传到 Embedding API
+ * fetch；用户点"停止生成"后 AbortController.abort() 会即时中断上游
+ * 网络请求，不再继续等 Embedding 返回。
  *
  * 注：与 PR-3 时期相比，**不再需要**传入 `DATABASE_EMBEDDING_DIM` 长
  * 度的固定向量——`embedding_profiles.dimensions` 决定当前 active profile
@@ -31,10 +35,15 @@ export interface SearchKnowledgeBaseOptions {
    * dimensions 校验长度，维度不匹配时抛 `Error`。
    */
   queryEmbedding?: number[];
+  /**
+   * AbortSignal：用户停止 / 超时 / agent 取消时立即中断 Embedding API
+   * 与 PG 查询。AbortSignal.timeout(ms) 也可由调用方提供。
+   */
+  signal?: AbortSignal;
 }
 
 /**
- * 校验 `queryEmbedding` 维度与 active profile 匹配（PR-4.2 §8.4）。
+ * 校验 `queryEmbedding` 维度与 active profile 匹配。
  *
  * 规则：
  *   1. 必须是数组；
@@ -42,12 +51,7 @@ export interface SearchKnowledgeBaseOptions {
  *   3. 长度严格等于 `expectedDimensions`（不传时取
  *      `DATABASE_EMBEDDING_DIM`）。
  *
- * PR-4 第二轮 Codex 整改（2026-09-11）：`expectedDimensions` 改为
- * optional，**默认**回退到 `DATABASE_EMBEDDING_DIM`。这是为了与
- * `tests/unit/retriever-query-embedding.ts` 的单参调用形式对齐
- * ——旧 fixture 的"必须单参调用"被恢复为上游既定的契约。生产
- * `searchKnowledgeBase` 路径仍然传 `profile.dimensions`（来自
- * active embedding profile），单参回退路径仅用于纯函数 fixture。
+ * 单参回退路径仅用于纯函数 fixture；生产路径总是由 active profile 提供。
  */
 export function assertQueryEmbeddingValid(
   embedding: unknown,
@@ -92,7 +96,23 @@ async function getActiveEmbeddingProfile(workspaceId: string): Promise<{
 }
 
 /**
- * 在指定工作区内检索知识库片段（PR-4.2 §8.4 重写）。
+ * 把 pgvector cosine distance 转换成 similarity ∈ [-1, 1]（cosine
+ * distance 定义为 1 - cosine_similarity）。
+ *
+ * pgvector 的 `<=>` 操作符对 cosine 距离输出 ∈ [0, 2]，对 unit-normalized
+ * 向量输出 ∈ [0, 2]（最差 -1 类似度时 distance=2）。
+ * 为保持下游使用"越大越相关"的一致语义，统一转成 1 - distance（clamp 到 [0, 1]）。
+ */
+function distanceToSimilarity(distance: number): number {
+  const sim = 1 - distance;
+  if (!Number.isFinite(sim)) return 0;
+  if (sim < 0) return 0;
+  if (sim > 1) return 1;
+  return sim;
+}
+
+/**
+ * 在指定工作区内检索知识库片段。
  *
  * 数据路径：
  *   - JOIN document_embeddings + document_chunks + documents；
@@ -100,12 +120,24 @@ async function getActiveEmbeddingProfile(workspaceId: string): Promise<{
  *   - `documents.status='ready'` 过滤保证 RAG 不读 ingestion 中的中间态；
  *   - `embedding IS NOT NULL` 防御性过滤（profile 切换时短暂存在）。
  *
+ * 相似度阈值（PR-4.3）：
+ *   - Top K 先按 cosine distance 升序取回；
+ *   - 然后用 similarity = 1 - distance 过滤掉低于
+ *     `config.ragMinSimilarity` 的 chunk；
+ *   - 全部低于阈值 → 视为"未命中可靠数据"，返回空数组（上层 agent 走
+ *     "无可靠资料"语义，绝不注入不相关 chunk）。
+ *
  * 隔离合约：
  *   - workspace_id 双重过滤（embedding / chunks / documents 三处都
  *     带 workspace_id）；
  *   - knowledge_base_id 限定到指定 KB；
  *   - 即使上游 search 入口被绕过，本函数不会越权读到其它 workspace
  *     的向量。
+ *
+ * AbortSignal 传播：
+ *   - 透传到 `embedQuery` → Embedding API fetch；
+ *   - 用户停止 / 超时立即中断上游 fetch 与 PG 查询；
+ *   - signal 已 abort → 本函数立即抛 AbortError，上层需按"未命中"处理。
  */
 export async function searchKnowledgeBase(
   workspaceId: string,
@@ -114,6 +146,11 @@ export async function searchKnowledgeBase(
   options: SearchKnowledgeBaseOptions = {},
 ): Promise<Citation[]> {
   const topK = options.topK ?? 5;
+  const minSimilarity = config.ragMinSimilarity;
+  const signal = options.signal;
+  if (signal?.aborted) {
+    throw new DOMException('RAG retrieval aborted before start', 'AbortError');
+  }
   const pool = getDatabasePool();
 
   // 1) 取 active profile。RAG 未启用 / 没有 active profile → 返空数组。
@@ -136,13 +173,21 @@ export async function searchKnowledgeBase(
   );
   if (!hasEmbeddings.rows[0]?.has) return [];
 
-  // 3) 决定查询向量。注入通道走断言；未注入走外部 Embedding API。
+  // 3) 决定查询向量。注入通道走断言；未注入走外部 Embedding API（带 signal）。
   const embedding = options.queryEmbedding
     ? (assertQueryEmbeddingValid(options.queryEmbedding, profile.dimensions),
        options.queryEmbedding)
-    : await embedQuery(query);
+    : await embedQuery(query, signal);
 
-  // 4) 主检索 SQL。
+  if (signal?.aborted) {
+    throw new DOMException('RAG retrieval aborted after embedding', 'AbortError');
+  }
+
+  // 4) 主检索 SQL：先按 cosine distance 取 topK，再在内存里按 similarity 阈值过滤。
+  //    SQL 内同时做 threshold 过滤更省内存，但 cosine distance 表达
+  //    1 - similarity 在 SQL 中需要 (1 - distance) >= threshold → distance <= 1 - threshold，
+  //    容易混淆；当前实现取回 topK 后在内存里明确按 similarity 过滤，
+  //    便于测试与日志。
   const result = await pool.query<EmbeddingRow>(
     `SELECT
         e.chunk_id,
@@ -166,26 +211,36 @@ export async function searchKnowledgeBase(
     [`[${embedding.join(',')}]`, workspaceId, knowledgeBaseId, profile.id, topK],
   );
 
-  return result.rows.map((row) => {
-    const metadata = row.metadata ?? {};
-    const heading = asOptionalString(metadata.heading);
-    const distance = Number(row.distance);
-    return {
-      chunkId: row.chunk_id,
-      documentId: row.document_id,
-      documentName: row.document_name,
-      chunkIndex: row.chunk_index,
-      heading,
-      title: row.document_name,
-      chapter: heading ?? `片段 ${row.chunk_index + 1}`,
-      content: row.content,
-      score: distance,
-      distance,
-      category: '用户文档',
-      type: 'document',
-      source: row.document_name,
-    };
-  });
+  return result.rows
+    .map((row) => {
+      const metadata = row.metadata ?? {};
+      const heading = asOptionalString(metadata.heading);
+      const rawDistance = Number(row.distance);
+      const similarity = distanceToSimilarity(rawDistance);
+      // 字段语义（PR-review Item 6 修复，必须保持两条独立含义）：
+      //   - distance：原始 cosine distance，越小越相关（pgvector `<=>`
+      //     输出 ∈ [0, 2]，unit-normalized 向量 ∈ [0, 2]）。
+      //   - score：similarity = 1 - distance，已 clamp 到 [0, 1]，越大越相关。
+      // 阈值比较只走 score。
+      // 之前的实现把 similarity 写回 distance 字段，破坏了距离语义
+      // （任何按 distance 排序的下游都会按"越大越相关"反向读）。
+      return {
+        chunkId: row.chunk_id,
+        documentId: row.document_id,
+        documentName: row.document_name,
+        chunkIndex: row.chunk_index,
+        heading,
+        title: row.document_name,
+        chapter: heading ?? `片段 ${row.chunk_index + 1}`,
+        content: row.content,
+        score: similarity,
+        distance: rawDistance,
+        category: '用户文档',
+        type: 'document',
+        source: row.document_name,
+      };
+    })
+    .filter((c) => c.score >= minSimilarity);
 }
 
 function asOptionalString(value: unknown): string | undefined {

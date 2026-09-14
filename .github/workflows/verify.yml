@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
 
+# PR-4.3 流水线整改：
+#   - regular CI 只跑 contracts / unit / fixtures + typecheck + lint；
+#   - integration 由独立 `integration.yml` 在专用 runner + 隔离 DB 上跑；
+#   - 这里**不**做真实 DeepSeek / Embedding / MinerU / browser E2E——
+#     那些 E2E 必须有授权 + 凭据 + 单独流水线，并显式标记
+#     "未在本轮 verify 中验证"。
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -24,12 +30,17 @@ jobs:
           npm run lint
           npm run typecheck
           npm run test:contracts
-          npx tsx tests/fixtures/skill-classifier.ts
+          npm run test:unit
+          npm run test:fixtures
       - name: Verify frontend
         working-directory: frontend
         run: |
           npm ci
           npm run lint
+          npm test
           npm run build
 # Schema 由 backend/database/init.sql 单文件提供；`npm run migrate` 在本地或生产执行。
-# CI 不跑迁移（无 DB 服务）；依赖 contracts / unit / integration 测试 + typecheck 兜底。
+# regular CI 不跑 PG integration / 真实 DeepSeek / Embedding / MinerU / browser E2E：
+#   - integration 由 tests/integration/run.ts 顶层 TEST_DATABASE_URL 闸门守护，
+#     缺失或不带 safety-identifier 时 SKIPPED（不算 passed）；
+#   - 凭据 / 上游依赖类 E2E 必须在专门流水线凭环境变量显式授权，并标记未在本轮验证。

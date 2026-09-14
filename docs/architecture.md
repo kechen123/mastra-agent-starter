@@ -1,6 +1,15 @@
 # Mastra Agent Starter 架构文档
 
-> **2026-09-11 收尾基线**：PR-4.1 / PR-4.2 / PR-4.3 **代码已完成**，**真实 PostgreSQL 端到端 18 passed、0 failed**（Core-only 16 + RAG 2，分别调 `runIngestionWorkerOnce` / `_runFinalizeOnce` / `_runOutboxOnce` / `transitionIngestionStatus` / `getOrCreateActiveEmbeddingProfile` / `createUploadBundle` 等生产入口；详见 §7）。PR-4.4（存量向量迁移）已**取消**——本模板采用 fresh DB + `backend/database/init.sql` 单一来源，不维护旧库迁移。**staging / production readiness 仍需在四类边界完成演练**：(1) 多进程 Worker 真并行 `FOR UPDATE SKIP LOCKED` 单飞 / heartbeat 续约 / hard-crash sweeper 接管；(2) 真实 MinerU 解析失败 / 网络抖动；(3) 真实 Embedding Provider HTTP 接入；(4) 浏览器前后端端到端联调。
+> **2026-09-14 V2 Chat Runtime 收尾基线**：
+> 本轮在 PR-4 之上完成 V2 chat runtime 修复：
+>   - 后端停止一致性：`abortRunByMessage()` 返回结构化 discriminated union（`AbortRunResult`），HTTP stop / SSE run-stopped / final checkpoint / message.content 共用 V2 executor 的 `execution.fullText` 不可变文本快照。同一进程单实例收敛；**跨实例**不属本轮范围。
+>   - 前端 stop 状态机：`src/lib/stop-state-machine.ts` 纯逻辑模块 + 30 用例单测；HTTP/SSE 任意顺序幂等；session switch / KB / capabilities 页面**不**调后端 stop。
+>   - Tool call 稳定 ID：`tool_executions.tool_call_id` + UNIQUE(workspace_id, run_id, tool_call_id)；`upsertToolExecution` / `finalizeToolExecutionByCallId` 幂等；批量查消除 N+1。
+>   - RAG 阈值 / AbortSignal / 错误归类：`RAG_MIN_SIMILARITY` 默认 0.5（严格 [0,1]）；`EMBEDDING_TIMEOUT_MS` 默认 15000ms；embedding provider 错误归一为内部 `EmbeddingError` 类，**不**抛原始 body / endpoint / key 字样。
+>   - Test/CI：frontend `npm test` 用 tsx 直跑 + 30 状态机 + 23 renderer 用例；backend `tests/unit/rag-threshold-abort-sanitize.ts` + `tool-execution-dedup.ts`；integration runner 顶层 TEST_DATABASE_URL + safety-identifier 闸门守护，无 DB 时 SKIPPED（**不**算 passed）。
+>   - 真实 PostgreSQL / 真实 DeepSeek / 真实 Embedding / 真实 MinerU / 浏览器前后端端到端联调：**本轮未授权 / 未在本流水线验证**，保留为 staging e2e 待办。
+>
+> **PR-4 状态（2026-09-11，第二轮 Codex review 后）**：PR-4.1 / PR-4.2 / PR-4.3 代码已完成；真实 PostgreSQL 端到端 **18 passed、0 failed**（Core-only 16 + RAG 2）的早期快照保留供历史对照——本轮 verify **未重跑**该用例集，仅以 unit / contracts / fixtures 覆盖新增契约。
 
 > **文档定位**：本文描述 **当前已实现** 的系统架构（as-built）——文中出现的每个模块、表、路由都对应仓库里真实存在的代码。
 > 目标演进架构见 [`architecture-v2.md`](architecture-v2.md)；从当前实现走到 V2 的路径与 PR 切片见 [`implementation-plan.md`](implementation-plan.md)。
@@ -16,7 +25,7 @@ Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持
 
 ## 技术栈
 
-- **后端**: Mastra (~1.61.0), TypeScript, PostgreSQL
+- **后端**: Mastra (@mastra/core 1.65.0, @mastra/pg 1.23.0, @mastra/server 1.65.0, mastra 1.28.0), TypeScript, PostgreSQL
 - **前端**: React 19, Vite, Tailwind CSS 4
 - **数据存储**: PostgreSQL（会话、消息、知识库、技能执行审计）
 
@@ -148,9 +157,49 @@ Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持
 位于 `backend/src/modules/conversations/tool-executions.ts`：
 
 - 记录每次工具调用到 `tool_executions` 表
+- **V2 阶段 2 稳定 ID**：`tool_call_id`（Mastra toolCallId）是跨 SSE / Mastra / approval resume / 历史恢复 / 前端卡片的统一业务 ID；
+  `(workspace_id, run_id, tool_call_id)` 上 UNIQUE。`upsertToolExecution` / `finalizeToolExecutionByCallId` 幂等。
+- DB id 仅作为内部 PK；前端 / 上层一律使用 `tool_call_id` 做 dedup。
 - 状态跟踪：`running → completed | failed | stopped`
 - 记录输入、输出、耗时、错误码
 - `convergeRunningToolExecutions()` 在流结束/异常/停止时把残留 `running` 记录收敛为 `stopped` / `failed`
+- 批量查询：`getToolExecutionsByMessages(workspaceId, messageIds[])` 一次性拉所有 assistant message 的 tool executions，**消除 N+1**。
+
+### 8.1 V2 停止一致性（单实例收敛边界，2026-09-14）
+
+> **本节仅描述同一进程实例内的 V2 停止一致性。跨实例 stop 不在本轮范围。**
+
+`backend/src/core/execution/run-executor.ts` 与 `backend/src/server/routes/v2alpha/shared-handlers.ts` 协同保证四条路径**共用同一份不可变文本快照**：
+
+1. `messages.content` —— `stopRun` 写库内容（取自 `execution.fullText`）；
+2. 最终 `content-checkpoint` —— stream 的 `done / stopped` 事件分支写入；
+3. `run-stopped` 事件 `payload.contentLength` —— `stopRun` 落库前算好的 snapshot length；
+4. HTTP `/v1/v2alpha/messages/:id/stop` 响应 body —— `executor.fullText.length`。
+
+`abortRunByMessage(messageId)` 不再返回 `boolean`，而返回结构化 discriminated union：
+
+```ts
+type AbortRunResult =
+  | { kind: 'not_hit' }
+  | {
+      kind: 'aborted';
+      runId: string;
+      workspaceId: string;
+      /** 当前累积的文本快照。空字符串也是合法终态（contentLength=0）。 */
+      fullText: string;
+      /** 当前累积的引用。停止时只追加、不清除。 */
+      citations: Citation[];
+    };
+```
+
+行为：
+
+- HTTP handler 优先取 executor 快照作为权威；executor 未命中（DB 行 active 但 executor 已 GC / 当前实例未承接该 Run）才回退到 legacy `controller.partialContent`。
+- `stopRunByMessageId` 在 Run 已为终态时**幂等**返回 `{stopped: false, run, reason: 'already_terminal', contentLength}`，`contentLength` 取自当前 `message.content` 长度，**不**覆写 content / citations / 不重复写 run-stopped 事件。
+- 空文本停止（用户立刻停止）合法终态：`status='stopped'` + `contentLength=0`。
+- 引用语义：停止只追加不清除；只有在"untrusted/uncommitted"语义下才清空（见代码注释）。
+
+**跨实例边界**：本轮**不**承诺多进程同时接管同一 Run 的 stop 收敛。多进程部署需后续 lease fencing + 跨实例 finalizer（待 PR-后续），目前单一进程实例内的事务收敛是唯一保证。
 
 ### 9. Skill 市场（skills.sh）
 

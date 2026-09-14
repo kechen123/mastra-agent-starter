@@ -17,6 +17,7 @@ import {
   getRunById,
   type RunRow,
 } from './repository.js';
+import { buildRunTerminalPayload, mergeCitationsByChunkId } from './citation-merge.js';
 
 export interface CreateRunForMessageInput {
   workspaceId: string;
@@ -231,10 +232,21 @@ export async function ensureRunReadable(
  *   1. UPDATE agent_runs WHERE status IN ('queued','running','waiting_approval')
  *      → SET status='stopped', completed_at=now(), lease_owner=NULL, ...；
  *      用条件 WHERE 防止覆写已经被 completed/failed/stopped 的行。
- *   2. UPDATE messages SET status='stopped', content=COALESCE(partialContent)
+ *   2. UPDATE messages SET status='stopped', content=COALESCE(partialContent),
+ *      citations=COALESCE(保留已落库引用)
  *      WHERE id = assistant_message_id AND workspace_id。
  *   3. INSERT agent_run_events(type='run-stopped', payload.contentLength)
  *      + NOTIFY。
+ *
+ * 引用保留规则（架构契约）：停止行为**不**清除已在本 Run 中产生且
+ * 已持久化的引用——这些引用是真实检索结果，已被前端展示使用；仅在
+ * 明确"引用不可信 / 未提交"的语义（例如 Run 进入 failed + 重新计算）
+ * 才清除。本函数路径仅写 stopped，不写 citations='[]'。
+ *
+ * 幂等性：Run 已是 stopped/completed/failed 时返回
+ * `{ stopped: false, run, reason: 'already_terminal', contentLength }`
+ * 且**不**再写 run-stopped 事件；`contentLength` 取自当前 message.content
+ * 的实际长度（保证 HTTP 响应的 contentLength 与落库正文一致）。
  *
  * 返回：{ stopped: true } 若 Run 行确实从活跃态收敛；
  *       { stopped: false, run } 若该 Run 已处于终态（stopped/completed/failed）；
@@ -247,11 +259,40 @@ export async function stopRunByMessageId(
   args: {
     workspaceId: string;
     assistantMessageId: string;
-    partialContent: string;
+    /**
+     * 来自 V2 ActiveExecution 的全量文本快照（`executor.fullText`）；
+     * V2 stop 路径权威文本。空字符串是合法值——空文本停止同样收敛
+     * 为 stopped，contentLength=0。
+     */
+    finalContent: string;
+    /** 已落库的引用快照；停止行为只追加、不清除。 */
+    citations: ReadonlyArray<unknown>;
   },
 ): Promise<
-  | { stopped: true; run: RunRow; eventId: number; contentLength: number }
-  | { stopped: false; run: RunRow; reason: 'already_terminal' }
+  | {
+      stopped: true;
+      run: RunRow;
+      eventId: number;
+      contentLength: number;
+      /**
+       * PR-review Round 3 Item 1：HTTP stop 成功后必须返回**同一事务**
+       * 已落库的权威 content + citations 快照。前端不再依赖 SSE run-stopped
+       * 才能完成独立 finalize——HTTP 200 + 权威快照 = 立即收敛；
+       SSE run-stopped 后到走幂等 no-op。
+       * `contentLength === content.length`。
+       */
+      content: string;
+      citations: ReadonlyArray<unknown>;
+    }
+  | {
+      stopped: false;
+      run: RunRow;
+      reason: 'already_terminal';
+      contentLength: number;
+      /** 同上：幂等路径也返回权威 content + citations。 */
+      content: string;
+      citations: ReadonlyArray<unknown>;
+    }
   | { stopped: false; missing: true }
 > {
   // 1. 锁住消息行 + 拿到 current_run_id（行锁防同会话并发误收敛）
@@ -314,9 +355,42 @@ export async function stopRunByMessageId(
     updatedAt: new Date(row.updated_at as string).toISOString(),
   } satisfies RunRow;
 
-  // 3. 已是终态 → 不覆写，返回 already_terminal
+  // 3. 已是终态 → 幂等：不覆写 content/citations/状态，不重复写 run-stopped；
+  //    contentLength 取自当前 message.content 长度，保证与落库正文一致。
   if (run.status === 'stopped' || run.status === 'completed' || run.status === 'failed') {
-    return { stopped: false, run, reason: 'already_terminal' };
+    const currentMsgRow = await client.query<{
+      content: string;
+      status: string;
+    }>(
+      `SELECT content, status FROM messages WHERE id = $1 AND workspace_id = $2`,
+      [args.assistantMessageId, args.workspaceId],
+    );
+    const currentContent = currentMsgRow.rows[0]?.content ?? '';
+    // 幂等路径同样要返回权威 citations 快照，方便前端把"老终态"
+    //   与"新 stop"两条路径都收敛到同一 UI 终态。
+    const citationsRow = await client.query<{ citations: unknown }>(
+      `SELECT citations FROM messages WHERE id = $1 AND workspace_id = $2`,
+      [args.assistantMessageId, args.workspaceId],
+    );
+    const currentCitations = Array.isArray(citationsRow.rows[0]?.citations)
+      ? (citationsRow.rows[0]?.citations as ReadonlyArray<unknown>)
+      : [];
+    logRequest('info', {
+      msg: 'stopRunByMessageId 幂等：Run 已终态，不重复收敛',
+      workspaceId: args.workspaceId,
+      runId: run.id,
+      assistantMessageId: args.assistantMessageId,
+      currentStatus: run.status,
+      messageStatus: currentMsgRow.rows[0]?.status,
+    });
+    return {
+      stopped: false,
+      run,
+      reason: 'already_terminal',
+      contentLength: currentContent.length,
+      content: currentContent,
+      citations: currentCitations,
+    };
   }
 
   // 4. 收敛 Run（条件 WHERE 防止覆写）
@@ -334,25 +408,100 @@ export async function stopRunByMessageId(
     [run.id, args.workspaceId],
   );
 
-  // 5. 收敛 message（条件 WHERE）
-  await client.query(
-    `UPDATE messages
-        SET status = 'stopped',
-            content = COALESCE(NULLIF($3, ''), ''),
-            citations = '[]'::jsonb
-      WHERE id = $1
-        AND workspace_id = $2
-        AND status IN ('pending','streaming')`,
-    [args.assistantMessageId, args.workspaceId, args.partialContent],
-  );
+  // 5. 收敛 message（条件 WHERE）：content 用 V2 终态快照（args.finalContent），
+  //    citations 仅在快照非空时合并写入；若快照为空（null/undefined/[]）→
+  //    保留 DB 现有引用，避免 COALESCE($4::jsonb, citations) 把空数组
+  //    误当作非空写入导致覆盖已落库引用（PR-review Item 3）。
+  //    合并策略（PR-review Round 2 Item 4 修复）：按 `chunkId` 字段
+  //    取并集，incoming 优先；同 chunkId 视作同一引用。`chunkId` 是
+  //    Citation 契约的唯一稳定字段（`modules/citations/types.ts`），
+  //    之前的 `id` 字段在 Citation 上不存在 → 去重无效。
+  const incomingCitations = Array.isArray(args.citations) ? args.citations : null;
+  const contentValue = args.finalContent ?? '';
 
-  // 6. 写 run-stopped 事件
+  // PR-review Round 5 Item 1 + Round 6 Item 1：先在变量层把"最终
+  //   citations"统一为一个数组 `finalCitationsForPayload`，随后
+  //   messages UPDATE（可能跳过 citations 列）/ SSE run-stopped payload /
+  //   HTTP response 三处都用同一个数组。SSE 与 HTTP 通道必须携带完全
+  //   一致的终态快照。
+  //
+  //   空 incoming 不代表最终 citations 为空（PR-review Round 6 Item 1）：
+  //   当 messages.citations 已有引用、incoming=[]（典型：executor stop 时
+  //   只持有部分快照或运行时未带 citations）→ 跳过 UPDATE 让 DB 保留已有
+  //   引用，但 finalCitationsForPayload **必须**取 DB 当前值，而不是 []。
+  //   否则 SSE 会告知前端"无引用"、HTTP 也返空，UI 与 DB 不一致直到
+  //   用户刷新。
+  let finalCitationsForPayload: ReadonlyArray<unknown>;
+  if (incomingCitations && incomingCitations.length > 0) {
+    // 拉 DB 已落库引用 → JS 端按 chunkId 合并 → 一次性 UPDATE。
+    // PR-review Round 3 Item 3：合并逻辑提取至 citation-merge.ts 的
+    // `mergeCitationsByChunkId`，service.ts / run-executor.ts / 测试三者
+    // 共用同一实现，禁止在调用点复制。
+    const existingRow = await client.query<{ citations: unknown }>(
+      `SELECT citations FROM messages WHERE id = $1 AND workspace_id = $2`,
+      [args.assistantMessageId, args.workspaceId],
+    );
+    const existingCitations = Array.isArray(existingRow.rows[0]?.citations)
+      ? (existingRow.rows[0].citations as Array<Record<string, unknown>>)
+      : [];
+    const mergedCitations = mergeCitationsByChunkId(existingCitations, incomingCitations);
+    const merged = mergedCitations.merged as Array<Record<string, unknown>>;
+    finalCitationsForPayload = merged;
+    await client.query(
+      `UPDATE messages
+          SET status = 'stopped',
+              content = $3,
+              citations = $4::jsonb
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status IN ('pending','streaming')`,
+      [args.assistantMessageId, args.workspaceId, contentValue, JSON.stringify(merged)],
+    );
+  } else {
+    // incoming 为空：不覆写 messages.citations（DB 已保留已有引用），
+    //   但 finalCitationsForPayload 必须取 DB 当前值 —— SSE / HTTP
+    //   都向 UI 报告"实际保留的最终引用"，否则会向 UI 撒谎说"没有引用"。
+    const existingRow = await client.query<{ citations: unknown }>(
+      `SELECT citations FROM messages WHERE id = $1 AND workspace_id = $2`,
+      [args.assistantMessageId, args.workspaceId],
+    );
+    finalCitationsForPayload = Array.isArray(existingRow.rows[0]?.citations)
+      ? (existingRow.rows[0]?.citations as ReadonlyArray<unknown>)
+      : [];
+    await client.query(
+      `UPDATE messages
+          SET status = 'stopped',
+              content = $3
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status IN ('pending','streaming')`,
+      [args.assistantMessageId, args.workspaceId, contentValue],
+    );
+  }
+
+  // 6. 写 run-stopped 事件——payload 必须使用 finalCitationsForPayload
+  //   （已合并并持久化的最终数组），而不是 incomingCitations。这条
+  //   不变量是 PR-review Round 5 Item 1 修复的核心：SSE / HTTP 两条
+  //   终态通道必须共享同一权威快照。
+  //    PR-review Round 3 Item 3：payload 构造提取至 citation-merge.ts 的
+  //    `buildRunTerminalPayload`，与 run-executor 的 run-completed 共用。
+  const terminalPayload = buildRunTerminalPayload(contentValue, finalCitationsForPayload);
   const eventId = await insertRunEvent(client, {
     runId: run.id,
     workspaceId: args.workspaceId,
     type: 'run-stopped',
-    payload: { contentLength: args.partialContent.length },
+    payload: terminalPayload,
   });
+
+  // 7. PR-review Round 3 Item 1：从 messages 重新 SELECT 权威 content
+  //    （同一事务已 COMMIT 前）。citations 不再需要重读 —— 已经
+  //    在 finalCitationsForPayload 中持有写入后的最终值；重读反而
+  //    增加与 SSE payload 不一致的风险。
+  const finalRow = await client.query<{ content: string }>(
+    `SELECT content FROM messages WHERE id = $1 AND workspace_id = $2`,
+    [args.assistantMessageId, args.workspaceId],
+  );
+  const finalContent = finalRow.rows[0]?.content ?? '';
 
   logRequest('info', {
     msg: 'Run stopped transactionally',
@@ -360,9 +509,17 @@ export async function stopRunByMessageId(
     runId: run.id,
     assistantMessageId: args.assistantMessageId,
     eventId,
+    contentLength: finalContent.length,
   });
 
-  return { stopped: true, run, eventId, contentLength: args.partialContent.length };
+  return {
+    stopped: true,
+    run,
+    eventId,
+    contentLength: finalContent.length,
+    content: finalContent,
+    citations: finalCitationsForPayload,
+  };
 }
 
 /**

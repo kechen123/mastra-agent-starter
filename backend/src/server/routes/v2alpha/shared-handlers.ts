@@ -16,14 +16,12 @@ import { InputValidationError } from '../../error-mapping.js';
 import {
   fingerprintRequest,
   isUuid as isUuidKey,
-  lookupIdempotency,
-  storeIdempotency,
   claimOrLookupIdempotency,
   finalizeIdempotency,
 } from '../../../modules/idempotency/repository.js';
 import {
   convergeRunningToolExecutions,
-  getToolExecutionsByMessage,
+  getToolExecutionsByMessages,
 } from '../../../modules/conversations/tool-executions.js';
 import {
   createDraftConversation,
@@ -370,15 +368,24 @@ export const sharedHandlers = {
       );
       currentRunByMessage = new Map(r.rows.map((row) => [row.id, row.current_run_id ?? '']));
     }
+    // 批量拉 assistant message 的 tool executions（消除 N+1）。
+    const assistantIds = detail.messages
+      .filter((m) => m.role === 'assistant')
+      .map((m) => m.id);
+    const executionsByMessage = await getToolExecutionsByMessages(
+      auth.workspaceId,
+      assistantIds,
+    );
     const messages = await Promise.all(detail.messages.map(async (m) => {
       const executions = m.role === 'assistant'
-        ? await getToolExecutionsByMessage(auth.workspaceId, m.id)
+        ? (executionsByMessage.get(m.id) ?? [])
         : [];
       return {
         ...m,
         currentRunId: currentRunByMessage.get(m.id) ?? null,
         tools: executions.map((execution) => ({
-          toolCallId: execution.id,
+          // V2 阶段 2：前端用 toolCallId 做统一 dedup；不再用 DB id 当业务 ID。
+          toolCallId: execution.toolCallId,
           toolName: execution.toolName,
           status: execution.status === 'success'
             ? 'completed'
@@ -400,13 +407,21 @@ export const sharedHandlers = {
   /**
    * POST /messages/:id/stop — V2 主用停 Run 入口。
    *
-   * 行为（V2 §6.3 + §6.4）：
+   * 单一终态收敛路径（本轮加固）：
    *   1. workspace 隔离校验（消息不存在 / 跨 workspace → 404）；
-   *   2. 同时命中旧 ask-driver 与新 run-executor 控制器；
-   *   3. 在同一事务内收敛 Run + message + run-stopped 事件；
-   *      WHERE status IN ('queued','running','waiting_approval') 防止
-   *      executor 的 finally 又把 stopped 写成 completed；
-   *   4. 收敛 running 的 tool_executions。
+   *   2. 命中 V2 executor → 调 abortRunByMessage 拿到 immutable 文本/引用
+   *      快照；**不**再用 legacy controller 的 `partialContent` 覆盖
+   *      `executor.fullText`（executor 权威）；
+   *   3. legacy controller 仅在 V2 executor 未命中时作为兼容来源——
+   *      其 partialContent 只用于"DB 行 active 但 executor 已 GC"
+   *      的兜底；
+   *   4. 在同一事务内收敛 Run + message + run-stopped 事件；幂等：
+   *      已是终态时**不**覆写 content/citations，**不**重复写
+   *      run-stopped 事件，contentLength 取自当前落库 message.content；
+   *   5. 收敛 running 的 tool_executions。
+   *
+   * contentLength 严格来自 immutable 文本快照（或已落库 message.content），
+   * HTTP 响应、run-stopped payload、最终 checkpoint 三者共用同一长度。
    */
   async stopMessage(auth: AuthedHandlerContext, context: AuthedCtxLike, deps: RunDeps): Promise<Response> {
     const id = context.req.param('id');
@@ -421,36 +436,55 @@ export const sharedHandlers = {
     if (!ownerRow.rows[0] || ownerRow.rows[0].workspace_id !== auth.workspaceId) {
       return context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
     }
-    const legacy = abortExecution(id);
-    const runnerAborted = abortRunByMessage(id);
-    const controllerAlive = legacy.success || runnerAborted;
-    const partialContent = legacy.partialContent ?? '';
+    // 1) 优先命中 V2 executor —— executor.fullText 是权威 immutable 快照。
+    const executorResult = abortRunByMessage(id);
+    const executorHit = executorResult.kind === 'aborted';
+    let finalContent: string;
+    let finalCitations: ReadonlyArray<unknown>;
+    let controllerAlive = executorHit;
+    if (executorHit) {
+      // executorHit 之上 executorResult 已被判别联合 narrow 到 { kind: 'aborted' } 分支。
+      finalContent = executorResult.fullText;
+      finalCitations = executorResult.citations;
+    } else {
+      // 2) 兼容：仅当 V2 executor 未命中（DB 行 active 但 executor 已 GC
+      //    / 当前实例未承接该 Run）时，才用 legacy controller partialContent
+      //    兜底。两条路径互斥：executor 命中时 legacy 结果丢弃。
+      const legacy = abortExecution(id);
+      controllerAlive = legacy.success || controllerAlive;
+      finalContent = legacy.partialContent ?? '';
+      finalCitations = [];
+    }
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      // 即便 controller 已死，也再走一次事务收敛，确保
-      // "DB 行 active 但 controller 已被 GC" 场景不漏收敛。
+      // 收敛 Run（幂等：已是终态时不覆写、不重复写 run-stopped 事件）。
       const result = await stopRunByMessageId(client, {
         workspaceId: auth.workspaceId,
         assistantMessageId: id,
-        partialContent: partialContent || '',
+        finalContent,
+        citations: finalCitations,
       });
       await client.query('COMMIT');
       if ('missing' in result) {
         return context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
       }
-      // 已有 run-stopped 记录
       try {
         await convergeRunningToolExecutions(auth.workspaceId, id);
       } catch (err) {
         logger.error({ msg: 'convergeRunningToolExecutions failed', err, assistantMessageId: id });
       }
       const responseBody = {
-        runId: result.stopped ? result.run.id : result.run.id,
+        runId: result.run.id,
         status: result.stopped ? 'stopped' : result.run.status,
-        contentLength: result.stopped ? result.contentLength : 0,
+        contentLength: result.contentLength,
+        // PR-review Round 3 Item 1：HTTP 200 必须返回权威 content +
+        // citations 快照，前端不再依赖 SSE run-stopped 也能独立 finalize。
+        content: result.content,
+        citations: result.citations,
         controllerAlive,
+        idempotent: !result.stopped,
       };
       const response = context.json(responseBody);
       applyRequestIdHeader(response, deps.requestId);
@@ -461,6 +495,7 @@ export const sharedHandlers = {
         assistantMessageId: id,
         controllerAlive,
         stopped: result.stopped,
+        contentLength: result.contentLength,
       });
       return response;
     } catch (err) {

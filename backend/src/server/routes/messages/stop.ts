@@ -47,21 +47,33 @@ export const stopMessageRoute = registerApiRoute('/messages/:id/stop', {
       return context.json({ error_code: 'NOT_FOUND', message: '资源不存在。' }, 404);
     }
 
-    // 双保险：旧 ask-driver 执行控制器 + 新 run-executor 控制器都尝试中止。
-    const legacy = abortExecution(id);
-    const runnerAborted = abortRunByMessage(id);
-    const controllerAlive = legacy.success || runnerAborted;
-    const partialContent = legacy.partialContent ?? '';
+    // 双保险：V2 run-executor 控制器优先（executor.fullText 权威），
+    // 旧 ask-driver 执行控制器仅在 V2 executor 未命中时作为兼容来源。
+    const executorResult = abortRunByMessage(id);
+    let controllerAlive = executorResult.kind === 'aborted';
+    let finalContent: string;
+    let finalCitations: ReadonlyArray<unknown>;
+    if (executorResult.kind === 'aborted') {
+      finalContent = executorResult.fullText;
+      finalCitations = executorResult.citations;
+    } else {
+      const legacy = abortExecution(id);
+      controllerAlive = legacy.success || controllerAlive;
+      finalContent = legacy.partialContent ?? '';
+      finalCitations = [];
+    }
 
     // 控制器存活时同步收敛 DB；executor 的 finally 不再写 completed（终态条件 WHERE）。
     if (controllerAlive) {
       const client = await pool.connect();
+      let result: Awaited<ReturnType<typeof stopRunByMessageId>>;
       try {
         await client.query('BEGIN');
-        const result = await stopRunByMessageId(client, {
+        result = await stopRunByMessageId(client, {
           workspaceId: authCtx.workspaceId,
           assistantMessageId: id,
-          partialContent,
+          finalContent,
+          citations: finalCitations,
         });
         await client.query('COMMIT');
         if (!result.stopped && 'missing' in result) {
@@ -74,7 +86,19 @@ export const stopMessageRoute = registerApiRoute('/messages/:id/stop', {
         client.release();
       }
       await convergeRunningToolExecutions(authCtx.workspaceId, id);
-      return context.json({ message: '已停止生成。', status: 'stopped' }, 200);
+      // PR-review Round 3 Item 1：HTTP 200 同步返回权威 content + citations，
+      // 前端独立 finalize。SSE run-stopped 后到走幂等 no-op。
+      // result 已通过 missing 检查；剩下两个分支都带 content/citations。
+      const snapshot = 'missing' in result
+        ? { contentLength: 0, content: '', citations: [] as ReadonlyArray<unknown> }
+        : { contentLength: result.contentLength, content: result.content, citations: result.citations };
+      return context.json({
+        message: '已停止生成。',
+        status: 'stopped',
+        contentLength: snapshot.contentLength,
+        content: snapshot.content,
+        citations: snapshot.citations,
+      }, 200);
     }
 
     // 控制器已不存在：DB 行若仍 active（pending / streaming）→ 走事务收敛。
@@ -88,12 +112,14 @@ export const stopMessageRoute = registerApiRoute('/messages/:id/stop', {
     }
     if (row.status === 'pending' || row.status === 'streaming') {
       const client = await pool.connect();
+      let result: Awaited<ReturnType<typeof stopRunByMessageId>>;
       try {
         await client.query('BEGIN');
-        await stopRunByMessageId(client, {
+        result = await stopRunByMessageId(client, {
           workspaceId: authCtx.workspaceId,
           assistantMessageId: id,
-          partialContent: row.content || '',
+          finalContent: row.content || '',
+          citations: [],
         });
         await client.query('COMMIT');
       } catch (err) {
@@ -103,7 +129,18 @@ export const stopMessageRoute = registerApiRoute('/messages/:id/stop', {
         client.release();
       }
       await convergeRunningToolExecutions(authCtx.workspaceId, id);
-      return context.json({ message: '已停止生成。', status: 'stopped' }, 200);
+      // missing 分支理论上不会到这里（status 是 pending/streaming 才进
+      //   此分支），但保持 narrowing 完整性。
+      const snapshot = 'missing' in result
+        ? { contentLength: 0, content: '', citations: [] as ReadonlyArray<unknown> }
+        : { contentLength: result.contentLength, content: result.content, citations: result.citations };
+      return context.json({
+        message: '已停止生成。',
+        status: 'stopped',
+        contentLength: snapshot.contentLength,
+        content: snapshot.content,
+        citations: snapshot.citations,
+      }, 200);
     }
     return context.json({ message: '无活跃生成可停止。', status: row.status }, 200);
   }),

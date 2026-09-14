@@ -5,6 +5,13 @@ export interface Capabilities {
   };
   documentFormats: string[];
   mineruEnabled: boolean;
+  /**
+   * RAG / 向量检索总开关：false 时前端必须隐藏 KB Agent 选型与"知识库
+   * 问答"提示（PR-review Item 7）。文档上传能力仍可用，但只走全文 /
+   * 解析通路——本 starter 在 RAG 关闭时**不**提供 fulltext 兜底，需在
+   * UI 上明确标注"未配置向量检索"，避免误导用户认为有"全文搜索"。
+   */
+  ragEnabled: boolean;
   chatAgents: ChatAgentInfo[];
   defaultChatModel: string;
   llm?: {
@@ -30,6 +37,8 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   app: { name: 'Mastra Agent Starter', shortName: 'Mastra' },
   documentFormats: ['txt', 'md'],
   mineruEnabled: false,
+  // Core-only 默认：未配置向量知识库。前端展示 KB Agent 时必须先看这个开关。
+  ragEnabled: false,
   chatAgents: [
     { id: 'general-chat', name: '通用对话 Agent', requiresKnowledgeBase: false },
     { id: 'knowledge-base', name: '知识库问答 Agent', requiresKnowledgeBase: true },

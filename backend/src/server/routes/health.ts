@@ -37,8 +37,18 @@ export const readinessRoute = registerApiRoute('/readyz', {
     if (!config.embeddingApiKey || !config.embeddingBaseUrl) {
       failed.push('embedding');
     }
+    // readiness 响应显式声明 RAG / 向量检索是否启用；客户端用此标志
+    // 决定是否提示"未配置向量知识库问答"。注意：embedding 凭据缺失
+    // 不会让整个 readiness 失败（Core 模式仍可用），仅作为 informational 字段。
+    const ragEnabled = config.ragEnabled;
+    const vectorRetrievalConfigured = ragEnabled
+      && Boolean(config.embeddingApiKey)
+      && Boolean(config.embeddingBaseUrl);
     return failed.length === 0
-      ? context.json({ status: 'ready' })
-      : context.json({ status: 'not-ready', checks: failed }, 503);
+      ? context.json({ status: 'ready', ragEnabled, vectorRetrievalConfigured })
+      : context.json(
+          { status: 'not-ready', checks: failed, ragEnabled, vectorRetrievalConfigured },
+          503,
+        );
   },
 });

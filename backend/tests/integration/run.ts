@@ -15,7 +15,16 @@
  *   - `run.ts`（本文件）
  *   - `*.placeholder.ts`（需要外部条件才会跑的占位 fixture）
  *
+ * 隔离安全（PR-4.3）：
+ *   - 顶层 SKIP 闸门：`TEST_DATABASE_URL` 必须显式提供且**必须**包含
+ *     `safety-identifier`（推荐 `_test`），用以避免误连到共享 / 生产 DB。
+ *   - `TEST_DATABASE_URL` 缺失或不包含 safety-identifier → 整个 runner
+ *     SKIPPED（exit 0 + SKIPPED 提示），**不**算"passed"，CI 应把它从
+ *     regular 流水线剔除。
+ *   - 即便 fixture 自己再检查 TEST_DATABASE_URL，runner 层也再防一层。
+ *
  * Run with: npx tsx tests/integration/run.ts
+ * 或：     TEST_DATABASE_URL=postgres://...?safety-identifier=test_db_xxx npm run test:integration
  */
 import { readdirSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -23,6 +32,21 @@ import { join, dirname } from 'node:path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// 顶层 SKIP 闸门：TEST_DATABASE_URL + safety-identifier 必须同时存在。
+const testDatabaseUrl = process.env.TEST_DATABASE_URL ?? '';
+const safetyIdentifierOk = /safety[_-]?identifier=test_/i.test(testDatabaseUrl);
+if (!testDatabaseUrl || !safetyIdentifierOk) {
+  console.warn(
+    '[integration] SKIPPED: TEST_DATABASE_URL 未设置或不包含 "safety-identifier=test_..." 标记。' +
+      ' 为避免误连共享 / 生产数据库，整个 integration runner 不执行任何 fixture。',
+  );
+  console.warn(
+    '  → 设置示例: TEST_DATABASE_URL="postgres://user:pass@host:5432/db_test?safety-identifier=test_db_$(date +%s)"',
+  );
+  console.log('\nAll integration fixtures SKIPPED.');
+  process.exit(0);
+}
 
 const here = readdirSync(__dirname)
   .filter(

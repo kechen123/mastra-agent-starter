@@ -502,7 +502,15 @@ export async function* streamAgent(
       // 必须通过 core/knowledge/search.ts wrapper 调用；retriever 本身已按
       // workspace_id 过滤（防御深度），但 wrapper 仍负责抛 CrossWorkspaceAccessError
       // 给上层，避免泄露 ID 存在性。禁止直连 retriever 绕过 workspaceId 校验。
-      const retrieved = await searchKnowledgeBase(workspaceId, knowledgeBaseId, prompt);
+      //
+      // AbortSignal 透传：用户停止 / 超时立即中断 Embedding API 上游 fetch。
+      const retrieved = await searchKnowledgeBase(
+        workspaceId,
+        knowledgeBaseId,
+        prompt,
+        5,
+        input.abortSignal,
+      );
       if (retrieved.length === 0) {
         // citations=false 的 Agent 也会发出同样的 done 事件，但 citations
         // 数组为空；下游消费者按 capabilities.citations 自己忽略即可。

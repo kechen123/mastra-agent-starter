@@ -185,6 +185,49 @@ function resolveRagEnabled(): boolean {
 }
 const ragEnabled = resolveRagEnabled();
 
+/**
+ * RAG 相似度阈值（cosine similarity，越大越相关）。
+ *
+ * 检索后的 chunk 必须 similarity >= RAG_MIN_SIMILARITY 才会进入引用列表；
+ * 全部低于阈值时 retriever 视为"未命中可靠数据"，agent 走"无可引用资料"
+ * 语义，不再注入无关片段。
+ *
+ * 阈值依赖模型 / 数据集；切换 Embedding 模型或更换知识库语料后必须重新
+ * 校准。默认 0.5 仅作为起步值，生产环境应在 `.env` 显式覆盖。
+ *
+ * 范围严格 [0, 1]，区间外直接抛错，避免静默。
+ */
+function resolveRagMinSimilarity(): number {
+  const raw = process.env.RAG_MIN_SIMILARITY;
+  if (raw === undefined || raw === '') return 0.5;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    throw new Error(`RAG_MIN_SIMILARITY 必须在 [0, 1] 之间，实际: ${raw}`);
+  }
+  return n;
+}
+const ragMinSimilarity = resolveRagMinSimilarity();
+
+/**
+ * Embedding 上游请求超时（毫秒）。
+ *
+ * 通过 `AbortSignal.timeout()` 注入 Embedding API fetch；超时即归类为
+ * `EmbeddingError('network', ...)`（上游按"未命中"处理，绝不抛原始 fetch
+ * 错误文本）。
+ *
+ * 默认 15000ms；超时参数依赖上游 SLA 与 batch size，运维按需覆盖。
+ */
+function resolveEmbeddingTimeoutMs(): number {
+  const raw = process.env.EMBEDDING_TIMEOUT_MS;
+  if (raw === undefined || raw === '') return 15_000;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`EMBEDDING_TIMEOUT_MS 必须是正整数（毫秒），实际: ${raw}`);
+  }
+  return n;
+}
+const embeddingTimeoutMs = resolveEmbeddingTimeoutMs();
+
 const llm = resolveLlmConfig();
 const deploymentProfile = resolveDeploymentProfile();
 
@@ -209,4 +252,6 @@ export const config = {
   embeddingModel: process.env.EMBEDDING_MODEL ?? 'doubao-embedding-vision-251215',
   embeddingDim,
   databaseEmbeddingDim: DATABASE_EMBEDDING_DIM,
+  ragMinSimilarity,
+  embeddingTimeoutMs,
 } as const;
