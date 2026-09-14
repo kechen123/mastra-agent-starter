@@ -23,6 +23,7 @@ import {
 } from '../../../modules/idempotency/repository.js';
 import {
   convergeRunningToolExecutions,
+  getToolExecutionsByMessage,
 } from '../../../modules/conversations/tool-executions.js';
 import {
   createDraftConversation,
@@ -369,9 +370,26 @@ export const sharedHandlers = {
       );
       currentRunByMessage = new Map(r.rows.map((row) => [row.id, row.current_run_id ?? '']));
     }
-    const messages = detail.messages.map((m) => ({
-      ...m,
-      currentRunId: currentRunByMessage.get(m.id) ?? null,
+    const messages = await Promise.all(detail.messages.map(async (m) => {
+      const executions = m.role === 'assistant'
+        ? await getToolExecutionsByMessage(auth.workspaceId, m.id)
+        : [];
+      return {
+        ...m,
+        currentRunId: currentRunByMessage.get(m.id) ?? null,
+        tools: executions.map((execution) => ({
+          toolCallId: execution.id,
+          toolName: execution.toolName,
+          status: execution.status === 'success'
+            ? 'completed'
+            : execution.status === 'running' || execution.status === 'pending'
+              ? 'running'
+              : 'failed',
+          ...(execution.status === 'error' || execution.status === 'cancelled'
+            ? { errorCode: 'tool_error' }
+            : {}),
+        })),
+      };
     }));
     const responseBody = { conversation: detail.conversation, messages };
     const response = context.json(responseBody);

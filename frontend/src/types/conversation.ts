@@ -28,6 +28,12 @@ export interface Message {
   citations: Citation[];
   status: 'pending' | 'streaming' | 'completed' | 'stopped' | 'failed';
   createdAt: string;
+  /** V2 conversation detail 对 assistant message 附带的已持久化 Tool 状态。 */
+  tools?: Array<
+    | { toolCallId: string; toolName: string; status: 'running' }
+    | { toolCallId: string; toolName: string; status: 'completed' }
+    | { toolCallId: string; toolName: string; status: 'failed'; errorCode: string }
+  >;
 }
 
 export interface AgentCapabilities {

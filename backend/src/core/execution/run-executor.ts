@@ -42,6 +42,11 @@ import { config } from '../../config.js';
 import {
   getConversationWithMessages,
 } from '../../modules/conversations/service.js';
+import {
+  createToolExecution,
+  finalizeToolExecution,
+} from '../../modules/conversations/tool-executions.js';
+import type { Citation } from '../../modules/citations/types.js';
 import { logRequest } from '../../infrastructure/logging/request-id.js';
 import { getRunEventsBus } from '../../modules/runs/run-events-bus.js';
 import { getLiveDeltaBus } from '../../modules/runs/live-delta-bus.js';
@@ -91,6 +96,9 @@ interface ActiveExecution {
   // 通过 publishLiveDelta 推送；与 checkpoint 节流独立。
   liveBuffer: string;
   liveLastFlushAt: number;
+  citations: Citation[];
+  /** Mastra toolCallId → 项目 tool_executions.id，供完成/失败时落库。 */
+  toolExecutionMap: Map<string, string>;
   /**
    * PR-3.3 — 是否处于"工具调用挂起审批"分支：streamAgent 推完
    * approval-requested 事件后自然结束；Run 状态保持 waiting_approval，
@@ -777,6 +785,8 @@ async function consumeResumeStream(
     lastCheckpointLength: 0,
     liveBuffer: '',
     liveLastFlushAt: Date.now(),
+    citations: [],
+    toolExecutionMap: new Map(),
     armedForResume: false,
   };
   activeExecutions.set(r.id, execution);
@@ -1062,6 +1072,7 @@ async function consumeResumeStream(
       if (event.type === 'done') {
         exitType = 'done';
         exitContent = event.content;
+        execution.citations = event.citations;
         break;
       }
       if (event.type === 'stopped') {
@@ -1147,6 +1158,8 @@ async function executeRun(row: Record<string, unknown>): Promise<void> {
     lastCheckpointLength: 0,
     liveBuffer: '',
     liveLastFlushAt: Date.now(),
+    citations: [],
+    toolExecutionMap: new Map(),
     armedForResume: false,
   };
   activeExecutions.set(r.id, execution);
@@ -1161,9 +1174,11 @@ async function executeRun(row: Record<string, unknown>): Promise<void> {
 
   // 加载历史消息（V2.3.6 §5.1：workspace 严格隔离）
   let history;
+  let knowledgeBaseId: string | null = null;
   try {
     const detail = await getConversationWithMessages(r.workspace_id, r.conversation_id);
     history = detail?.messages ?? [];
+    knowledgeBaseId = detail?.conversation.knowledgeBaseId ?? null;
   } catch (err) {
     await failRun(r, 'failed', 'PROVIDER_UNAVAILABLE', execution, err instanceof Error ? err : new Error(String(err)));
     clearInterval(heartbeatTimer);
@@ -1213,7 +1228,7 @@ async function executeRun(row: Record<string, unknown>): Promise<void> {
       agentId: r.agent_id,
       prompt: extractPromptFromHistory(history),
       conversationId: r.conversation_id,
-      knowledgeBaseId: null,
+      knowledgeBaseId,
       history,
       abortSignal: abortController.signal,
       runId: r.id,
@@ -1222,7 +1237,7 @@ async function executeRun(row: Record<string, unknown>): Promise<void> {
       requesterId: r.created_by,
     })) {
       await handleStreamEvent(event, execution);
-      if (event.type === 'done') { exitType = 'done'; exitContent = event.content; break; }
+      if (event.type === 'done') { exitType = 'done'; exitContent = event.content; execution.citations = event.citations; break; }
       if (event.type === 'stopped') { exitType = 'stopped'; exitContent = event.content; break; }
       if (event.type === 'error') { exitType = 'error'; exitError = event.error; break; }
       // PR-3.3: 工具调用挂起审批 → streamAgent 已经把 Run 推到
@@ -1305,15 +1320,53 @@ async function handleStreamEvent(event: StreamEvent, execution: ActiveExecution)
     }
     return;
   }
-  if (event.type === 'tool-call-start' || event.type === 'tool-call-complete' || event.type === 'tool-call-error') {
-    // 阶段 2 的 tool 事件占位（与决策 4 对齐 type 集合）；phase 3 接入 Tool Policy 后再做完整 sink。
-    const map: Record<string, RunEventType> = {
-      'tool-call-start': 'tool-call-started',
-      'tool-call-complete': 'tool-call-completed',
-      'tool-call-error': 'run-failed',
-    };
-    const payload = event as unknown as Record<string, unknown>;
-    await writeRunEvent(execution, map[event.type] ?? 'content-checkpoint', payload);
+  if (event.type === 'tool-call-start') {
+    try {
+      const executionId = await createToolExecution(
+        execution.workspaceId,
+        execution.assistantMessageId,
+        event.toolName,
+        event.input,
+      );
+      execution.toolExecutionMap.set(event.toolCallId, executionId);
+    } catch (err) {
+      logger.error({ msg: 'create tool execution failed', runId: execution.runId, err });
+    }
+    await writeRunEvent(execution, 'tool-call-started', {
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+    });
+    return;
+  }
+  if (event.type === 'tool-call-complete') {
+    const executionId = execution.toolExecutionMap.get(event.toolCallId);
+    if (executionId) {
+      try {
+        await finalizeToolExecution(execution.workspaceId, executionId, event.output, 'success');
+      } catch (err) {
+        logger.error({ msg: 'finalize tool execution failed', runId: execution.runId, err });
+      }
+    }
+    await writeRunEvent(execution, 'tool-call-completed', {
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+    });
+    return;
+  }
+  if (event.type === 'tool-call-error') {
+    const executionId = execution.toolExecutionMap.get(event.toolCallId);
+    if (executionId) {
+      try {
+        await finalizeToolExecution(execution.workspaceId, executionId, null, 'error', 'tool_error');
+      } catch (err) {
+        logger.error({ msg: 'finalize failed tool execution failed', runId: execution.runId, err });
+      }
+    }
+    await writeRunEvent(execution, 'tool-call-failed', {
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      errorCode: 'tool_error',
+    });
     return;
   }
 }
@@ -1417,9 +1470,9 @@ async function completeRun(r: QueuedRow, execution: ActiveExecution, content: st
     }
     await client.query(
       `UPDATE messages
-          SET content = $3, citations = '[]'::jsonb, status = 'completed'
+          SET content = $3, citations = $4::jsonb, status = 'completed'
         WHERE id = $1 AND workspace_id = $2`,
-      [r.assistant_message_id, r.workspace_id, content],
+      [r.assistant_message_id, r.workspace_id, content, JSON.stringify(execution.citations)],
     );
     await writeFinalCheckpoint(client, r, execution, content);
     await insertRunEvent(client, {

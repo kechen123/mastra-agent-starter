@@ -8,6 +8,8 @@
 
 > **PR-4 状态（2026-09-11，第二轮 Codex review 后）**：PR-4.1 / PR-4.2 / PR-4.3 **代码已完成**；**真实 PostgreSQL 端到端 18 passed、0 failed**（Core-only 16 + RAG 2，两套用例分别在独立进程运行：`config.ragEnabled` 由本进程 env 决定，跟生产路径语义完全一致；不修改生产 `config` 模块，不调用真实 embedding API，不泄露真实 key）。本节关于 Phase 3.x 的描述维持原状；PR-4 协议与已验证事实见下文 §7。**staging / production readiness 仍需在 4 类边界完成演练**：(1) 多进程 Worker 真并行；(2) 真实 MinerU；(3) 真实 Embedding Provider HTTP；(4) 浏览器前后端端到端联调。
 
+> **2026-09-14 V2 聊天链路修复**：Run Executor 从会话真实读取 `knowledgeBaseId` 并持久化 Agent 返回的 citations；Tool 调用在 `tool_executions` 与 `agent_run_events` 双向留痕，SSE 新增 `tool-call-failed`，前端实时及刷新恢复均可展示 Tool 状态；前端停止请求切换到 `/v1/v2alpha/messages/:id/stop`。已通过 backend typecheck、unit fixtures 与 frontend production build；尚未进行真实浏览器/模型端到端验证。
+
 ## 概述
 
 Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持通用对话和知识库问答两种 Agent 模式。系统采用前后端分离架构，使用 PostgreSQL 持久化数据，并通过 SSE 流式传输实现实时对话体验。

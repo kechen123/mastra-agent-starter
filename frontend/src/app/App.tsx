@@ -578,7 +578,7 @@ function App() {
       const { messages: loadedMessages } = await getConversation(id)
       if (seq !== loadConversationSeqRef.current) return
       setConversationState({ type: 'persisted', id })
-      setMessages(loadedMessages.map((m) => m.role === 'user' ? { id: m.id, role: 'user', content: m.content, status: m.status as 'completed' | 'failed', createdAt: m.createdAt } : { id: m.id, role: 'assistant', content: m.content, citations: m.citations, status: m.status as Extract<ChatMessage, { role: 'assistant' }>['status'], createdAt: m.createdAt }))
+      setMessages(loadedMessages.map((m) => m.role === 'user' ? { id: m.id, role: 'user', content: m.content, status: m.status as 'completed' | 'failed', createdAt: m.createdAt } : { id: m.id, role: 'assistant', content: m.content, citations: m.citations, status: m.status as Extract<ChatMessage, { role: 'assistant' }>['status'], createdAt: m.createdAt, tools: m.tools }))
       if (navigation === 'push') setConversationUrl(id)
       else if (navigation === 'replace') replaceConversationUrl(id)
       // V2 SSE 重连：最后一条 assistant message 若仍携带 currentRunId，
@@ -692,6 +692,23 @@ function App() {
       // 实时增量：直接合并到 React state；缺失允许——下一次 checkpoint
       // 仍会通过 applyCheckpoint 收敛。
       appendLiveDelta(event.payload.text)
+      return
+    }
+    if (event.type === 'tool-call-started' || event.type === 'tool-call-completed' || event.type === 'tool-call-failed') {
+      setMessages((current) => current.map((message) => {
+        if (message.role !== 'assistant' || message.id !== streamingAssistantIdRef.current) return message
+        const nextTool = event.type === 'tool-call-started'
+          ? { toolCallId: event.payload.toolCallId, toolName: event.payload.toolName, status: 'running' as const }
+          : event.type === 'tool-call-completed'
+            ? { toolCallId: event.payload.toolCallId, toolName: event.payload.toolName, status: 'completed' as const }
+            : { toolCallId: event.payload.toolCallId, toolName: event.payload.toolName, status: 'failed' as const, errorCode: event.payload.errorCode }
+        const tools = message.tools ?? []
+        const existingIndex = tools.findIndex((tool) => tool.toolCallId === nextTool.toolCallId)
+        const nextTools = existingIndex === -1
+          ? [...tools, nextTool]
+          : tools.map((tool, index) => index === existingIndex ? nextTool : tool)
+        return { ...message, tools: nextTools }
+      }))
       return
     }
   }

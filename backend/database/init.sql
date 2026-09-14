@@ -355,6 +355,7 @@ CREATE TABLE agent_run_events (
                  'content-checkpoint',
                  'tool-call-started',
                  'tool-call-completed',
+                 'tool-call-failed',
                  'approval-requested',
                  'approval-resolved',
                  'run-resumed',

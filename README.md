@@ -7,6 +7,7 @@
 ## 开箱即用
 
 - **可追溯的智能对话**：支持通用问答、SSE 流式输出、停止生成与重新生成。
+- **V2 聊天链路闭环**：Run Executor 透传会话绑定的知识库并持久化 citations；Tool 的开始、完成、失败状态可经 Run SSE 实时展示，刷新会话后从业务表恢复；停止生成走 `/v1/v2alpha/messages/:id/stop` 主接口。
 - **带引用的知识库问答**：文档异步入库（HTTP 202 → 后台 ingestion Worker 推进 parsing / chunking / embedding / finalizing）；Core 模式下 chunk 文本落库可被引用，RAG 启用时向量检索补充。**PR-4.1 / 4.2 / 4.3 已完成**——异步管线已落代码并经真实 PostgreSQL 端到端 18 passed、0 failed（详见下方 PR-4 验证状态块）；引用功能**未**达到 staging / production readiness，仍需在真实多进程 / 真实 Embedding Provider / 真实 MinerU / 浏览器端到端四项边界完成演练。
 - **可组合的 Agent 能力**：按 Agent 组合知识库、Tool 和 Skill，避免为不同业务复制运行时。
 - **受控的工具与技能体系**：Tool 统一注册、执行留痕；Skill 支持内置、本地业务和 skills.sh 市场来源。

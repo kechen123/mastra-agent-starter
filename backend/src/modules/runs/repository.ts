@@ -26,6 +26,7 @@ export type RunEventType =
   | 'content-checkpoint'
   | 'tool-call-started'
   | 'tool-call-completed'
+  | 'tool-call-failed'
   | 'approval-requested'
   | 'approval-resolved'
   | 'run-resumed'

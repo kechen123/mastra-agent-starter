@@ -2,6 +2,8 @@
 
 > **当前执行进度（2026-09-08 PR-3.3.2 / 3.3.2.1 实测验证收尾）**：PR-3.3.1 的本机真实 SDK / 模型基础三路径、pending 后重启批准、107 项真实 PG + fake facade 集成均通过；PR-3.3.2 / 3.3.2.1 本轮新增四项 PG 集成已 Codex 实跑通过——`hard-crash-lease-recovery.ts` 32 passed, 0 failed；`multi-process-resume.ts` 9 passed, 0 failed；`executor-terminal-lease-fence.ts` `done / stopped / error` 三场景全部通过；`approval-reconcile-safety.ts` 通过。Backend `npm run typecheck`、Backend unit fixtures、`git diff --check`、frontend `npm run build` 均通过（前端仅保留 chunk-size / ineffective dynamic import warning，不视作失败）。
 >
+> **2026-09-14 V2 聊天链路补齐**：知识库 ID 与 citations 已进入 Run Executor 主链路；Tool 开始/完成/失败事件同时进入业务执行留痕、可回放 Run 事件和前端消息状态；停止请求统一为 V2 主接口。backend typecheck、unit fixtures、frontend build 已通过；真实浏览器/模型端到端仍待验证。
+>
 > **本轮新增（PR-3.3.2 / 3.3.2.1）**：
 > - **生产代码修复**：`sweepExpiredApprovalResumeLeases`（`backend/src/core/execution/approval-resume-recovery.ts`——PR-3.3.2.1 从 `modules/tool-policy/repository.ts` 拆分到 execution 层以消除跨聚合编排违反）—— 修复 Codex 2026-09-07 第一次 review 发现的**阻塞级 crash window**（worker 进程被直接杀死时 JavaScript catch 不会执行，原 sweeper 会把孤儿 Run 错误地写成 `failed` + `LEASE_EXPIRED`，留下不可恢复的孤儿组合）。按 Tool 元数据 + approval 状态分流恢复。新增事件类型 `run-resume-reclaimed`。
 > - **跨实例并发修复**：普通 `sweepExpiredLeases` 的 SQL 增加 `NOT EXISTS` 子句**排除** approval-resume Run（`tool_approval_requests.status IN ('approved','declined','expired') AND mastra_resume_started_at IS NOT NULL`）——不能依赖调用顺序，跨进程下两个 sweeper 真并行时仍必须分流。同时 `sweepExpiredLeases` 写入 `failed` 时清 `lease_owner / lease_expires_at / heartbeat_at`，避免心跳 / sweeper 重复触发。

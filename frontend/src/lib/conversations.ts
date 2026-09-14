@@ -220,6 +220,7 @@ export type V2RunEvent =
   | { id: number; type: 'content-delta'; payload: { runId: string; text: string } }
   | { id: number; type: 'tool-call-started'; payload: { toolCallId: string; toolName: string } }
   | { id: number; type: 'tool-call-completed'; payload: { toolCallId: string; toolName: string } }
+  | { id: number; type: 'tool-call-failed'; payload: { toolCallId: string; toolName: string; errorCode: string } }
   | { id: number; type: 'approval-requested'; payload: unknown }
   | { id: number; type: 'approval-resolved'; payload: unknown }
   | { id: number; type: 'run-completed'; payload: { contentLength: number } }
@@ -263,6 +264,7 @@ export function streamRunEvents(
     source.addEventListener('content-delta', dispatch);
     source.addEventListener('tool-call-started', dispatch);
     source.addEventListener('tool-call-completed', dispatch);
+    source.addEventListener('tool-call-failed', dispatch);
     source.addEventListener('approval-requested', dispatch);
     source.addEventListener('approval-resolved', dispatch);
     source.addEventListener('run-completed', dispatch);
@@ -429,7 +431,7 @@ export function regenerateMessage(
 
 export async function stopMessage(assistantMessageId: string): Promise<void> {
   const baseUrl = getApiBaseUrl();
-  const response = await fetch(`${baseUrl}/messages/${assistantMessageId}/stop`, {
+  const response = await fetch(`${baseUrl}${V2_PREFIX}/messages/${assistantMessageId}/stop`, {
     method: 'POST',
     credentials: 'same-origin',
   });
