@@ -348,7 +348,7 @@ export function createMastraStorage(opts?: { connectionString?: string }): unkno
 
 存储的 schema 隔离与业务 `init.sql` 完全独立：业务表走 `public`，Mastra 内部表走 `mastra_runtime`；两个 schema 的 DDL 来源互不交叉。
 
-### 12. LLM Provider 边界（DeepSeek-first）
+### 12. LLM Provider 边界（DeepSeek / MiniMax）
 
 位于 `backend/src/infrastructure/llm/`：
 
@@ -357,10 +357,11 @@ infrastructure/llm/
 ├── types.ts                # LlmProviderAdapter 契约
 ├── registry.ts             # Provider 解析 + resolveDefaultChatModel
 └── providers/
-    └── deepseek.ts         # 唯一已实现的 Provider Adapter
+    ├── deepseek.ts         # DeepSeek Adapter
+    └── minimax.ts          # MiniMax Adapter（MiniMax-M2.7 等）
 ```
 
-**当前 Starter 仅启用 DeepSeek**；OpenAI / Anthropic / Gemini / Azure / Ollama / OpenAI-compatible 部署的真实调用均**不在本阶段范围内**，仅在 `providers/` 目录下预留清晰的扩展边界。
+**当前 Starter 已注册 DeepSeek 与 MiniMax 两个 Provider**；OpenAI / Anthropic / Gemini / Azure / Ollama / OpenAI-compatible 部署的真实调用均**不在本阶段范围内**，仅在 `providers/` 目录下预留清晰的扩展边界。
 
 依赖方向：
 
@@ -379,11 +380,43 @@ infrastructure/llm/
 
 配置入口：
 
-- `LLM_PROVIDER` 默认 `deepseek`；是否已注册由 Provider Registry 统一拒绝，新增 Adapter 后无需修改配置层；
-- `LLM_MODEL` 默认 `deepseek-v4-flash`（不含 `deepseek/` 前缀）；
-- `DEEPSEEK_API_KEY` 在首次调用 `resolveDefaultChatModel()`（创建 Agent / 发起模型调用）时校验；能力描述接口不校验，缺失时不输出 key 本身；
-- 历史变量 `AGENT_CHAT_MODEL=deepseek/<model>` 仍可解析为对应模型并输出弃用警告；其他 Provider 前缀被拒绝；
+- `LLM_PROVIDER` 默认 `deepseek`；可设置为 `minimax` 切换到 MiniMax Provider；未注册值由 Provider Registry 统一拒绝；
+- `LLM_MODEL` 默认 `deepseek-v4-flash`（不含 `deepseek/` 前缀）；切到 MiniMax 时推荐设为 `MiniMax-M2.7`（不含 `minimax/` 前缀）；
+- `MINIMAX_REGION` 仅对 `LLM_PROVIDER=minimax` 生效；默认 `global`，中国区 Token Plan 需设为 `cn`；非法值由 MiniMax Adapter 抛明确中文错误；
+- Provider 对应 API Key（如 `DEEPSEEK_API_KEY` / `MINIMAX_API_KEY`）在首次调用 `resolveDefaultChatModel()`（创建 Agent / 发起模型调用）时校验；能力描述接口不校验，缺失时不输出 key 本身；
+- 历史变量 `AGENT_CHAT_MODEL=deepseek/<model>` 仍可解析为对应模型并输出弃用警告；其他 Provider 前缀（含 `minimax/`）被拒绝，强制走新变量；
 - `XUANSHU_CHAT_MODEL` 仅输出弃用警告，不参与解析。
+
+#### 12.0 Adapter 通用契约（扩展后）
+
+为支持"Adapter 直接构造 Language Model 绕过 Mastra 内置 dispatch"，`LlmProviderAdapter` 接口在原有 `resolveModelId()` / `assertCredentials()` 之外新增 `resolveLanguageModel()`：
+
+- `resolveModelId(model)`：返回完整模型 ID 字符串 `${providerId}/${model}`，**仅供 capabilities / 日志 / Run 元数据使用**。
+- `resolveLanguageModel(model)`：返回 `MastraCompatibleModel | string`（即 `LanguageModelV3 | string`）。
+  - DeepSeek 默认实现：直接 `return resolveModelId(model)`，交给 Mastra 内置 dispatch；请求路径与历史完全一致。
+  - MiniMax 重写：调用 `createAnthropic({ apiKey, baseURL })` 构造 Provider，再以 `modelId` 调用得到 `LanguageModelV3`；`baseURL` 按 `MINIMAX_REGION` 白名单选定。
+- `assertCredentials()`：未变，仅校验对应 Provider 的 API Key 非空，错误信息明确中文且不输出 key。
+
+`ProviderConfig`（`{ region?: string }`）由 Registry 在 `resolveDefaultChatModel()` 调用时传给具体 Adapter；Adapter 必须按自身白名单校验，禁止让任意环境变量直接指定 URL。
+
+#### 12.1 MiniMax 接入说明
+
+- **Provider id**：`minimax`；显示名 `MiniMax`；
+- **模型 ID 拼装**：`resolveModelId('MiniMax-M2.7')` 返回 `minimax/MiniMax-M2.7`（与 DeepSeek 同构 `${providerId}/${model}`）。本结果仅用于 capabilities / 日志 / Run 元数据，**不**用于构造 Agent——Agent factory 真正消费的是 `resolveLanguageModel()` 返回的 `LanguageModelV3` 实例。
+- **凭据**：`MINIMAX_API_KEY`；Adapter 的 `assertCredentials()` 只判断"非空字符串"，错误信息为明确中文，**不**包含 key 本身。
+- **区域（region）**：由 `MINIMAX_REGION` 控制，仅允许以下白名单取值：
+
+  | 取值 | Anthropic 兼容 baseURL | 用途 |
+  | --- | --- | --- |
+  | `global`（默认；未配置时） | `https://api.minimax.io/anthropic/v1` | 国际站 |
+  | `cn` | `https://api.minimaxi.com/anthropic/v1` | 中国区 Token Plan Key |
+
+  - Adapter 集中维护 region ↔ baseURL 白名单；任何外部环境变量都**不能**直接指定 URL；
+  - 非法 region 在 Adapter 构造时立刻抛错（明确中文，错误信息不含 env 内容），绝不静默回退；
+  - 中国区 Token Plan Key 必须显式设 `MINIMAX_REGION=cn`，否则默认走国际站会收到 401 invalid api key。
+- **底层兼容路径**：本 Adapter 直接构造 `LanguageModelV3`，通过官方 `@ai-sdk/anthropic` v3.x（与 Mastra 1.65 bundled 的 AI SDK 主版本一致）加载；不依赖 Mastra 内置 Provider Registry，**绕开其对 minimax 默认指向国际站的硬编码**。这是 Starter 中第一个走"Adapter 自构造 Language Model"路径的 Provider；DeepSeek 仍走字符串路径（保持原请求路径不变）。
+- **范围**：本轮只实现"部署级默认模型切换"，不新增前端多模型选择、不改数据库 schema、不改 Run 的模型选择语义；切换 Provider 仍通过 `.env` 中的 `LLM_PROVIDER` / `LLM_MODEL` / `MINIMAX_REGION` 完成。
+- **未验证**：本次未连真实 MiniMax API；切换到 MiniMax 后的真实请求响应、流式输出、工具调用走的是 Adapter 直接构造的 Anthropic 兼容客户端，**不**在本次离线契约测试覆盖范围内——后续 staging e2e 需补真实 Provider 演练，覆盖 cn / global 双区域。
 
 ### 13. 单进程会话执行互斥
 

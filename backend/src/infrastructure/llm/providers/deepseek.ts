@@ -1,7 +1,8 @@
-import type { LlmProviderAdapter } from '../types.js';
+import type { LlmProviderAdapter, MastraCompatibleModel } from '../types.js';
 
 /**
- * DeepSeek Provider Adapter —— 当前 Starter 唯一正式启用的 LLM Provider。
+ * DeepSeek Provider Adapter —— 当前 Starter 唯一走"返回完整模型 ID 字符串 +
+ * Mastra 内置 Provider Registry 解析"路径的 LLM Provider。
  *
  * 这是后端代码中"唯一一个"知道以下事实的地方：
  *   - DeepSeek 的 Provider id 是 `deepseek`；
@@ -17,6 +18,14 @@ import type { LlmProviderAdapter } from '../types.js';
  * 错误信息规则：
  *   - 使用明确中文；
  *   - 严禁把 API Key、Header、Authorization 字符串写进错误信息。
+ *
+ * 关于 `resolveLanguageModel()`：
+ *   - 本 Adapter **不覆写**默认实现，直接返回 `resolveModelId()` 字符串；
+ *   - 这意味着 Agent factory 真正创建 Agent 时仍把 `deepseek/<model>`
+ *     传给 Mastra，由 Mastra 内置 Provider Registry / dispatch 解析；
+ *   - 与 PR-5.2 之前的行为完全一致，请求路径不变；
+ *   - MiniMax 因为需要强制选定 baseURL 才覆写该方法，DeepSeek 无此需求，
+ *     因此保持"返回字符串"以最小化风险面。
  */
 export const deepseekAdapter: LlmProviderAdapter = {
   id: 'deepseek',
@@ -28,6 +37,13 @@ export const deepseekAdapter: LlmProviderAdapter = {
     // 这里不做额外校验（model 合法性由框架 + Provider SDK 负责），
     // 避免在本适配器里硬编码未知模型白名单导致新增模型时要再改此处。
     return `${this.id}/${model}`;
+  },
+
+  resolveLanguageModel(model: string): MastraCompatibleModel | string {
+    // 默认行为：把"完整模型 ID 字符串"交还给 Mastra 内置 Provider Registry。
+    // 不在这里构造 AI SDK Provider，避免无端改变 DeepSeek 的请求路径；
+    // 也不在这里读 env / 做网络探测，避免触发 assertCredentials。
+    return this.resolveModelId(model);
   },
 
   assertCredentials(): void {

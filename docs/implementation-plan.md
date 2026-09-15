@@ -977,6 +977,27 @@ npx tsx src/scripts/staging-tool-approval-e2e.ts
 
 **注意**：不再受 Starter 单 Provider 限制；Registry 的拒绝逻辑改为「未注册 provider 在首次解析时报错」而不是「永远只允许 deepseek」。
 
+> **本轮已完成（MiniMax）**：在不引入前端模型下拉选择 / 数据库 model profile 的前提下，
+> 在 Provider Registry 中并入 `minimax` Adapter 与 `deepseekAdapter` 共存；
+> 配置层 `LLM_PROVIDER=minimax` + `LLM_MODEL=MiniMax-M2.7` + `MINIMAX_API_KEY=…`
+> + `MINIMAX_REGION=cn|global`（默认 `global`）即可在部署级把默认聊天模型切换到 MiniMax。
+>
+> 第二轮新增：把 Adapter 通用契约从"只发射字符串"扩展为"可选自构造 Language Model"；
+> MiniMax Adapter 直接调用 `@ai-sdk/anthropic@^3.0.103`（与 Mastra 1.65 bundled 的
+> AI SDK v6 主版本一致）构造 `LanguageModelV3`，按 region 白名单显式选定 baseURL：
+>
+> - `global`（默认；未配置时）→ `https://api.minimax.io/anthropic/v1`
+> - `cn` → `https://api.minimaxi.com/anthropic/v1`
+>
+> 这避免了 Mastra 1.65 内置 Provider Registry 对 `minimax` 默认指向国际站导致
+> 中国区 Token Plan Key 收到 401 invalid api key 的问题。DeepSeek 仍走"返回字符串 +
+> Mastra 内置 dispatch"路径，请求路径与历史完全一致。
+>
+> Adapter 集中维护 region ↔ baseURL 白名单，非法 region 立即抛明确中文错误，
+> 绝不静默回退；`MINIMAX_API_KEY` 仍只在实际创建 MiniMax 模型时校验，错误信息
+> 不暴露 key。本次未连真实 MiniMax API，未覆盖真实请求/响应/工具调用，staging e2e
+> 仍需后续在真实 Provider 下补演练，覆盖 cn / global 双区域。
+
 ### PR-5.4：`DEPLOYMENT_PROFILE=production` 解锁条件
 
 **Files**

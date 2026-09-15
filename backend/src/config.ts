@@ -56,22 +56,34 @@ function resolveDeploymentProfile(): DeploymentProfile {
  *   `GET /capabilities` 都会回传，避免任何硬编码。
  *
  * LLM 模型配置：
- * - 当前 Starter 唯一正式启用的 Provider 是 DeepSeek，因此下面默认把
- *     `chatProvider` 固定为 `'deepseek'`；扩展由
- *     `infrastructure/llm/registry.ts` 负责。
- * - `chatModel` 是**不含** Provider 前缀的"短模型名"，例如 `deepseek-v4-flash`。
- *   真正拼接成完整模型 ID（`deepseek/deepseek-v4-flash`）发生在
+ * - 当前 Starter 已支持 DeepSeek 与 MiniMax 两个 Provider；扩展 / 新增厂商
+ *     由 `infrastructure/llm/registry.ts` 统一注册，默认 `chatProvider` 仍为
+ *     `'deepseek'`，未配置环境变量时保持原行为。
+ * - `chatModel` 是**不含** Provider 前缀的"短模型名"，例如 `deepseek-v4-flash`、
+ *   `MiniMax-M2.7`。真正拼接成完整模型 ID（`deepseek/deepseek-v4-flash`、
+ *   `minimax/MiniMax-M2.7`）发生在
  *   `infrastructure/llm/registry.ts:resolveDefaultChatModel()` 中。
  *
  * 历史兼容性说明：
  * - `AGENT_CHAT_MODEL` 形如 `deepseek/<model>` 时，可解析为对应的 Provider + 短模型名，
  *   但会输出"已废弃"的警告，建议改用 `LLM_PROVIDER` + `LLM_MODEL`。
  * - `AGENT_CHAT_MODEL` 形如 `<其他 Provider>/<model>` 时，明确拒绝；
- *   不允许通过旧变量静默启用未注册的 Provider。
+ *   不允许通过旧变量静默启用未注册的 Provider（即使该 Provider 后续被注册）。
  * - `XUANSHU_CHAT_MODEL` 不再被任何源码读取；设置后仅输出警告，不参与解析。
  *
+ * MiniMax 区域选择：
+ * - `MINIMAX_REGION` 控制 MiniMax Provider 的 Anthropic 兼容端点；
+ *   `global` 指向 `https://api.minimax.io/anthropic/v1`，
+ *   `cn` 指向 `https://api.minimaxi.com/anthropic/v1`；
+ *   未配置时默认 `global`。中国区 Token Plan Key 必须设为 `cn`，否则
+ *   默认会发往国际站并收到 401 invalid api key。
+ * - 非法值校验统一收敛在 MiniMax Adapter（`infrastructure/llm/providers/minimax.ts`）
+ *   的 `resolveRegionBaseUrl()`；本配置层只读字符串、不维护白名单，
+ *   让 Adapter 成为 region ↔ baseURL 的唯一来源。
+ *
  * 凭据校验：
- * - `DEEPSEEK_API_KEY` 的"是否存在"由 Provider Adapter 在真正创建 Agent 时检查
+ * - 当前 Provider 对应 API Key（如 `DEEPSEEK_API_KEY` / `MINIMAX_API_KEY`）
+ *   的"是否存在"由 Provider Adapter 在真正创建 Agent 时检查
  *   （见 `infrastructure/llm/registry.ts:resolveDefaultChatModel()`）；
  *   本文件不读取、不输出 key 本身，也不强制启动期校验，
  *   以便 typecheck / 契约测试在无 key 的开发机或 CI 上顺利通过。
@@ -88,7 +100,7 @@ if (process.env.XUANSHU_CHAT_MODEL && !process.env.AGENT_CHAT_MODEL && !process.
  * 解析 LLM 配置：包含新变量优先、旧变量兼容解析。
  *
  * 行为优先级（从高到低）：
- *   1. `LLM_PROVIDER` + `LLM_MODEL`（推荐）；
+ *   1. `LLM_PROVIDER` + `LLM_MODEL`（推荐，可指向任何已注册的 Provider）；
  *   2. `AGENT_CHAT_MODEL=deepseek/<model>`（兼容，输出弃用警告）；
  *   3. 默认值 `deepseek` + `deepseek-v4-flash`。
  *
@@ -96,7 +108,8 @@ if (process.env.XUANSHU_CHAT_MODEL && !process.env.AGENT_CHAT_MODEL && !process.
  * - 新变量中的 Provider 是否已注册，由 `infrastructure/llm/registry.ts` 统一判定；
  *   配置层不维护 Provider 白名单，以保证新增 Adapter 时无需修改本文件。
  * - `AGENT_CHAT_MODEL` 形如 `<其他 Provider>/<model>` → 抛错。该变量是 DeepSeek
- *   时代的兼容入口，不能借此静默启用其他 Provider。
+ *   时代的兼容入口，不能借此静默启用其他 Provider；
+ *   如需切换到 MiniMax 等已注册 Provider，请改用 `LLM_PROVIDER` + `LLM_MODEL`。
  */
 function resolveLlmConfig(): { chatProvider: string; chatModel: string; deprecated: boolean } {
   const rawProvider = process.env.LLM_PROVIDER;
@@ -125,13 +138,15 @@ function resolveLlmConfig(): { chatProvider: string; chatModel: string; deprecat
   // 2) 旧 AGENT_CHAT_MODEL 兼容路径。
   if (hasLegacy) {
     const value = rawLegacy as string;
-    // 与当前 Starter 唯一正式支持的 Provider 前缀 `deepseek/` 保持一致；
+    // 与当前 Starter 唯一受"旧变量兼容"承认的 Provider 前缀 `deepseek/` 保持一致；
     // 这是"可被识别的旧变量"白名单，非 Provider-specific 校验逻辑。
+    // 其它 Provider（包括已注册的 MiniMax）必须改用新变量，避免旧变量被滥用为
+    // "未注册 Provider 的隐式入口"。
     const prefix = 'deepseek/';
     if (!value.startsWith(prefix)) {
       throw new Error(
-        `AGENT_CHAT_MODEL=${value} 不被允许：当前 Starter 仅启用 DeepSeek Provider；` +
-          '如需新增其他厂商，请改用 LLM_PROVIDER + LLM_MODEL，并在 infrastructure/llm/providers 中实现并注册 Adapter。',
+        `AGENT_CHAT_MODEL=${value} 不被允许：当前 Starter 已支持 DeepSeek、MiniMax；` +
+          '如需切换 Provider，请改用 LLM_PROVIDER + LLM_MODEL，并在 infrastructure/llm/providers 中实现并注册 Adapter。',
       );
     }
     const shortModel = value.slice(prefix.length);
@@ -231,14 +246,33 @@ const embeddingTimeoutMs = resolveEmbeddingTimeoutMs();
 const llm = resolveLlmConfig();
 const deploymentProfile = resolveDeploymentProfile();
 
+/**
+ * 读取 MiniMax 区域。
+ *
+ * 严格返回 `string | undefined`：把"未配置"与"配置为空字符串"都视为
+ * 未配置，由 Adapter 在内部决定是否 fallback 到 `global`。
+ *
+ * 不在本函数内做白名单校验——白名单是 MiniMax Adapter 自身的事实，
+ * 配置层不应持有 region ↔ baseURL 的映射。
+ */
+function resolveMinimaxRegion(): string | undefined {
+  const raw = process.env.MINIMAX_REGION;
+  if (raw === undefined || raw === '') return undefined;
+  return raw;
+}
+const minimaxRegion = resolveMinimaxRegion();
+
 export const config = {
   deploymentProfile,
   appName: process.env.APP_NAME ?? 'Mastra Agent Starter',
   appShortName: process.env.APP_SHORT_NAME ?? 'Mastra',
-  // Provider / 短模型名。完整模型 ID（`deepseek/<model>`）由
+  // Provider / 短模型名。完整模型 ID（`deepseek/<model>` 或 `minimax/<model>`）由
   // `infrastructure/llm/registry.ts:resolveDefaultChatModel()` 构造。
   chatProvider: llm.chatProvider,
   chatModel: llm.chatModel,
+  // MiniMax 区域；undefined 表示未配置，由 MiniMax Adapter 默认到 `global`。
+  // 非法值会在 Adapter 内抛中文错误。
+  minimaxRegion,
   // PR-4.1 §8.5：RAG 启用由 EMBEDDING_API_KEY 派生。
   // Core 模式下仍可读取这些字段（用于 ingest 路径），但 `ragEnabled=false`
   // 时所有 RAG-only 逻辑（vector 检索 / embedding 计算）必须跳过。

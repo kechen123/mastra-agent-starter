@@ -172,6 +172,7 @@ npm run build
 | 新增业务模块 | `backend/src/modules/`：保持与核心运行时分层，按 Workspace 传递并校验归属 |
 | 新增 HTTP API | `backend/src/server/routes/`：并在 `backend/src/server/bootstrap.ts` 的 `apiRoutes` 注册 |
 | 修改品牌或默认模型 | `backend/src/config.ts` 与环境变量 `APP_NAME`、`APP_SHORT_NAME`、`LLM_PROVIDER`、`LLM_MODEL` |
+| 切换默认 LLM Provider（DeepSeek ↔ MiniMax） | `.env` 中设置 `LLM_PROVIDER=minimax` + `LLM_MODEL=MiniMax-M2.7` + `MINIMAX_API_KEY=…`；中国区 Token Plan 需追加 `MINIMAX_REGION=cn`（默认 `global` → `https://api.minimax.io/anthropic/v1`，`cn` → `https://api.minimaxi.com/anthropic/v1`）。详情见 [架构 §12 / §12.1](docs/architecture.md) |
 
 新增 Agent、Tool 或 Skill 的常规路径是“复制模板 → 填写业务定义 → 在唯一入口注册”。开发约束与完整示例见 [扩展指南](docs/extending.md)。后端代码改动至少执行 `npm run typecheck`，前端代码改动至少执行 `npm run build`；不要把真实密钥、Token 或共享数据库配置提交到仓库。
 

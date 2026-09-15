@@ -378,16 +378,43 @@ console.warn = (...args) => {
   const reg = await import(regUrl);
   const provider = cfg.config.chatProvider;
   const model = cfg.config.chatModel;
+  const minimaxRegion = cfg.config.minimaxRegion;
   // 该入口不校验凭据，供 capabilities 等只读描述接口使用。
   const modelIdWithoutCredentials = reg.resolveDefaultChatModelId();
   // 调用 resolveDefaultChatModel 会触发 assertCredentials，因此缺 key 时会抛错。
+  // 返回值可能是字符串（DeepSeek）或 LanguageModel 实例（MiniMax）；
+  // 字符串路径：直接拿回完整模型 ID；对象路径：从 config.baseURL / modelId
+  // 提取关键信息供测试断言。
   let fullModelId = '';
+  let modelInfo = null;
   let credError = '';
+  let regionError = '';
   let exitCode = 0;
   try {
-    fullModelId = reg.resolveDefaultChatModel();
+    const resolved = reg.resolveDefaultChatModel();
+    if (typeof resolved === 'string') {
+      fullModelId = resolved;
+      modelInfo = { kind: 'string' };
+    } else {
+      // 反射读取 Provider SDK 内部字段；测试专用，生产路径不依赖此 hack。
+      const cfg2 = resolved && resolved.config ? resolved.config : null;
+      const baseURL = cfg2 && typeof cfg2.baseURL === 'string' ? cfg2.baseURL : null;
+      const providerName = cfg2 && typeof cfg2.provider === 'string' ? cfg2.provider : null;
+      const modelId = resolved && typeof resolved.modelId === 'string' ? resolved.modelId : null;
+      const specificationVersion = resolved && typeof resolved.specificationVersion === 'string'
+        ? resolved.specificationVersion
+        : null;
+      fullModelId = '';
+      modelInfo = { kind: 'languageModel', baseURL, providerName, modelId, specificationVersion };
+    }
   } catch (err) {
-    credError = err && err.message ? err.message : String(err);
+    const msg = err && err.message ? err.message : String(err);
+    // 区分 region 校验错误与凭据校验错误：region 错误不含"缺少凭据"
+    if (/不是已支持的区域/.test(msg)) {
+      regionError = msg;
+    } else {
+      credError = msg;
+    }
     exitCode = 5;
   }
   const info = (() => {
@@ -396,9 +423,12 @@ console.warn = (...args) => {
   console.log('LLM_RESOLVED', JSON.stringify({
     provider,
     model,
+    minimaxRegion,
     modelIdWithoutCredentials,
     fullModelId,
+    modelInfo,
     credError,
+    regionError,
     info,
   }));
   if (exitCode !== 0) process.exit(exitCode);
@@ -416,9 +446,21 @@ interface LlmChildResult {
   parsed: {
     provider: string;
     model: string;
+    minimaxRegion: string | null | undefined;
     modelIdWithoutCredentials: string;
     fullModelId: string;
+    modelInfo:
+      | { kind: 'string' }
+      | {
+          kind: 'languageModel';
+          baseURL: string | null;
+          providerName: string | null;
+          modelId: string | null;
+          specificationVersion: string | null;
+        }
+      | null;
     credError: string;
+    regionError: string;
     info: { provider: string; model: string; displayName: string } | null;
   } | null;
 }
@@ -434,7 +476,9 @@ async function runLlmChild(
   env.AGENT_CHAT_MODEL = '';
   env.LLM_PROVIDER = '';
   env.LLM_MODEL = '';
+  env.MINIMAX_REGION = '';
   env.DEEPSEEK_API_KEY = '';
+  env.MINIMAX_API_KEY = '';
   env.EMBEDDING_DIM = '2048';
   for (const [k, v] of Object.entries(envOverrides)) {
     if (v === undefined) delete env[k];
@@ -515,7 +559,8 @@ recordLlmChild(
       : 'parsed=<null>',
 );
 
-// 5.3 非 DeepSeek Provider 必须被明确拒绝（且明确中文）。
+// 5.3 未注册 Provider 必须被明确拒绝（且明确中文）。当前已注册
+// DeepSeek 与 MiniMax，未注册值（如 `openai`）必须被拒。
 const openai = await runLlmChild({
   LLM_PROVIDER: 'openai',
   LLM_MODEL: 'gpt-4o-mini',
@@ -523,8 +568,8 @@ const openai = await runLlmChild({
 });
 const openaiCombined = `${openai.stdout ?? ''}\n${openai.stderr ?? ''}`;
 recordLlmChild(
-  'LLM_PROVIDER=openai 必须显式抛错且提示当前仅启用 DeepSeek',
-  openai.code !== 0 && /仅启用 DeepSeek/.test(openaiCombined),
+  'LLM_PROVIDER=openai 必须显式抛错且提示当前已支持 DeepSeek、MiniMax',
+  openai.code !== 0 && /已支持 DeepSeek.*MiniMax/.test(openaiCombined),
   openai.code === 0
     ? `预期抛错但子进程成功退出。combined=${openaiCombined.trim() || '<empty>'}`
     : `code=${openai.code}, combined=${openaiCombined.trim() || '<empty>'}`,
@@ -608,6 +653,190 @@ recordLlmChild(
     : goodKey.parsed
       ? `parsed=${JSON.stringify(goodKey.parsed)}`
       : 'parsed=<null>',
+);
+
+// 5.7 MiniMax Provider：自定义 LLM_MODEL 必须拼出 minimax/MiniMax-M2.7；
+// resolveDefaultChatModel() 必须返回真实的 LanguageModelV3 实例（不是字符串），
+// 且 provider.baseURL 指向 global 默认端点。
+const minimax = await runLlmChild({
+  LLM_PROVIDER: 'minimax',
+  LLM_MODEL: 'MiniMax-M2.7',
+  MINIMAX_API_KEY: 'test-minimax-key',
+});
+recordLlmChild(
+  'LLM_PROVIDER=minimax + LLM_MODEL=MiniMax-M2.7 → minimax/MiniMax-M2.7（仅 capabilities）',
+  minimax.code === 0 &&
+    minimax.parsed !== null &&
+    minimax.parsed.provider === 'minimax' &&
+    minimax.parsed.model === 'MiniMax-M2.7' &&
+    minimax.parsed.modelIdWithoutCredentials === 'minimax/MiniMax-M2.7',
+  minimax.code !== 0
+    ? `code=${minimax.code}, combined=${((minimax.stdout ?? '') + (minimax.stderr ?? '')).trim() || '<empty>'}`
+    : minimax.parsed
+      ? `parsed=${JSON.stringify(minimax.parsed)}`
+      : 'parsed=<null>',
+);
+recordLlmChild(
+  'MiniMax Provider 配置下 displayName=MiniMax',
+  minimax.code === 0 && minimax.parsed?.info?.displayName === 'MiniMax',
+  minimax.parsed?.info ? `info=${JSON.stringify(minimax.parsed.info)}` : undefined,
+);
+recordLlmChild(
+  'resolveDefaultChatModel() 在 MiniMax 上返回 LanguageModel 实例（非字符串）',
+  minimax.code === 0 &&
+    minimax.parsed !== null &&
+    minimax.parsed.modelInfo !== null &&
+    minimax.parsed.modelInfo.kind === 'languageModel',
+  minimax.parsed?.modelInfo ? `modelInfo=${JSON.stringify(minimax.parsed.modelInfo)}` : 'modelInfo=<null>',
+);
+recordLlmChild(
+  'MiniMax Adapter 构造出的 LanguageModel.modelId === "MiniMax-M2.7"',
+  minimax.code === 0 &&
+    minimax.parsed?.modelInfo?.kind === 'languageModel' &&
+    minimax.parsed.modelInfo.modelId === 'MiniMax-M2.7',
+  minimax.parsed?.modelInfo ? `modelInfo=${JSON.stringify(minimax.parsed.modelInfo)}` : 'modelInfo=<null>',
+);
+recordLlmChild(
+  '未配置 MINIMAX_REGION 时 baseURL === "https://api.minimax.io/anthropic/v1"（默认 global）',
+  minimax.code === 0 &&
+    minimax.parsed?.modelInfo?.kind === 'languageModel' &&
+    minimax.parsed.modelInfo.baseURL === 'https://api.minimax.io/anthropic/v1',
+  minimax.parsed?.modelInfo ? `modelInfo=${JSON.stringify(minimax.parsed.modelInfo)}` : 'modelInfo=<null>',
+);
+recordLlmChild(
+  'MiniMax LanguageModel 实例的 specificationVersion 必须是 "v3"（与 Mastra 1.65 内置 dispatch 兼容）',
+  minimax.code === 0 &&
+    minimax.parsed?.modelInfo?.kind === 'languageModel' &&
+    minimax.parsed.modelInfo.specificationVersion === 'v3',
+  minimax.parsed?.modelInfo ? `modelInfo=${JSON.stringify(minimax.parsed.modelInfo)}` : 'modelInfo=<null>',
+);
+
+// 5.8 MiniMax Provider：缺 MINIMAX_API_KEY → 中文错误且不泄露 key。
+const SENSITIVE_MINIMAX_KEY = 'sk-minimax-very-secret-DO-NOT-LEAK';
+const noMinimaxKey = await runLlmChild({
+  LLM_PROVIDER: 'minimax',
+  LLM_MODEL: 'MiniMax-M2.7',
+  // 明确置空，避免测试进程从 .env 继承到真实 key。
+  MINIMAX_API_KEY: '',
+});
+recordLlmChild(
+  '缺少 MINIMAX_API_KEY → resolveDefaultChatModel() 抛错',
+  noMinimaxKey.code !== 0 && /MiniMax Provider 缺少凭据/.test(`${noMinimaxKey.stdout ?? ''}\n${noMinimaxKey.stderr ?? ''}`),
+  noMinimaxKey.code === 0
+    ? `预期抛错但子进程成功退出。parsed=${JSON.stringify(noMinimaxKey.parsed)}`
+    : `code=${noMinimaxKey.code}, combined=${((noMinimaxKey.stdout ?? '') + (noMinimaxKey.stderr ?? '')).trim() || '<empty>'}`,
+);
+recordLlmChild(
+  '缺少 MINIMAX_API_KEY 时仍可解析 capabilities 所需的完整模型 ID（minimax/MiniMax-M2.7）',
+  noMinimaxKey.code !== 0 && noMinimaxKey.parsed?.modelIdWithoutCredentials === 'minimax/MiniMax-M2.7',
+  noMinimaxKey.parsed ? `parsed=${JSON.stringify(noMinimaxKey.parsed)}` : 'parsed=<null>',
+);
+recordLlmChild(
+  '缺少 MINIMAX_API_KEY 时错误信息不包含敏感 key 内容',
+  noMinimaxKey.code !== 0 && !((noMinimaxKey.stdout ?? '') + (noMinimaxKey.stderr ?? '')).includes(SENSITIVE_MINIMAX_KEY),
+  `combined=${((noMinimaxKey.stdout ?? '') + (noMinimaxKey.stderr ?? '')).trim() || '<empty>'}`,
+);
+// 用真实 key 触发解析，确认成功路径不会"反向泄漏"敏感 key。
+const goodMinimaxKey = await runLlmChild({
+  LLM_PROVIDER: 'minimax',
+  LLM_MODEL: 'MiniMax-M2.7',
+  MINIMAX_API_KEY: SENSITIVE_MINIMAX_KEY,
+});
+recordLlmChild(
+  'MINIMAX_API_KEY 已配置时 resolveDefaultChatModel() 不抛错，且返回 LanguageModel',
+  goodMinimaxKey.code === 0 && goodMinimaxKey.parsed?.modelInfo?.kind === 'languageModel',
+  goodMinimaxKey.code !== 0
+    ? `code=${goodMinimaxKey.code}, combined=${((goodMinimaxKey.stdout ?? '') + (goodMinimaxKey.stderr ?? '')).trim() || '<empty>'}`
+    : goodMinimaxKey.parsed
+      ? `parsed=${JSON.stringify(goodMinimaxKey.parsed)}`
+      : 'parsed=<null>',
+);
+recordLlmChild(
+  'MINIMAX_API_KEY 已配置时构造出的 LanguageModel 不反向泄露 key 字符串',
+  goodMinimaxKey.code === 0 && !((goodMinimaxKey.stdout ?? '') + (goodMinimaxKey.stderr ?? '')).includes(SENSITIVE_MINIMAX_KEY),
+  `combined=${((goodMinimaxKey.stdout ?? '') + (goodMinimaxKey.stderr ?? '')).trim() || '<empty>'}`,
+);
+// 注册表必须同时包含 deepseek 与 minimax，防止新增 Adapter 时忘了写注册表。
+const providerIds = await (async () => {
+  const regUrl = pathToFileURL(join(BACKEND_SRC, 'infrastructure', 'llm', 'registry.js')).href;
+  const reg = await import(regUrl);
+  return reg.listProviderIds();
+})();
+recordLlmChild(
+  'Registry 已注册 deepseek 与 minimax 两个 Provider',
+  providerIds.length === 2 && providerIds.includes('deepseek') && providerIds.includes('minimax'),
+  `实际已注册：${JSON.stringify(providerIds)}`,
+);
+
+// 5.9 MiniMax 区域白名单：MINIMAX_REGION=cn 必须切换到中国区 baseURL。
+const minimaxCn = await runLlmChild({
+  LLM_PROVIDER: 'minimax',
+  LLM_MODEL: 'MiniMax-M2.7',
+  MINIMAX_API_KEY: 'test-cn-key',
+  MINIMAX_REGION: 'cn',
+});
+recordLlmChild(
+  'MINIMAX_REGION=cn → baseURL === "https://api.minimaxi.com/anthropic/v1"',
+  minimaxCn.code === 0 &&
+    minimaxCn.parsed?.modelInfo?.kind === 'languageModel' &&
+    minimaxCn.parsed.modelInfo.baseURL === 'https://api.minimaxi.com/anthropic/v1',
+  minimaxCn.code !== 0
+    ? `code=${minimaxCn.code}, combined=${((minimaxCn.stdout ?? '') + (minimaxCn.stderr ?? '')).trim() || '<empty>'}`
+    : minimaxCn.parsed
+      ? `parsed=${JSON.stringify(minimaxCn.parsed)}`
+      : 'parsed=<null>',
+);
+recordLlmChild(
+  'MINIMAX_REGION=cn → 不回退到 Mastra 内置国际站 Provider（baseURL 不得是 api.minimax.io）',
+  minimaxCn.code === 0 &&
+    minimaxCn.parsed?.modelInfo?.kind === 'languageModel' &&
+    minimaxCn.parsed.modelInfo.baseURL !== 'https://api.minimax.io/anthropic/v1',
+  minimaxCn.parsed?.modelInfo ? `modelInfo=${JSON.stringify(minimaxCn.parsed.modelInfo)}` : 'modelInfo=<null>',
+);
+
+// 5.10 MiniMax 区域白名单：MINIMAX_REGION=global 必须显式回到国际站 baseURL。
+const minimaxGlobal = await runLlmChild({
+  LLM_PROVIDER: 'minimax',
+  LLM_MODEL: 'MiniMax-M2.7',
+  MINIMAX_API_KEY: 'test-global-key',
+  MINIMAX_REGION: 'global',
+});
+recordLlmChild(
+  'MINIMAX_REGION=global → baseURL === "https://api.minimax.io/anthropic/v1"',
+  minimaxGlobal.code === 0 &&
+    minimaxGlobal.parsed?.modelInfo?.kind === 'languageModel' &&
+    minimaxGlobal.parsed.modelInfo.baseURL === 'https://api.minimax.io/anthropic/v1',
+  minimaxGlobal.code !== 0
+    ? `code=${minimaxGlobal.code}, combined=${((minimaxGlobal.stdout ?? '') + (minimaxGlobal.stderr ?? '')).trim() || '<empty>'}`
+    : minimaxGlobal.parsed
+      ? `parsed=${JSON.stringify(minimaxGlobal.parsed)}`
+      : 'parsed=<null>',
+);
+
+// 5.11 MiniMax 区域白名单：非法 region 必须抛明确中文错误（不静默回退）。
+const minimaxBad = await runLlmChild({
+  LLM_PROVIDER: 'minimax',
+  LLM_MODEL: 'MiniMax-M2.7',
+  MINIMAX_API_KEY: 'test-bad-region-key',
+  MINIMAX_REGION: 'eu',
+});
+const minimaxBadCombined = `${minimaxBad.stdout ?? ''}\n${minimaxBad.stderr ?? ''}`;
+recordLlmChild(
+  'MINIMAX_REGION=eu（非法）必须显式抛错且包含"不是已支持的区域"',
+  minimaxBad.code !== 0 && /不是已支持的区域/.test(minimaxBadCombined),
+  minimaxBad.code === 0
+    ? `预期抛错但子进程成功退出。parsed=${JSON.stringify(minimaxBad.parsed)}`
+    : `code=${minimaxBad.code}, combined=${minimaxBadCombined.trim() || '<empty>'}`,
+);
+recordLlmChild(
+  '非法 region 错误信息不包含敏感 key',
+  minimaxBad.code !== 0 && !minimaxBadCombined.includes('test-bad-region-key'),
+  `combined=${minimaxBadCombined.trim() || '<empty>'}`,
+);
+recordLlmChild(
+  '非法 region 错误信息列出已知 region（global、cn）',
+  minimaxBad.code !== 0 && /global/.test(minimaxBadCombined) && /cn/.test(minimaxBadCombined),
+  `combined=${minimaxBadCombined.trim() || '<empty>'}`,
 );
 
 // 清理 LLM 子进程脚本。

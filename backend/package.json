@@ -19,6 +19,7 @@
     "users:create": "tsx src/scripts/users-create.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.118",
     "@mastra/core": "1.65.0",
     "@mastra/pg": "1.23.0",
     "@mastra/rag": "2.6.2",
