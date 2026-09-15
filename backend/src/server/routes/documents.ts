@@ -13,13 +13,21 @@ import { getDocumentStorage } from '../../infrastructure/storage/document-storag
 import { withAuthenticatedWorkspace } from '../../modules/auth/workspace-context.js';
 import { getDatabasePool } from '../../infrastructure/database/pool.js';
 import type { DocumentStorageStatus } from '../../modules/documents/service.js';
+import {
+  MAX_UPLOAD_FILE_SIZE,
+  uploadBodyLimitMiddleware,
+} from '../security/upload-body-limit.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 export const uploadDocumentRoute = registerApiRoute('/knowledge-bases/:id/documents', {
   method: 'POST',
   requiresAuth: true,
+  // Mastra 将 Hono 类型内联在 @mastra/core；运行时 middleware 契约相同，
+  // 但私有 symbol 让直接依赖的 Hono 类型无法结构兼容。
+  middleware: uploadBodyLimitMiddleware as unknown as NonNullable<
+    Parameters<typeof registerApiRoute>[1]['middleware']
+  >,
   handler: withAuthenticatedWorkspace(async (authCtx, context) => {
     const knowledgeBaseId = context.req.param('id');
     if (!isUuid(knowledgeBaseId)) return context.json({ message: '知识库 id 格式不正确。' }, 400);
@@ -165,7 +173,7 @@ function validateFile(value: FormDataEntryValue | null): { file: File; name: str
   const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
   // 格式白名单由 ParserRegistry 统一管理，此处仅做基础校验
   if (value.size === 0) return { message: '不允许上传空文件。' };
-  if (value.size > MAX_FILE_SIZE) return { message: '文件不能超过 10 MB。' };
+  if (value.size > MAX_UPLOAD_FILE_SIZE) return { message: '文件不能超过 10 MB。' };
   return { file: value, name, type: extension || 'unknown' };
 }
 

@@ -19,6 +19,10 @@
 
 > **2026-09-14 V2 聊天链路修复**：Run Executor 从会话真实读取 `knowledgeBaseId` 并持久化 Agent 返回的 citations；Tool 调用在 `tool_executions` 与 `agent_run_events` 双向留痕，SSE 新增 `tool-call-failed`，前端实时及刷新恢复均可展示 Tool 状态；前端停止请求切换到 `/v1/v2alpha/messages/:id/stop`。已通过 backend typecheck、unit fixtures 与 frontend production build；尚未进行真实浏览器/模型端到端验证。
 
+> **2026-09-15 安全/CI 当前事实**：生产依赖以 `@mastra/core@1.65.0` 为当前基线，并通过受控 override / 直接依赖锁定 `fast-uri@3.1.6`、`hono@4.13.5`、`js-yaml@3.15.2`。上传路由在 `formData()` 前以 Hono `bodyLimit` 限制 10.5 MB，Mastra server 的全局 `bodySizeLimit` 同步提高以允许合法的 10 MB 文件；文件本身仍校验 ≤10 MB。API 路由统一增加 `X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy`；前端入口 CSP 仅为静态纵深防御，生产反向代理仍须负责 `frame-ancestors`。`run-failed` 的 SSE payload 使用固定安全文案，Markdown 链接仅允许 HTTPS、本机 HTTP 或受控相对路径，Calculator 使用受限算术解析器而非动态代码执行。`.github/workflows/integration.yml` 已使用隔离 pgvector PostgreSQL service 执行 integration matrix；真实 PostgreSQL/Provider/浏览器 E2E 未在本轮本机执行。
+
+> **版本证据边界**：下文提及“Mastra 1.61 + DeepSeek 已实测”均为 2026-09 的历史验收记录，不是对当前 `@mastra/core@1.65.0` 的真实 SDK/模型验收声明。当前 1.65.0 已完成 typecheck、离线 contracts/unit/fixtures 与前端构建验证；真实审批恢复、Provider、浏览器及多实例 E2E 仍待 staging 验收。
+
 ## 概述
 
 Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持通用对话和知识库问答两种 Agent 模式。系统采用前后端分离架构，使用 PostgreSQL 持久化数据，并通过 SSE 流式传输实现实时对话体验。

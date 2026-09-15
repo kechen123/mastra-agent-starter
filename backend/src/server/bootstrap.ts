@@ -135,6 +135,7 @@ const LEGACY_DEPRECATION_HEADERS: ReadonlyArray<readonly [string, string]> = [
 // 元数据，又不会被错误的泛型擦除。
 import { registerApiRoute } from '@mastra/core/server';
 import type { ApiRoute } from '@mastra/core/server';
+import { applySecurityHeaders } from './security/response-headers.js';
 
 function withDeprecationHeaders(route: ApiRoute): ApiRoute {
   // ApiRoute 是 HonoApiRoute | SchemaApiRoute；这里只读本项目实际用到的字段。
@@ -165,6 +166,27 @@ function withDeprecationHeaders(route: ApiRoute): ApiRoute {
   }) as ApiRoute;
 }
 
+function withSecurityHeaders(route: ApiRoute): ApiRoute {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = route as any;
+  const originalHandler: (c: unknown, ...rest: unknown[]) => Promise<Response> | Response =
+    typeof r.handler === 'function' ? r.handler : () => Promise.resolve(new Response(null, { status: 500 }));
+  const wrappedHandler: typeof originalHandler = async (context, ...rest) => {
+    const response = await Promise.resolve(originalHandler(context, ...rest));
+    return applySecurityHeaders(response);
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return registerApiRoute(r.path as any, {
+    method: r.method,
+    handler: wrappedHandler as unknown as (c: any) => Response | Promise<Response>,
+    ...(r.requiresAuth === true ? { requiresAuth: true } : {}),
+    ...(r.requiresAuth === false ? { requiresAuth: false } : {}),
+    ...(r.middleware !== undefined && r.middleware !== null ? { middleware: r.middleware } : {}),
+    ...(r.openapi !== undefined && r.openapi !== null ? { openapi: r.openapi } : {}),
+    ...(r.cors !== undefined && r.cors !== null ? { cors: r.cors } : {}),
+  }) as ApiRoute;
+}
+
 const askRouteDeprecated = withDeprecationHeaders(askRoute);
 const stopMessageRouteDeprecated = withDeprecationHeaders(stopMessageRoute);
 const regenerateMessageRouteDeprecated = withDeprecationHeaders(regenerateMessageRoute);
@@ -174,7 +196,7 @@ const getConversationRouteDeprecated = withDeprecationHeaders(getConversationRou
 const listConversationsRouteDeprecated = withDeprecationHeaders(listConversationsRoute);
 const updateConversationRouteDeprecated = withDeprecationHeaders(updateConversationRoute);
 
-export const apiRoutes = [
+const rawApiRoutes = [
   healthRoute,
   readinessRoute,
   loginRoute,
@@ -227,3 +249,5 @@ export const apiRoutes = [
   getApprovalRoute,
   resolveApprovalRoute,
 ];
+
+export const apiRoutes = rawApiRoutes.map(withSecurityHeaders);

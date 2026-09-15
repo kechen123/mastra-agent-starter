@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "tsx src/lib/streaming-renderer.test.ts && tsx src/lib/stop-state-machine.test.ts",
+    "test": "tsx src/lib/streaming-renderer.test.ts && tsx src/lib/stop-state-machine.test.ts && tsx src/lib/safe-url.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

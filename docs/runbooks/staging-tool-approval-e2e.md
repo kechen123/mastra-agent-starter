@@ -1,10 +1,10 @@
 # PR-3.3.1 — Staging Tool Approval e2e 验收 Runbook
 
-> **状态更新（2026-09-04）**：已在本机真实 PG + Mastra 1.61 + DeepSeek 执行基础三路径和 pending 后重启批准。不是远端 staging 全矩阵验收，详见 [实测记录](2026-09-04-approval-verification.md)。
+> **状态更新（2026-09-04，历史记录）**：已在本机真实 PG + Mastra 1.61 + DeepSeek 执行基础三路径和 pending 后重启批准。不是远端 staging 全矩阵验收，也**不是**当前 `@mastra/core@1.65.0` 的验收，详见 [实测记录](2026-09-04-approval-verification.md)。
 > 任何代码 / 文档 / 计划文档**不得**把 staging 验收写成"已通过"。
 
 本 runbook 描述如何在 staging 环境跑 PR-3.3.1 的 Tool Approval 端到端
-验收脚本，覆盖 **真实 Mastra 1.61 SDK + 真实模型 + 真实 HTTP/SSE**。
+验收脚本，目标覆盖真实 Mastra SDK、真实模型与真实 HTTP/SSE；执行时必须记录实际锁定的 SDK 版本。
 
 ## 1. 覆盖范围与不覆盖范围
 
@@ -39,7 +39,7 @@
 | 部署档位 | `DEPLOYMENT_PROFILE=demo`（**绝不能** =`production`，启动会被拒） |
 | 后端 | `ENABLE_STAGING_APPROVAL_PROBE=true` 启动 |
 | 模型 | `LLM_PROVIDER` / `LLM_MODEL`（或旧 `AGENT_CHAT_MODEL`）已配置真实模型 |
-| Mastra SDK | `@mastra/core` 1.61.0（已 lockfile 锁死，无需升级） |
+| Mastra SDK | 当前锁定 `@mastra/core` 1.65.0；1.61.0 是历史实测版本，必须重新验收，不能外推 |
 | PostgreSQL | 已初始化；`system-approval-worker` 平台用户已 seed（init.sql 阶段 3.3 段） |
 | 专用账号 | 一个 staging 凭据，建议专门建账号 `staging-e2e-probe`，密码与生产 / dev 完全独立 |
 

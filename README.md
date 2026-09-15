@@ -4,14 +4,16 @@
 
 > 当前仅适合本地开发或受信任网络中的已认证演示环境；生产级租户治理、Tool 审批等能力仍在演进中。详细边界见 [架构文档](docs/architecture.md)。
 
-> **2026-09-14 V2 Chat Runtime 修复（已实现并通过自动测试）**
-> 本轮在 PR-4 之上完成 V2 chat runtime 修复，所有改动**已通过** `npm run typecheck`（backend）+ `npm run lint`（backend / frontend）+ `npm run test:contracts` / `test:unit` / `test:fixtures`（backend）+ `npm test`（frontend，含 23 + 30 用例）+ `npm run build`（frontend）+ `git diff --check`：
+> **2026-09-14 V2 Chat Runtime 修复（历史验证记录）**
+> 本段记录当时的验收边界；其“backend lint 通过”不应外推为当前事实。当前依赖基线已是 `@mastra/core@1.65.0`，1.61 的真实模型/审批恢复记录仅是历史证据，尚未在 1.65.0 上重做真实模型或浏览器 E2E。
 > - 后端停止一致性：`abortRunByMessage()` 返回结构化 discriminated union；HTTP stop / SSE run-stopped / final checkpoint / message.content 共用 V2 executor 不可变文本快照。**仅承诺同一进程实例内收敛；跨实例 stop 不在本轮范围**。
 > - 前端 stop 状态机：`src/lib/stop-state-machine.ts` 纯逻辑模块 + 30 用例单测；HTTP/SSE 任意顺序幂等；session switch / KB / capabilities 页面**不**调后端 stop。
 > - Tool call 稳定 ID：`tool_executions.tool_call_id` + UNIQUE(workspace_id, run_id, tool_call_id)；`upsertToolExecution` / `finalizeToolExecutionByCallId` 幂等；批量查消除 N+1。
 > - RAG 阈值 / AbortSignal / 错误归类：`RAG_MIN_SIMILARITY` 默认 0.5（严格 [0,1]）；`EMBEDDING_TIMEOUT_MS` 默认 15000ms；embedding provider 错误归一为内部 `EmbeddingError` 类，**不**抛原始 body / endpoint / key 字样。
 > - Test/CI：frontend `npm test` 用 tsx 直跑；integration runner 顶层 TEST_DATABASE_URL + safety-identifier 闸门守护，无 DB 时 SKIPPED（**不**算 passed）。
 > - 真实 PostgreSQL / 真实 DeepSeek / 真实 Embedding / 真实 MinerU / 浏览器前后端端到端联调：**本轮未授权 / 未在本流水线验证**，保留为 staging e2e 待办。
+
+> **2026-09-15 安全与验证修复（已实现；仅离线自动检查）**：后端锁文件固定到 `fast-uri@3.1.6`、`hono@4.13.5`、`js-yaml@3.15.2`；上传在 multipart 解析前限制请求体（文件仍严格 ≤10 MB）；Run 的 `run-failed` SSE 仅发布稳定错误码对应的安全中文文案；Markdown 仅允许 HTTPS、本机 HTTP 与受控相对链接；API 响应补齐 `nosniff`、拒绝嵌入、referrer 与 permissions 头，Vite 入口补 CSP/referrer meta；计算器不再动态执行 JavaScript。隔离 PostgreSQL integration workflow 已加入 CI（Core-only / RAG fixture 两个矩阵）。本轮未连接 PostgreSQL、未调用模型/Embedding/MinerU、未做浏览器或部署网关响应验收；仓库既有 backend lint 错误仍未在本轮范围内修复。
 
 ## 开箱即用
 
@@ -148,6 +150,12 @@ Set-Location frontend
 npm run lint
 npm run build
 ```
+
+### CI 与部署安全边界
+
+- `.github/workflows/verify.yml` 运行不依赖外部凭据的 contracts、unit、fixtures、前端测试及构建。
+- `.github/workflows/integration.yml` 使用独立 `pgvector/pgvector:pg16` service 与带 `safety-identifier=test_...` 的测试连接串；Core-only 和 RAG fixture 分进程执行。真实 DeepSeek、Embedding、MinerU 和浏览器 E2E 不在普通 CI 中伪造为通过。
+- 文档上传的应用上限为单文件 10 MB、请求体 10.5 MB（为 multipart 开销预留）；生产反向代理仍必须配置相同或更低的 body limit 与安全响应头。前端 CSP meta 无法覆盖 `frame-ancestors`，反向代理应额外下发 `Content-Security-Policy: frame-ancestors 'none'`。
 
 服务可用性可通过 `GET /healthz` 检查进程，通过 `GET /readyz` 检查数据库、LLM 与 Embedding 基础配置；后者在依赖未就绪时会返回 `503`，且不会泄露凭据。
 

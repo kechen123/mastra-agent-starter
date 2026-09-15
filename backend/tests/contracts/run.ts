@@ -1010,7 +1010,8 @@ record(
 // §7 ↔ §8 一致性闸门：必须在 §7 / §8 两个 scanner 都跑完之后再算。
 // 闸门逻辑：
 //   - §7 扫描 method / requiresAuth 字段；
-//   - §8 扫描 handler 表达式是否以 withAuthenticatedWorkspace( 起始；
+//   - §8 扫描 handler 表达式是否直接经 withAuthenticatedWorkspace 包装，
+//     或通过本文件已验证的 runWith 委托包装；
 //   - 两者对"业务受保护路由数"必须一致；否则某个 registerApiRoute 块可能在
 //     §8 的花括号 / 表达式配对解析中失败、被静默跳过，导致 wrapper 检查一边绿、
 //     实际路由根本没被扫描。
@@ -1032,8 +1033,8 @@ const PROTECTED_COUNT = PROTECTED_BUSINESS_ROUTE_KEYS.size;
 const WRAPPED_COUNT = WRAPPED_ROUTE_KEYS.size;
 
 record(
-  '[Auth ↔ Wrapper] §7 鉴权扫描器识别到 39 条业务受保护路由（阶段 2 V2 + 兼容入口）',
-  PROTECTED_COUNT === 39,
+  '[Auth ↔ Wrapper] §7 鉴权扫描器识别到 46 条业务受保护路由（含 v1/v2alpha 双入口）',
+  PROTECTED_COUNT === 46,
   `实际 ${PROTECTED_COUNT} 条：${[...PROTECTED_BUSINESS_ROUTE_KEYS].sort().join(', ')}`,
 );
 
@@ -1061,8 +1062,16 @@ record(
 let wrapperViolations = 0;
 for (const h of allHandlers) {
   if (!h.requiresAuth) continue;
-  // 要求 handler 表达式以 withAuthenticatedWorkspace 开头（允许空白）。
-  const ok = /^\s*withAuthenticatedWorkspace\s*\(/.test(h.handlerBody);
+  const directWrapper = /^\s*withAuthenticatedWorkspace\s*\(/.test(h.handlerBody);
+  // v1/v2alpha 共享路由以 runWith() 统一添加 request-id 与 workspace auth。
+  // 仅接受本文件实际声明且函数体调用 withAuthenticatedWorkspace 的委托，
+  // 防止任意同名 helper 让静态检查误放行。
+  const delegatedWrapper = /^\s*runWith\s*\(/.test(h.handlerBody) &&
+    h.file === 'server/routes/v2alpha/index.ts' &&
+    /function\s+runWith\s*\([\s\S]*?return\s+withAuthenticatedWorkspace\s*\(/.test(
+      readFileSync(join(BACKEND_SRC, h.file), 'utf-8'),
+    );
+  const ok = directWrapper || delegatedWrapper;
   if (!ok) wrapperViolations++;
   record(
     `[Wrapper] ${h.method} ${h.routePath}（${h.file}）必须经过 withAuthenticatedWorkspace 包装`,

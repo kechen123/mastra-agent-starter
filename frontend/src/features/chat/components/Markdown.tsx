@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { sanitizeLinkTarget } from '../../../lib/safe-url';
 
 /**
  * 最小 Markdown 渲染器（无依赖、零运行时代价）。
@@ -49,17 +50,18 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     } else if (raw.startsWith('[')) {
       const linkMatch = /\[([^\]]+)\]\(([^)]+)\)/.exec(raw);
       if (linkMatch) {
-        parts.push(
-          <a
-            key={`${keyPrefix}-l-${key++}`}
-            href={linkMatch[2]}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-app-info underline underline-offset-2 hover:opacity-80 break-words"
-          >
-            {linkMatch[1]}
-          </a>,
-        );
+        const safeTarget = sanitizeLinkTarget(linkMatch[2]!);
+        parts.push(safeTarget ? (
+            <a
+              key={`${keyPrefix}-l-${key++}`}
+              href={safeTarget}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-app-info underline underline-offset-2 hover:opacity-80 break-words"
+            >
+              {linkMatch[1]}
+            </a>
+          ) : linkMatch[1]);
       } else {
         parts.push(raw);
       }

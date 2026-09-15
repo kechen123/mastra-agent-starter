@@ -3,6 +3,8 @@
 > **当前执行进度（2026-09-08 PR-3.3.2 / 3.3.2.1 实测验证收尾）**：PR-3.3.1 的本机真实 SDK / 模型基础三路径、pending 后重启批准、107 项真实 PG + fake facade 集成均通过；PR-3.3.2 / 3.3.2.1 本轮新增四项 PG 集成已 Codex 实跑通过——`hard-crash-lease-recovery.ts` 32 passed, 0 failed；`multi-process-resume.ts` 9 passed, 0 failed；`executor-terminal-lease-fence.ts` `done / stopped / error` 三场景全部通过；`approval-reconcile-safety.ts` 通过。Backend `npm run typecheck`、Backend unit fixtures、`git diff --check`、frontend `npm run build` 均通过（前端仅保留 chunk-size / ineffective dynamic import warning，不视作失败）。
 >
 > **2026-09-14 V2 聊天链路补齐**：知识库 ID 与 citations 已进入 Run Executor 主链路；Tool 开始/完成/失败事件同时进入业务执行留痕、可回放 Run 事件和前端消息状态；停止请求统一为 V2 主接口。backend typecheck、unit fixtures、frontend build 已通过；真实浏览器/模型端到端仍待验证。
+
+> **2026-09-15 当前验证与版本边界**：`@mastra/core@1.65.0` 是当前依赖基线；文中 1.61 的真实 DeepSeek/审批记录仅作历史证据。当前代码已加入隔离 PostgreSQL CI workflow、依赖安全锁定、上传 body limit、SSE 错误脱敏、Markdown URL 白名单、响应头与非动态 Calculator；本机已完成 typecheck、离线 unit/前端测试与构建，未在本轮连接 PostgreSQL 或执行真实模型、Embedding、MinerU、浏览器 E2E。后续凡引用 1.61 验收，均不得表述为 1.65.0 已验证。
 >
 > **本轮新增（PR-3.3.2 / 3.3.2.1）**：
 > - **生产代码修复**：`sweepExpiredApprovalResumeLeases`（`backend/src/core/execution/approval-resume-recovery.ts`——PR-3.3.2.1 从 `modules/tool-policy/repository.ts` 拆分到 execution 层以消除跨聚合编排违反）—— 修复 Codex 2026-09-07 第一次 review 发现的**阻塞级 crash window**（worker 进程被直接杀死时 JavaScript catch 不会执行，原 sweeper 会把孤儿 Run 错误地写成 `failed` + `LEASE_EXPIRED`，留下不可恢复的孤儿组合）。按 Tool 元数据 + approval 状态分流恢复。新增事件类型 `run-resume-reclaimed`。

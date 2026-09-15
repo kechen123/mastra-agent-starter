@@ -61,6 +61,7 @@ import {
   sweepExpiredApprovalResumeLeases,
   type SweepApprovalResumeResult,
 } from './approval-resume-recovery.js';
+import { getSafeRunErrorMessage } from './safe-run-error.js';
 import type { ApprovalRequestRow } from '../../modules/tool-policy/types.js';
 import {
   _getMastraFacade,
@@ -1634,8 +1635,10 @@ async function failRun(
   _status: 'failed',
   errorCode: string,
   execution: ActiveExecution,
-  err: Error,
+  _err: Error,
 ): Promise<void> {
+  // 原始异常不得写入可回放的 SSE payload；调用方可在受控日志链路记录诊断。
+  void _err;
   const client = await getDatabasePool().connect();
   try {
     await client.query('BEGIN');
@@ -1674,7 +1677,7 @@ async function failRun(
       runId: r.id,
       workspaceId: r.workspace_id,
       type: 'run-failed',
-      payload: { errorCode, message: err.message },
+      payload: { errorCode, message: getSafeRunErrorMessage(errorCode) },
     });
     await client.query('COMMIT');
     logRequest('error', {

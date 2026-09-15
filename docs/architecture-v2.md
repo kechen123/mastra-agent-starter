@@ -10,6 +10,8 @@
 
 > **阶段 3.0 Durable Agent Runtime 状态（2026-09-02）**：本版本定义中 Tool Policy Gateway / Approval 仍属"未实现"目标；阶段 3.0 进行中——storage、Tool 公共注册和 ID 参数透传已实现（`@mastra/pg` 的 `PostgresStore` 接入独立 schema `mastra_runtime`，与业务 `init.sql` 完全隔离；Agent 经 public `new Mastra({ agents })` 注册路径绑定同一 storage；`streamOptions.runId / memory.thread / memory.resource` 已透传）。**跨重启恢复审批 Run 未完成真实 PostgreSQL 端到端验证**。阶段 3.0 **不**实现审批表 / 审批 API / 审批 UI，也不引入高风险 Tool；这些仍是后续阶段的工作。
 
+> **版本注记（2026-09-15）**：本文中 `1.61` 的 SDK 形态和验证描述属于目标规范形成时的历史上下文。当前锁定依赖是 `@mastra/core@1.65.0`；不得把旧版本的真实模型验收自动视作 1.65.0 验收，需按当前版本另行执行 staging E2E。
+
 ## 修订记录
 
 | 版本 | 日期 | 主要修订 |
