@@ -156,6 +156,18 @@ Mastra Agent Starter 是一个基于 Mastra 框架的智能对话平台，支持
 - 两套用例分别以**独立进程**运行，`config.ragEnabled` 由本进程 env 决定，与生产路径语义完全一致；**不**修改生产 `config` 模块，不调用真实 embedding API，不泄露真实 key。
 - 沙箱无 PG 时两个文件按各自用例数干净 SKIP；当前 PG 端到端已 **18 passed、0 failed**（Core-only 16 + RAG 2，分别调 `runIngestionWorkerOnce` / `_runFinalizeOnce` / `_runOutboxOnce` / `transitionIngestionStatus` / `getOrCreateActiveEmbeddingProfile` / `createUploadBundle` 等生产入口）。
 
+### 7.1. Daymind 统一 Composer 录入
+
+- **入口**：`POST /sources/record` (text)、`/sources/file` (multipart)、`/sources/url` (JSON)；全部要求 `requiresAuth: true` + 明确 record 意图（`isRecordIntent` 或文件/URL 按钮携带 intent 字段）。
+- **流程**：`parserRegistry.parse → scanSensitiveData → LocalFsStorage.putStaging → finalize → persistSource`（单事务 `sources/documents/document_chunks/document_embeddings`）。secret 命中 → `SensitiveSourceRejectedError`，**不持久化、不留 staging**。
+- **解析器**：Text / PlainText / Markdown / PDF（pdf-parse 真实抽取页码）/ DOCX（mammoth 提取 headings）/ URL（cheerio + `UrlFetcher`，SSRF 守卫 + 2 MB / 15 s）。
+- **Citation**：Source → Document → Chunk metadata（`page` / `heading` / `url`）经 `searchWorkspaceSources` / `searchDaymindSources` 映射到 Citation 字段；不合成、不杜撰。
+- **去重**：`(workspace_id, content_hash)` UNIQUE。File 用 `sha256(bytes)`，URL 用 `sha256(finalUrl + '\n' + body)`，Text 用 `sha256(normalized)`。
+- **Composer 附件语义**：附件/URL + 无意图 → 422 `UNSUPPORTED_ATTACHMENT_QA`；意图按钮（`'记录下来'`）触发 record 流程；敏感数据命中 → 422 `SENSITIVE_SOURCE_REJECTED`。
+- **未实现**：临时附件问答、LLM Wiki / Memory、登录抓取、Office 在线编辑、OCR、Excel 操作。
+
+详细协议见 [`docs/superpowers/specs/2026-09-16-daymind-composer-files-urls-design.md`](superpowers/specs/2026-09-16-daymind-composer-files-urls-design.md)。
+
 ### 8. 工具执行审计
 
 位于 `backend/src/modules/conversations/tool-executions.ts`：

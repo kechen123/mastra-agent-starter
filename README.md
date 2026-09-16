@@ -1,5 +1,7 @@
 # Mastra Agent Starter
 
+> **Daymind V1 进行中**：本仓库已开始在 Starter Runtime 上实现 Daymind 的“明确记录意图”录入——支持 text、`.txt` / `.md` / `.pdf` / `.docx` 文件（≤10 MB）、普通公开 URL。记录后内容经 SensitiveDataScanner → Source → Document → Chunk → Embedding，跨会话可检索，Citation 保留 sourceId / sourceTitle / sourceType / page / url。无明确记录意图的文件/URL 当前返回 422（临时附件问答尚未实现）。不支持 LLM Wiki / Memory / 登录抓取 / Office 编辑 / OCR / Excel 操作。
+
 面向业务团队的 [Mastra](https://mastra.ai/) 智能应用起步模板。它把对话、知识库、工具调用、技能编排和 Workspace 数据隔离整合为一套可直接运行的基础平台，帮助团队把精力放在业务 Agent 和业务能力本身，而不是重复搭建底层链路。
 
 > 当前仅适合本地开发或受信任网络中的已认证演示环境；生产级租户治理、Tool 审批等能力仍在演进中。详细边界见 [架构文档](docs/architecture.md)。
