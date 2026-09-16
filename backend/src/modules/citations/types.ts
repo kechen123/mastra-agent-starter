@@ -17,4 +17,9 @@ export interface Citation {
   category: string;
   type: string;
   source: string;
+  sourceId?: string;
+  sourceTitle?: string;
+  sourceType?: string;
+  page?: number;
+  url?: string;
 }
