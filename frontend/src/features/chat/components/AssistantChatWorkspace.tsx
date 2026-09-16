@@ -11,6 +11,7 @@ import {
 import { Check, ChevronDown, Copy, Library, LoaderCircle, PanelLeftOpen, RefreshCw, RotateCcw, Send, Sparkles, Square, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Citation, KnowledgeBase } from '../../../lib/api';
+import { recordFileSource, recordUrlSource } from '../../../lib/api';
 import { cn } from '../../../lib/cn';
 import type { ChatMessage, ToolCallState } from '../../../types/ui';
 import type { ApprovalView } from '../../../types/approval';
@@ -153,6 +154,15 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
   } = props;
 
   const messageScrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [showUrlInput, setShowUrlInput] = useState(false);
+  const [urlDraft, setUrlDraft] = useState('');
+  const [attachmentStatus, setAttachmentStatus] = useState<
+    | { kind: 'pending'; label: string }
+    | { kind: 'done'; sourceId: string; label: string }
+    | { kind: 'error'; label: string; message: string }
+    | null
+  >(null);
 
   // assistant-ui viewport store：isAtBottom 由框架原生维护，
   // 不再依赖手写 scrollTop/scrollHeight 阈值；用户上滑 → isAtBottom=false →
@@ -295,6 +305,96 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
             onDecline={(item) => onDeclineApproval?.(item)}
           />
         )}
+        {attachmentStatus && (
+          <div
+            role="status"
+            className="w-full max-w-[768px] mx-auto mt-2 px-3 py-1.5 rounded border text-[12px]"
+            data-status={attachmentStatus.kind}
+          >
+            {attachmentStatus.kind === 'pending' && `正在记录：${attachmentStatus.label}`}
+            {attachmentStatus.kind === 'done' && `已记录到长期资料：${attachmentStatus.label}`}
+            {attachmentStatus.kind === 'error' && `记录失败：${attachmentStatus.label} — ${attachmentStatus.message}`}
+          </div>
+        )}
+        <div className="w-full max-w-[768px] mx-auto flex items-center gap-2 mt-1">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="grid place-items-center w-8 h-8 rounded-full text-app-muted hover:text-app-text hover:bg-app-hover transition-colors"
+            title="记录文件到长期资料"
+            aria-label="记录文件到长期资料"
+          >
+            📎
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.pdf,.docx"
+            style={{ display: 'none' }}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              setAttachmentStatus({ kind: 'pending', label: file.name });
+              try {
+                const result = await recordFileSource({ file, intent: '记录下来' });
+                setAttachmentStatus({ kind: 'done', sourceId: result.id, label: file.name });
+              } catch (err) {
+                const message = err instanceof Error ? err.message : '记录文件失败';
+                setAttachmentStatus({ kind: 'error', label: file.name, message });
+              } finally {
+                if (fileInputRef.current) fileInputRef.current.value = '';
+              }
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setShowUrlInput((v) => !v)}
+            className="grid place-items-center w-8 h-8 rounded-full text-app-muted hover:text-app-text hover:bg-app-hover transition-colors"
+            title="记录 URL 到长期资料"
+            aria-label="记录 URL 到长期资料"
+          >
+            🌐
+          </button>
+          {showUrlInput && (
+            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+              <input
+                type="url"
+                placeholder="https://..."
+                value={urlDraft}
+                onChange={(e) => setUrlDraft(e.target.value)}
+                className="flex-1 min-w-0 px-2 py-1 rounded border border-app-border bg-app-surface text-[13px] text-app-text"
+              />
+              <button
+                type="button"
+                onClick={async () => {
+                  const url = urlDraft.trim();
+                  if (!url) return;
+                  setAttachmentStatus({ kind: 'pending', label: url });
+                  try {
+                    const result = await recordUrlSource({ url, intent: '记录下来' });
+                    setAttachmentStatus({ kind: 'done', sourceId: result.id, label: url });
+                    setShowUrlInput(false);
+                    setUrlDraft('');
+                  } catch (err) {
+                    const message = err instanceof Error ? err.message : '记录 URL 失败';
+                    setAttachmentStatus({ kind: 'error', label: url, message });
+                  }
+                }}
+                className="px-2 py-1 rounded bg-app-text text-app-bg text-[12px] disabled:opacity-50"
+                disabled={!urlDraft.trim()}
+              >
+                记录
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowUrlInput(false); setUrlDraft(''); }}
+                className="px-2 py-1 rounded text-app-muted text-[12px] hover:text-app-text"
+              >
+                取消
+              </button>
+            </div>
+          )}
+        </div>
         <ComposerPrimitive.Root
           className={cn(
             'w-full max-w-[768px] mx-auto p-2 rounded-[26px] bg-app-surface transition-shadow duration-150 shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_8px_28px_rgba(0,0,0,0.14)]',

@@ -40,6 +40,7 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   // Core-only 默认：未配置向量知识库。前端展示 KB Agent 时必须先看这个开关。
   ragEnabled: false,
   chatAgents: [
+    { id: 'daymind', name: 'Daymind Agent', requiresKnowledgeBase: false },
     { id: 'general-chat', name: '通用对话 Agent', requiresKnowledgeBase: false },
     { id: 'knowledge-base', name: '知识库问答 Agent', requiresKnowledgeBase: true },
   ],
@@ -99,11 +100,29 @@ export interface Citation {
   documentName?: string;
   heading?: string;
   distance?: number;
+  sourceId?: string;
+  sourceTitle?: string;
+  sourceType?: string;
 }
 
 export interface GroundedAnswer {
   answer: string;
   citations: Citation[];
+}
+
+export interface RecordedSource {
+  id: string;
+  title: string;
+  type: 'text';
+  knowledgeBaseId: string;
+  createdAt: string;
+  chunkCount: number;
+}
+
+export function recordSource(content: string): Promise<RecordedSource> {
+  return request('/sources/record', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+  });
 }
 
 export interface KnowledgeBase {
@@ -466,6 +485,47 @@ export function unbindSkillFromAgent(skillId: string, agentId: string): Promise<
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId }),
   });
+}
+
+export interface RecordedSourceResponse {
+  id: string;
+  title: string;
+  type: 'text' | 'file' | 'url';
+  knowledgeBaseId: string;
+  createdAt: string;
+  chunkCount: number;
+}
+
+export async function recordFileSource(input: {
+  file: File;
+  intent: string;
+}): Promise<RecordedSourceResponse> {
+  const baseUrl = getApiBaseUrl();
+  const form = new FormData();
+  form.append('file', input.file);
+  form.append('intent', input.intent);
+  const response = await fetch(`${baseUrl}/sources/file`, {
+    method: 'POST',
+    body: form,
+    credentials: DEFAULT_CREDENTIALS,
+  });
+  if (!response.ok) await throwResponseError(response);
+  return (await response.json()) as RecordedSourceResponse;
+}
+
+export async function recordUrlSource(input: {
+  url: string;
+  intent: string;
+}): Promise<RecordedSourceResponse> {
+  const baseUrl = getApiBaseUrl();
+  const response = await fetch(`${baseUrl}/sources/url`, {
+    method: 'POST',
+    credentials: DEFAULT_CREDENTIALS,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) await throwResponseError(response);
+  return (await response.json()) as RecordedSourceResponse;
 }
 
 export { request, throwResponseError };
