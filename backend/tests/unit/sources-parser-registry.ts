@@ -48,4 +48,22 @@ if (pdfBuffer) {
   console.log('  · pdf sample missing, skipping pdf assertion');
 }
 
+import mammoth from 'mammoth';
+import * as cheerio from 'cheerio';
+let docxBuffer: Buffer | null = null;
+try {
+  // mammoth 自带 samples
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const samplePath = resolve(__dirname, '..', '..', 'node_modules', 'mammoth', 'test', 'test-data', 'single-paragraph.docx');
+  docxBuffer = readFileSync(samplePath);
+} catch { /* skip */ }
+if (docxBuffer) {
+  const docxResult = await reg.parse({ kind: 'file', filename: 'sample.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: docxBuffer });
+  assert('docx parsed has text', docxResult.text.length > 0);
+  assert('docx parser identifier', docxResult.metadata.parser === 'docx-local');
+} else {
+  console.log('  · docx sample missing, skipping docx assertion');
+}
+
 if (failed > 0) process.exitCode = 1;
