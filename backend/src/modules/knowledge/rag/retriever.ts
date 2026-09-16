@@ -10,6 +10,10 @@ interface EmbeddingRow {
   metadata: Record<string, unknown>;
   document_id: string;
   document_name: string;
+  source_id: string | null;
+  source_title: string | null;
+  source_type: string | null;
+  source_metadata: Record<string, unknown> | null;
   profile_dimensions: number;
   distance: string | number;
 }
@@ -30,6 +34,8 @@ interface EmbeddingRow {
  */
 export interface SearchKnowledgeBaseOptions {
   topK?: number;
+  /** 覆盖默认相似度阈值，仅限明确的业务检索入口使用。 */
+  minSimilarity?: number;
   /**
    * 调用方已计算好的查询向量。retriever 会按当前 active profile 的
    * dimensions 校验长度，维度不匹配时抛 `Error`。
@@ -146,7 +152,7 @@ export async function searchKnowledgeBase(
   options: SearchKnowledgeBaseOptions = {},
 ): Promise<Citation[]> {
   const topK = options.topK ?? 5;
-  const minSimilarity = config.ragMinSimilarity;
+  const minSimilarity = options.minSimilarity ?? config.ragMinSimilarity;
   const signal = options.signal;
   if (signal?.aborted) {
     throw new DOMException('RAG retrieval aborted before start', 'AbortError');
@@ -195,12 +201,14 @@ export async function searchKnowledgeBase(
         c.content,
         c.metadata,
         c.document_id,
-        d.name AS document_name,
+       d.name AS document_name,
+       s.id AS source_id, s.title AS source_title, s.type AS source_type,
         e.dimensions AS profile_dimensions,
         e.embedding <=> $1::vector AS distance
        FROM document_embeddings e
        JOIN document_chunks c ON c.id = e.chunk_id
        JOIN documents d ON d.id = c.document_id
+       LEFT JOIN sources s ON s.id = d.source_id
       WHERE e.workspace_id = $2
         AND c.knowledge_base_id = $3
         AND e.profile_id = $4
@@ -238,9 +246,75 @@ export async function searchKnowledgeBase(
         category: '用户文档',
         type: 'document',
         source: row.document_name,
+        ...(row.source_id ? { sourceId: row.source_id, sourceTitle: row.source_title ?? row.document_name, sourceType: row.source_type ?? 'other' } : {}),
       };
     })
     .filter((c) => c.score >= minSimilarity);
+}
+
+/**
+ * Daymind 长期资料检索：仅覆盖当前 workspace 内具备 Source 关系的文档，
+ * 不读取 Conversation 或前端知识库选择。复用同一 embedding profile 和
+ * pgvector 存储；隐藏 KB 只是写入期的实现细节。
+ */
+export async function searchWorkspaceSources(
+  workspaceId: string,
+  query: string,
+  options: SearchKnowledgeBaseOptions = {},
+): Promise<Citation[]> {
+  const topK = options.topK ?? 5;
+  const minSimilarity = options.minSimilarity ?? config.ragMinSimilarity;
+  const profile = await getActiveEmbeddingProfile(workspaceId);
+  if (!profile) return [];
+  const embedding = options.queryEmbedding
+    ? (assertQueryEmbeddingValid(options.queryEmbedding, profile.dimensions), options.queryEmbedding)
+    : await embedQuery(query, options.signal);
+  const result = await getDatabasePool().query<EmbeddingRow>(
+    `SELECT e.chunk_id, c.chunk_index, c.content, c.metadata, c.document_id,
+            d.name AS document_name, s.id AS source_id, s.title AS source_title,
+            s.type AS source_type, s.metadata AS source_metadata,
+            e.dimensions AS profile_dimensions,
+            e.embedding <=> $1::vector AS distance
+       FROM document_embeddings e
+       JOIN document_chunks c ON c.id = e.chunk_id
+       JOIN documents d ON d.id = c.document_id
+       JOIN sources s ON s.id = d.source_id
+      WHERE e.workspace_id = $2
+        AND c.workspace_id = $2
+        AND d.workspace_id = $2
+        AND s.workspace_id = $2
+        AND e.profile_id = $3
+        AND d.status = 'ready'
+        AND e.embedding IS NOT NULL
+      ORDER BY e.embedding <=> $1::vector
+      LIMIT $4`,
+    [`[${embedding.join(',')}]`, workspaceId, profile.id, topK],
+  );
+  return result.rows.map((row) => {
+    const metadata = row.metadata ?? {};
+    const heading = asOptionalString(metadata.heading);
+    const distance = Number(row.distance);
+    return {
+      chunkId: row.chunk_id,
+      documentId: row.document_id,
+      documentName: row.document_name,
+      chunkIndex: row.chunk_index,
+      heading,
+      title: row.document_name,
+      chapter: heading ?? `片段 ${row.chunk_index + 1}`,
+      content: row.content,
+      score: distanceToSimilarity(distance),
+      distance,
+      category: 'Daymind Source',
+      type: 'document',
+      source: row.document_name,
+      sourceId: row.source_id ?? undefined,
+      sourceTitle: row.source_title ?? row.document_name,
+      sourceType: row.source_type ?? 'other',
+      ...(typeof row.metadata?.page === 'number' ? { page: row.metadata.page } : {}),
+      ...(typeof row.source_metadata?.finalUrl === 'string' ? { url: row.source_metadata.finalUrl } : {}),
+    } satisfies Citation;
+  }).filter((citation) => citation.score >= minSimilarity);
 }
 
 function asOptionalString(value: unknown): string | undefined {
