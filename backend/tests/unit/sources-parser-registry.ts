@@ -66,4 +66,13 @@ if (docxBuffer) {
   console.log('  · docx sample missing, skipping docx assertion');
 }
 
+// URL HTML parsing
+const html = '<!doctype html><html><head><title>Hello</title><style>body{color:red}</style><script>alert(1)</script></head><body><h1>Title</h1><p>body one</p><p>body two</p></body></html>';
+const urlInput = { kind: 'url' as const, originalUrl: 'https://example.com/', finalUrl: 'https://example.com/', fetchedAt: new Date().toISOString(), body: html };
+const urlResult = await reg.parse(urlInput);
+assert('url title extracted', urlResult.title === 'Hello');
+assert('url body extracted', urlResult.text.includes('body one') && urlResult.text.includes('body two'));
+assert('url strips scripts/styles', !urlResult.text.includes('alert(1)') && !urlResult.text.includes('color:red'));
+assert('url parser identifier', urlResult.metadata.parser === 'url-html');
+
 if (failed > 0) process.exitCode = 1;
