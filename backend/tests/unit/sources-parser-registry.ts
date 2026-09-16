@@ -31,4 +31,21 @@ try { await reg.parse({ kind: 'file', filename: 'evil.xyz', buffer: Buffer.from(
 catch (e) { threw = e instanceof UnsupportedSourceFormatError; }
 assert('unknown extension rejected', threw);
 
+// 真实 PDF：使用 pdf-parse 自带测试 PDF，避免外部下载依赖
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pdfPath = resolve(__dirname, '..', '..', 'node_modules', 'pdf-parse', 'test', 'data', '05-versions-space.pdf');
+let pdfBuffer: Buffer | null = null;
+try { pdfBuffer = readFileSync(pdfPath); } catch { /* pdf-parse 可能未自带样本，跳过 */ }
+if (pdfBuffer) {
+  const pdfResult = await reg.parse({ kind: 'file', filename: 'sample.pdf', mimeType: 'application/pdf', buffer: pdfBuffer });
+  assert('pdf parsed has text', pdfResult.text.length > 50);
+  assert('pdf pageCount > 0', (pdfResult.metadata.pageCount ?? 0) > 0);
+  assert('pdf parser identifier', pdfResult.metadata.parser === 'pdf-local');
+} else {
+  console.log('  · pdf sample missing, skipping pdf assertion');
+}
+
 if (failed > 0) process.exitCode = 1;
