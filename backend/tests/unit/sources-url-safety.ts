@@ -22,4 +22,6 @@ await expectReject('reject 192.168.x', 'http://192.168.1.1/', UnsafeUrlError);
 await expectReject('reject 169.254 link-local', 'http://169.254.169.254/latest/meta-data/', UnsafeUrlError);
 await expectReject('reject 0.0.0.0', 'http://0.0.0.0/', UnsafeUrlError);
 await expectReject('reject ftp', 'ftp://example.com/', UnsupportedUrlError);
+await expectReject('reject fe80::/10 link-local fe90', 'http://[fe90::1]/', UnsafeUrlError);
+await expectReject('reject fe80::/10 link-local febf', 'http://[febf::1]/', UnsafeUrlError);
 if (failed > 0) process.exitCode = 1;

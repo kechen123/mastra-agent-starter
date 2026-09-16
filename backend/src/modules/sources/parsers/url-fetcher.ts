@@ -35,7 +35,14 @@ function isPrivateOrLoopback(ip: string): boolean {
   // IPv6
   const lower = ip.toLowerCase();
   if (lower === '::1') return true;
-  if (lower.startsWith('fe80:')) return true; // link-local
+  // fe80::/10 link-local: first 16-bit word in [0xfe80, 0xfebf]
+  {
+    const m = lower.match(/^([0-9a-f]{1,4}):/);
+    if (m && m[1]!.length === 4) {
+      const first = parseInt(m[1]!, 16);
+      if (first >= 0xfe80 && first <= 0xfebf) return true;
+    }
+  }
   if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // ULA
   // IPv4-mapped IPv6: ::ffff:a.b.c.d
   if (lower.startsWith('::ffff:')) return isPrivateOrLoopback(lower.slice(7));
