@@ -24,11 +24,11 @@ export const recordFileSourceRoute = registerApiRoute('/sources/file', {
     const intentText = typeof intent === 'string' ? intent : '';
     const file = formData.get('file');
     if (!file || typeof file === 'string' || typeof (file as File).arrayBuffer !== 'function') {
-      return context.json({ message: '请使用 file 字段上传文件。' }, 400);
+      return context.json({ error_code: 'INPUT_VALIDATION_FAILED', message: '请使用 file 字段上传文件。' }, 400);
     }
     const f = file as File;
-    if (f.size === 0) return context.json({ message: '不允许上传空文件。' }, 400);
-    if (f.size > MAX_UPLOAD_FILE_SIZE) return context.json({ message: '文件不能超过 10 MB。' }, 400);
+    if (f.size === 0) return context.json({ error_code: 'INPUT_VALIDATION_FAILED', message: '不允许上传空文件。' }, 400);
+    if (f.size > MAX_UPLOAD_FILE_SIZE) return context.json({ error_code: 'INPUT_VALIDATION_FAILED', message: '文件不能超过 10 MB。' }, 400);
     if (!isRecordIntent(intentText || f.name)) {
       return context.json({ error_code: 'UNSUPPORTED_ATTACHMENT_QA', message: '临时附件问答尚未实现，请明确表达记录意图（如"记录这个文件"）。' }, 422);
     }
