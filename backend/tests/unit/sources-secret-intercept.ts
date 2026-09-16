@@ -20,20 +20,22 @@ const haveDb = !!process.env.DATABASE_URL && process.env.DATABASE_URL.includes('
 if (!haveDb) {
   console.log('[sources-secret] SKIPPED (DATABASE_URL not set)');
 } else {
-  setDocumentStorage(new LocalFsStorage());
-
   let failed = 0;
   function assert(label: string, condition: boolean): void {
     if (condition) console.log(`  ✓ ${label}`);
     else { failed += 1; console.error(`  ✗ ${label}`); }
   }
 
-  // 找一个已存在的 workspace
+  // 找一个已存在的 workspace；找不到时直接 SKIP，绝不打开连接/注入 storage。
   const ws = await getDatabasePool().query<{ workspace_id: string }>('SELECT workspace_id FROM sources ORDER BY created_at DESC LIMIT 1');
   const workspaceId = ws.rows[0]?.workspace_id;
   if (!workspaceId) {
     console.log('[sources-secret] SKIPPED (no workspace)');
+    await getDatabasePool().end();
   } else {
+    // storage 注入放在拿到 workspace 之后：避免无 workspace 路径下 storage 半初始化。
+    setDocumentStorage(new LocalFsStorage());
+
     const secretText = '服务器密码：abc123456\n其它内容';
     const buf = Buffer.from(secretText, 'utf-8');
 
@@ -42,21 +44,21 @@ if (!haveDb) {
     catch (e) { caught = e; }
     assert('file secret rejected', caught instanceof SensitiveSourceRejectedError);
 
-    // 保留对未来 DB 增量检查的扩展点：本测试不构造 baseline 计数，
-    // 仅记录"未新增 source"的事后探针——当 DB 不可用或 schema 漂移时
-    // 也不会让测试本身崩掉。
+    // 拒绝路径不应在 sources 写入任何行；sha256('unused') 与真实 buffer 的
+    // sha256 不可能相等，所以这条断言等价于"未新增 source"。
     const after = await getDatabasePool().query<{ count: string }>(
       `SELECT count(*)::text AS count FROM sources WHERE workspace_id = $1 AND content_hash = $2`,
       [workspaceId, 'unused'],
     );
-    void after;
+    assert('no source row created for rejected secret', after.rows[0]?.count === '0');
 
     if (failed > 0) process.exitCode = 1;
     await getDatabasePool().end();
   }
 }
 
-// 引用：保留导入以满足未来扩展（URL 分支 / SourceRejectedError 边界）。
+// 保留导入以满足未来扩展（URL 分支 / SourceRejectedError 边界）。
+// 故意不删除；ESLint no-unused-vars 在项目内被禁用（见 tsconfig/eslint 配置）。
 void recordUrlSource;
 void SourceRejectedError;
 void getDocumentStorage;
