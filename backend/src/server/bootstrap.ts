@@ -52,6 +52,7 @@ import {
   uploadDocumentRoute,
 } from './routes/documents.js';
 import { capabilitiesRoute } from './routes/capabilities.js';
+import { recordSourceRoute, recordFileSourceRoute, recordUrlSourceRoute } from './routes/sources.js';
 import { healthRoute, readinessRoute } from './routes/health.js';
 import {
   createKnowledgeBaseRoute,
@@ -232,6 +233,9 @@ const rawApiRoutes = [
   getDocumentRoute,
   deleteDocumentRoute,
   capabilitiesRoute,
+  recordSourceRoute,
+  recordFileSourceRoute,
+  recordUrlSourceRoute,
   // V2 入口（阶段 2 主用；阶段 3 之后切 v1，v2alpha 删除）
   createConversationV2AlphaRoute,
   createMessageV2AlphaRoute,
