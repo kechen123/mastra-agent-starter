@@ -103,6 +103,10 @@ export interface Citation {
   sourceId?: string;
   sourceTitle?: string;
   sourceType?: string;
+  /** 来自 chunk metadata.page（PDF 等带分页文档）。 */
+  page?: number;
+  /** 来自 source.metadata.finalUrl（URL 录入）。 */
+  url?: string;
 }
 
 export interface GroundedAnswer {
