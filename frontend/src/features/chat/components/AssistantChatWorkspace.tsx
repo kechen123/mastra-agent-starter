@@ -8,10 +8,9 @@ import {
   type ExternalStoreAdapter,
   type MessageState,
 } from '@assistant-ui/react';
-import { Check, ChevronDown, Copy, Library, LoaderCircle, PanelLeftOpen, RefreshCw, RotateCcw, Send, Sparkles, Square, X } from 'lucide-react';
+import { Check, ChevronDown, Copy, Library, LoaderCircle, PanelLeftOpen, Paperclip, RefreshCw, RotateCcw, Send, Sparkles, Square, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Citation, KnowledgeBase } from '../../../lib/api';
-import { recordFileSource, recordUrlSource } from '../../../lib/api';
 import { cn } from '../../../lib/cn';
 import type { ChatMessage, ToolCallState } from '../../../types/ui';
 import type { ApprovalView } from '../../../types/approval';
@@ -27,6 +26,26 @@ import { AgentSelect } from './AgentSelect';
 import { KnowledgeBasePicker } from './KnowledgeBasePicker';
 import { ModelSelect } from './ModelSelect';
 
+/**
+ * 尚未发送给 App.tsx 的附件 / URL。Composer 选文件 / URL 时只进 pending 状态，
+ * 不调用 /sources/file 或 /sources/url；真正"记录下来"的语义判断在 SEND 时
+ * 由 App.tsx 完成，避免普通提问被自动写入长期资料。
+ */
+export type PendingAttachment =
+  | { kind: 'file'; file: File }
+  | { kind: 'url'; url: string };
+
+/**
+ * Composer 与 assistant-ui 适配器之间共享的 pending 附件槽位。
+ * 适配器在 onNew 中读取并清空；ThreadView 在用户点选文件 / URL 时写入。
+ * 用 ref + 订阅避免每次 pending 变化重建 useExternalStoreRuntime。
+ */
+const pendingAttachmentRef: { current: PendingAttachment | null } = { current: null };
+const pendingAttachmentListeners = new Set<() => void>();
+function notifyPendingChanged(): void {
+  for (const listener of pendingAttachmentListeners) listener();
+}
+
 export interface AssistantChatWorkspaceProps {
   appShortName: string;
   messages: ChatMessage[];
@@ -40,7 +59,12 @@ export interface AssistantChatWorkspaceProps {
   /** 后端 llm.displayName（如 "DeepSeek"）；缺省回退 defaultChatModel。 */
   llmDisplayName?: string;
   activeKnowledgeBase: Pick<KnowledgeBase, 'id' | 'name'> | null;
-  onSubmit: (text: string) => void;
+  /**
+   * 提交问题。`attachment` 是 Composer 上挂着的待处理附件：附件与记录意图
+   * 同在时才真正走 `/sources/file` 或 `/sources/url`；附件 + 普通提问
+   * → App.tsx 会以 "临时附件问答尚未实现" 提示用户，避免悄悄写库。
+   */
+  onSubmit: (text: string, attachment?: PendingAttachment | null) => void;
   onStop: () => void;
   onRegenerate: (assistantMessageId: string) => void;
   onSwitchAgent: (agentId: string) => void;
@@ -112,8 +136,16 @@ function useChatAdapter(props: AssistantChatWorkspaceProps): ExternalStoreAdapte
       convertMessage: chatMessageToThreadMessage,
       onNew: async (message: AppendMessage) => {
         const text = extractAppendMessageText(message).trim();
-        if (!text) return;
-        await submitRef.current(text);
+        // Composer 文本为空，但挂着的附件 / URL 也允许"只记录不提问"。
+        // 若两者皆空，直接忽略。
+        const attachment = pendingAttachmentRef.current;
+        if (!text && !attachment) return;
+        // 取走后清空 pending，避免同一附件被反复发送。
+        pendingAttachmentRef.current = null;
+        if (attachment) {
+          notifyPendingChanged();
+        }
+        await submitRef.current(text, attachment);
       },
       onCancel: async () => {
         await stopRef.current();
@@ -157,12 +189,18 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [urlDraft, setUrlDraft] = useState('');
-  const [attachmentStatus, setAttachmentStatus] = useState<
-    | { kind: 'pending'; label: string }
-    | { kind: 'done'; sourceId: string; label: string }
-    | { kind: 'error'; label: string; message: string }
-    | null
-  >(null);
+  // 订阅 pending 附件变化，用于在 Composer 头部渲染提示 + 允许用户清除。
+  // 仅在选择后短暂触发 re-render，不进入 useExternalStoreRuntime 的依赖链。
+  const [pendingAttachment, setPendingAttachment] = useState<PendingAttachment | null>(pendingAttachmentRef.current);
+  useEffect(() => {
+    const listener = () => setPendingAttachment(pendingAttachmentRef.current);
+    pendingAttachmentListeners.add(listener);
+    return () => { pendingAttachmentListeners.delete(listener); };
+  }, []);
+  const clearPendingAttachment = () => {
+    pendingAttachmentRef.current = null;
+    notifyPendingChanged();
+  };
 
   // assistant-ui viewport store：isAtBottom 由框架原生维护，
   // 不再依赖手写 scrollTop/scrollHeight 阈值；用户上滑 → isAtBottom=false →
@@ -305,15 +343,30 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
             onDecline={(item) => onDeclineApproval?.(item)}
           />
         )}
-        {attachmentStatus && (
+        {false /* 上传状态现在由 App.tsx 通过助手消息承载；Composer 不再持有写库状态 */}
+        {pendingAttachment && (
           <div
             role="status"
-            className="w-full max-w-[768px] mx-auto mt-2 px-3 py-1.5 rounded border text-[12px]"
-            data-status={attachmentStatus.kind}
+            data-testid="composer-pending-attachment"
+            className="w-full max-w-[768px] mx-auto mt-2 flex items-center gap-2 px-3 py-1.5 rounded border border-app-border bg-app-surface-muted text-[12px] text-app-text"
           >
-            {attachmentStatus.kind === 'pending' && `正在记录：${attachmentStatus.label}`}
-            {attachmentStatus.kind === 'done' && `已记录到长期资料：${attachmentStatus.label}`}
-            {attachmentStatus.kind === 'error' && `记录失败：${attachmentStatus.label} — ${attachmentStatus.message}`}
+            <Paperclip size={13} className="shrink-0 text-app-muted" aria-hidden />
+            <span className="truncate min-w-0">
+              待发送：
+              <strong className="font-semibold">
+                {pendingAttachment.kind === 'file' ? pendingAttachment.file.name : pendingAttachment.url}
+              </strong>
+            </span>
+            <span className="text-app-muted">· 在消息中表达"记录下来"才会真正写入长期资料；普通提问将提示"临时附件问答尚未实现"。</span>
+            <button
+              type="button"
+              onClick={clearPendingAttachment}
+              className="ml-auto grid place-items-center w-5 h-5 p-0 text-app-muted bg-transparent border-0 rounded hover:text-app-text hover:bg-app-hover"
+              aria-label="移除附件"
+              title="移除附件"
+            >
+              <X size={12} aria-hidden />
+            </button>
           </div>
         )}
         <div className="w-full max-w-[768px] mx-auto flex items-center gap-2 mt-1">
@@ -321,37 +374,31 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
             type="button"
             onClick={() => fileInputRef.current?.click()}
             className="grid place-items-center w-8 h-8 rounded-full text-app-muted hover:text-app-text hover:bg-app-hover transition-colors"
-            title="记录文件到长期资料"
-            aria-label="记录文件到长期资料"
+            title="附加文件到消息"
+            aria-label="附加文件到消息"
           >
-            📎
+            <Paperclip size={16} aria-hidden />
           </button>
           <input
             ref={fileInputRef}
             type="file"
             accept=".txt,.md,.pdf,.docx"
             style={{ display: 'none' }}
-            onChange={async (e) => {
+            onChange={(e) => {
               const file = e.target.files?.[0];
               if (!file) return;
-              setAttachmentStatus({ kind: 'pending', label: file.name });
-              try {
-                const result = await recordFileSource({ file, intent: '记录下来' });
-                setAttachmentStatus({ kind: 'done', sourceId: result.id, label: file.name });
-              } catch (err) {
-                const message = err instanceof Error ? err.message : '记录文件失败';
-                setAttachmentStatus({ kind: 'error', label: file.name, message });
-              } finally {
-                if (fileInputRef.current) fileInputRef.current.value = '';
-              }
+              // 仅设 pending，不调用 /sources/file。等用户 SEND 时由 App.tsx 判断意图。
+              pendingAttachmentRef.current = { kind: 'file', file };
+              notifyPendingChanged();
+              if (fileInputRef.current) fileInputRef.current.value = '';
             }}
           />
           <button
             type="button"
             onClick={() => setShowUrlInput((v) => !v)}
             className="grid place-items-center w-8 h-8 rounded-full text-app-muted hover:text-app-text hover:bg-app-hover transition-colors"
-            title="记录 URL 到长期资料"
-            aria-label="记录 URL 到长期资料"
+            title="附加 URL 到消息"
+            aria-label="附加 URL 到消息"
           >
             🌐
           </button>
@@ -362,28 +409,33 @@ function ThreadView(props: AssistantChatWorkspaceProps) {
                 placeholder="https://..."
                 value={urlDraft}
                 onChange={(e) => setUrlDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const url = urlDraft.trim();
+                    if (!url) return;
+                    pendingAttachmentRef.current = { kind: 'url', url };
+                    notifyPendingChanged();
+                    setShowUrlInput(false);
+                    setUrlDraft('');
+                  }
+                }}
                 className="flex-1 min-w-0 px-2 py-1 rounded border border-app-border bg-app-surface text-[13px] text-app-text"
               />
               <button
                 type="button"
-                onClick={async () => {
+                onClick={() => {
                   const url = urlDraft.trim();
                   if (!url) return;
-                  setAttachmentStatus({ kind: 'pending', label: url });
-                  try {
-                    const result = await recordUrlSource({ url, intent: '记录下来' });
-                    setAttachmentStatus({ kind: 'done', sourceId: result.id, label: url });
-                    setShowUrlInput(false);
-                    setUrlDraft('');
-                  } catch (err) {
-                    const message = err instanceof Error ? err.message : '记录 URL 失败';
-                    setAttachmentStatus({ kind: 'error', label: url, message });
-                  }
+                  pendingAttachmentRef.current = { kind: 'url', url };
+                  notifyPendingChanged();
+                  setShowUrlInput(false);
+                  setUrlDraft('');
                 }}
                 className="px-2 py-1 rounded bg-app-text text-app-bg text-[12px] disabled:opacity-50"
                 disabled={!urlDraft.trim()}
               >
-                记录
+                附加
               </button>
               <button
                 type="button"

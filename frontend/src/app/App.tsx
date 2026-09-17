@@ -13,6 +13,9 @@ import {
   login as loginApi,
   logout as logoutApi,
   uploadDocument,
+  recordSource,
+  recordFileSource,
+  recordUrlSource,
   type Capabilities,
   type ChatAgentInfo,
   type Citation,
@@ -89,6 +92,11 @@ function isUuid(value: string): boolean {
 
 function isBrowser(): boolean {
   return typeof window !== 'undefined' && typeof window.history !== 'undefined'
+}
+
+function isLikelyRecordIntent(content: string): boolean {
+  return !/(?:不要|别|无需|不用)\s*(?:帮我)?(?:记录|保存|记住|存)/.test(content)
+    && ['记一下', '记录下来', '帮我保存', '以后记得', '存一下', '保存一下'].some((phrase) => content.includes(phrase))
 }
 
 type AppRoute =
@@ -194,7 +202,7 @@ function App() {
   }, [sidebarCollapsed])
   const toggleSidebarCollapsed = useCallback(() => setSidebarCollapsed((value) => !value), [])
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
-  const [conversationState, setConversationState] = useState<ConversationState>({ type: 'draft', agentId: 'general-chat', knowledgeBaseId: null })
+  const [conversationState, setConversationState] = useState<ConversationState>({ type: 'draft', agentId: 'daymind', knowledgeBaseId: null })
   const [messages, setMessages] = useState<ChatMessage[]>([]); const [isAsking, setIsAsking] = useState(false); const [chatError, setChatError] = useState<string | null>(null); const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]); const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<string | null>(null); const [documents, setDocuments] = useState<KnowledgeDocument[]>([]); const [isKnowledgeLoading, setIsKnowledgeLoading] = useState(false); const [isUploading, setIsUploading] = useState(false); const [showCreateKnowledgeBase, setShowCreateKnowledgeBase] = useState(false); const [knowledgeError, setKnowledgeError] = useState<string | null>(null); const [capabilities, setCapabilities] = useState<Capabilities>(DEFAULT_CAPABILITIES)
   // ConfirmDialog 集中状态：所有 window.confirm 替代品走这里。
@@ -245,7 +253,7 @@ function App() {
   // 共用它，避免产生两条空会话。
   const draftCreationPromiseRef = useRef<Promise<string> | null>(null)
 
-  const currentAgentId = conversationState.type === 'draft' ? conversationState.agentId : (conversations.find((c) => c.id === conversationState.id)?.agentId ?? 'general-chat')
+  const currentAgentId = conversationState.type === 'draft' ? conversationState.agentId : (conversations.find((c) => c.id === conversationState.id)?.agentId ?? 'daymind')
   const currentKnowledgeBaseId = conversationState.type === 'draft' ? conversationState.knowledgeBaseId : (conversations.find((c) => c.id === conversationState.id)?.knowledgeBaseId ?? null)
   const activeKnowledgeBase = currentKnowledgeBaseId ? knowledgeBases.find((kb) => kb.id === currentKnowledgeBaseId) ?? null : null
 
@@ -258,7 +266,7 @@ function App() {
     if (capabilities.ragEnabled) return chatAgents
     return chatAgents.filter((a) => !a.requiresKnowledgeBase)
   }, [chatAgents, capabilities.ragEnabled])
-  const fallbackAgentId = availableChatAgents[0]?.id ?? 'general-chat'
+  const fallbackAgentId = availableChatAgents.find((agent) => agent.id === 'daymind')?.id ?? availableChatAgents[0]?.id ?? 'daymind'
   const effectiveAgentId = availableChatAgents.some((a) => a.id === currentAgentId)
     ? currentAgentId
     : fallbackAgentId
@@ -345,7 +353,7 @@ function App() {
     setKnowledgeBases([])
     setDocuments([])
     setActiveModule('对话')
-    setConversationState({ type: 'draft', agentId: 'general-chat', knowledgeBaseId: null })
+    setConversationState({ type: 'draft', agentId: 'daymind', knowledgeBaseId: null })
     streamingAssistantIdRef.current = null
     abortControllerRef.current?.abort()
     abortControllerRef.current = null
@@ -540,7 +548,7 @@ function App() {
   // 统一进入 draft 的入口。所有"放弃当前会话回到空白"路径都必须走这里，
   // 避免 404 / 非法 URL / popstate / 新对话 / 删除当前会话各自复制代码。
   // options:
-  //   agentId / knowledgeBaseId：默认 general-chat / null；用于知识库 / Agent 入口
+  //   agentId / knowledgeBaseId：默认 daymind / null；用于知识库 / Agent 入口
   //   clearUrl: 'push' 用户主动（新对话、删除当前会话）；'replace' 启动恢复 /
   //     解析失败 / 404（不污染历史栈）；'none' 不动 URL
   //   message: undefined 不动 chatError；null 清空；string 设为指定提示
@@ -558,7 +566,7 @@ function App() {
     setActiveModule('对话')
     setConversationState({
       type: 'draft',
-      agentId: options?.agentId ?? 'general-chat',
+      agentId: options?.agentId ?? 'daymind',
       knowledgeBaseId: options?.knowledgeBaseId ?? null,
     })
     setMessages([])
@@ -921,7 +929,7 @@ function App() {
  */
   async function switchAgent(agentId: string): Promise<boolean> {
     if (conversationState.type === 'draft') {
-      setConversationState({ type: 'draft', agentId, knowledgeBaseId: agentId === 'general-chat' ? null : conversationState.knowledgeBaseId });
+      setConversationState({ type: 'draft', agentId, knowledgeBaseId: agentId === 'knowledge-base' ? conversationState.knowledgeBaseId : null });
       setChatError(null);
       return true;
     }
@@ -1037,9 +1045,52 @@ function App() {
     }
   }
 
-  async function submitQuestion(content: string) {
+  async function submitQuestion(content: string, attachment?: { kind: 'file'; file: File } | { kind: 'url'; url: string } | null) {
     const trimmed = content.trim()
-    if (!trimmed || isSubmittingRef.current || streamingAssistantIdRef.current) return
+    if (isSubmittingRef.current || streamingAssistantIdRef.current) return
+    // 附件分支：必须显式"记录下来"才落库；普通提问 → 返回"临时附件问答尚未实现"。
+    // 这里不做任何 /sources/* 调用前的写库，意图判断与上传都在一个流程里串起来。
+    if (attachment) {
+      if (isLikelyRecordIntent(trimmed)) {
+        await runRecordAttachment(trimmed, attachment)
+      } else {
+        await runUnsupportedAttachmentAsk(trimmed, attachment)
+      }
+      return
+    }
+    if (!trimmed) return
+    // 明确的"记录"表达先走 Daymind Source pipeline。服务端会再次判断意图并在
+    // 任意 LLM / Embedding 调用前执行敏感信息扫描，前端判断只用于交互分流。
+    if (isLikelyRecordIntent(trimmed)) {
+      isSubmittingRef.current = true
+      setIsAsking(true)
+      const createdAt = new Date().toISOString()
+      const userMessageId = crypto.randomUUID()
+      setMessages((current) => [...current, { id: userMessageId, role: 'user', content: trimmed, status: 'completed', createdAt }])
+      try {
+        const source = await recordSource(trimmed)
+        // 记录成功后不再把隐藏索引写入会话状态；任意 Daymind 会话都会由
+        // 服务端按 workspace 解析同一套长期资料。
+        enterDraft({ agentId: 'daymind', knowledgeBaseId: null, clearUrl: 'none', message: null })
+        setMessages([
+          { id: userMessageId, role: 'user', content: trimmed, status: 'completed', createdAt },
+          {
+            id: crypto.randomUUID(), role: 'assistant',
+            content: `已记录“${source.title}”，并建立了 ${source.chunkCount} 个检索片段。之后可直接问我相关内容。`,
+            status: 'completed', createdAt: new Date().toISOString(), tools: [],
+            citations: [{ chunkId: source.id, title: source.title, chapter: '文本记录', content: trimmed, score: 1, category: 'Daymind Source', type: source.type, source: source.title, documentName: source.title }],
+          },
+        ])
+      } catch (error) {
+        setMessages((current) => current.map((message) => message.id === userMessageId && message.role === 'user' ? { ...message, status: 'failed' } : message))
+        if (error instanceof UnauthenticatedError) handleUnauthenticated()
+        else setChatError(toErrorMessage(error))
+      } finally {
+        setIsAsking(false)
+        isSubmittingRef.current = false
+      }
+      return
+    }
     // PR-review Round 3 Item 2 修复：当前持久化的 agent（currentAgentId）
     //   在 Core-only 模式下可能是 knowledge-base（被 availableChatAgents
     //   过滤掉），若直接放行 → 后端仍按 knowledge-base Agent 执行，与 UI
@@ -1168,6 +1219,85 @@ function App() {
       // 同 submitQuestion：保证任意终态都会触发一次会话列表同步。
       void refreshConversations()
     }
+  }
+
+  // ── Composer 附件流程 ──────────────────────────────────────────────────
+  // 文件 / URL 落库：必须由用户在文本中显式表达"记录下来"，才会真正调用
+  // /sources/file 或 /sources/url；意图判断与服务端敏感信息扫描是两次把关。
+  // 整条链路保持在 submitQuestion 同一调用栈，避免任何"先自动上传再问"的隐式写库。
+  async function runRecordAttachment(
+    trimmed: string,
+    attachment: { kind: 'file'; file: File } | { kind: 'url'; url: string },
+  ): Promise<void> {
+    isSubmittingRef.current = true
+    setIsAsking(true)
+    const createdAt = new Date().toISOString()
+    const userMessageId = crypto.randomUUID()
+    const label = attachment.kind === 'file' ? attachment.file.name : attachment.url
+    setMessages((current) => [
+      ...current,
+      { id: userMessageId, role: 'user', content: trimmed || `记录「${label}」`, status: 'completed', createdAt },
+    ])
+    try {
+      const source = attachment.kind === 'file'
+        ? await recordFileSource({ file: attachment.file, intent: trimmed || '记录下来' })
+        : await recordUrlSource({ url: attachment.url, intent: trimmed || '记录下来' })
+      enterDraft({ agentId: 'daymind', knowledgeBaseId: null, clearUrl: 'none', message: null })
+      setMessages([
+        { id: userMessageId, role: 'user', content: trimmed || `记录「${label}」`, status: 'completed', createdAt },
+        {
+          id: crypto.randomUUID(), role: 'assistant',
+          content: `已记录「${source.title}」，并建立了 ${source.chunkCount} 个检索片段。之后可直接问我相关内容。`,
+          status: 'completed', createdAt: new Date().toISOString(), tools: [],
+          citations: [{
+            chunkId: source.id, title: source.title, chapter: attachment.kind === 'file' ? '文件记录' : 'URL 记录',
+            content: trimmed || label, score: 1, category: 'Daymind Source',
+            type: source.type, source: source.title, documentName: source.title,
+          }],
+        },
+      ])
+    } catch (error) {
+      setMessages((current) => current.map((message) => message.id === userMessageId && message.role === 'user' ? { ...message, status: 'failed' } : message))
+      if (error instanceof UnauthenticatedError) handleUnauthenticated()
+      else setChatError(toErrorMessage(error))
+    } finally {
+      setIsAsking(false)
+      isSubmittingRef.current = false
+    }
+  }
+
+  // 附件 + 普通提问：不调用 /sources/*，直接以助手身份提示尚未实现。
+  // 关键点：附件不能"先落库再问"，否则用户在文本里写"这个文件里有什么"也会触发写入。
+  async function runUnsupportedAttachmentAsk(
+    trimmed: string,
+    attachment: { kind: 'file'; file: File } | { kind: 'url'; url: string },
+  ): Promise<void> {
+    isSubmittingRef.current = true
+    setIsAsking(true)
+    const createdAt = new Date().toISOString()
+    const userMessageId = crypto.randomUUID()
+    const label = attachment.kind === 'file' ? attachment.file.name : attachment.url
+    const userText = trimmed || (attachment.kind === 'file' ? '请看这个文件' : '请看这个链接')
+    setMessages((current) => [
+      ...current,
+      { id: userMessageId, role: 'user', content: userText, status: 'completed', createdAt },
+    ])
+    // 同步插入助手回复，避免等待期间出现空 UI
+    setMessages((current) => [
+      ...current.slice(0, -1),
+      { id: userMessageId, role: 'user', content: userText, status: 'completed', createdAt },
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: `临时附件问答尚未实现（附件：${label}）。请在消息中表达"记录下来"以写入长期资料，之后再向我提问；当前会话暂未基于附件内容作答。`,
+        status: 'completed',
+        createdAt: new Date().toISOString(),
+        tools: [],
+        citations: [],
+      },
+    ])
+    setIsAsking(false)
+    isSubmittingRef.current = false
   }
 
   // 重命名会话：仅触发 Dialog；实际提交由 RenameConversationDialog onSubmit 回调完成。
@@ -1429,7 +1559,7 @@ function App() {
       defaultChatModel={capabilities.defaultChatModel}
       llmDisplayName={capabilities.llm?.displayName}
       activeKnowledgeBase={activeKnowledgeBase}
-      onSubmit={(text) => void submitQuestion(text)}
+      onSubmit={(text, attachment) => void submitQuestion(text, attachment)}
       onStop={() => void handleStop()}
       onRegenerate={handleRegenerate}
       onSwitchAgent={switchAgent}

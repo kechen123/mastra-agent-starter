@@ -1,5 +1,40 @@
 # Repository Guidelines
 
+## Upstream Sync Policy
+
+`mastra-agent-starter` is this repository's long-term upstream template. Keep
+the current business repository as `origin`; configure the template as the
+`upstream` remote (`https://github.com/kechen123/mastra-agent-starter.git`).
+
+Never push this repository's business work to `upstream`.
+
+Before beginning a substantial task, before pushing `origin`, and once again
+after a push, run `git fetch upstream` and inspect whether `upstream/main`
+contains commits not yet present locally.
+
+If upstream changes exist, review the concrete diff and classify the relevant
+changes (Runtime, Agent, Skill, Tool, Conversation, SSE, database, UI,
+Provider, or infrastructure) before deciding whether to merge them.
+
+Do not use an upstream update to overwrite current business behavior. Resolve
+conflicts only after understanding both the template change and the business
+change, then rerun checks appropriate to the merge.
+
+Daymind-specific business features should normally remain only in this
+repository. This includes features related to personal/work knowledge,
+projects, inbox ingestion, memory, wiki organization, retrieval behavior, and
+assistant-specific workflows.
+
+If a business change produces a genuinely reusable Runtime, Skill, Provider,
+retrieval, document-processing, memory, wiki, or Job capability that is not
+specific to Daymind, document it as a possible upstream contribution.
+
+Do not modify or push changes to the upstream repository automatically.
+
+The practical procedure and conflict-handling checklist live in
+[`docs/UPSTREAM_SYNC.md`](docs/UPSTREAM_SYNC.md).
+
+
 ## Project Structure & Module Organization
 
 `backend/src/mastra/` contains the application runtime. Keep agents in `agents/`, callable capabilities in `tools/`, and retrieval code in `rag/`. Scripts used for one-off checks live in `backend/src/scripts/`. PostgreSQL schema lives in `backend/database/init.sql`. `frontend/` contains the React knowledge-workbench UI and must not import Mastra runtime code directly.

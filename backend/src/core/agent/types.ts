@@ -4,6 +4,8 @@ import type { Mastra } from '@mastra/core';
 /**
  * Agent 的能力矩阵。Runtime 在每次请求时检查：
  * - `knowledgeBase`：决定是否需要绑定 knowledgeBaseId、检索引文。
+ * - `daymindSources`：按 workspace 自动检索 Daymind 长期资料，不依赖会话
+ *   或前端传入的 knowledgeBaseId。
  * - `citations`：决定检索到的引文是否回传前端（同时仍会注入 prompt）。
  * - `tools`：决定是否按 toolIds 解析 Tool 注册表。
  * - `skills`：决定是否按 agent_skill_bindings 解析 Skill 并注入。
@@ -13,6 +15,7 @@ import type { Mastra } from '@mastra/core';
  */
 export interface AgentCapabilities {
   knowledgeBase: boolean;
+  daymindSources?: boolean;
   citations: boolean;
   tools: boolean;
   skills: boolean;

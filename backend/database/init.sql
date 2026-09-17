@@ -97,10 +97,27 @@ CREATE TABLE knowledge_bases (
 );
 CREATE INDEX knowledge_bases_workspace_idx ON knowledge_bases(workspace_id);
 
+-- Daymind 的业务事实层。documents / chunks 是解析与检索投影，不能替代用户原始资料。
+CREATE TABLE sources (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('text', 'file', 'url', 'image', 'pdf', 'docx', 'xlsx', 'csv', 'markdown', 'other')),
+  title TEXT NOT NULL,
+  raw_content TEXT,
+  normalized_content TEXT,
+  content_hash TEXT NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX sources_workspace_created_idx ON sources(workspace_id, created_at DESC);
+CREATE UNIQUE INDEX sources_workspace_hash_idx ON sources(workspace_id, content_hash);
+
 CREATE TABLE documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+  source_id UUID REFERENCES sources(id) ON DELETE SET NULL,
   -- PR-1.2 关闭审查整改：原声明 `title` + `source`（未使用），与
   -- documents-service.ts:36-46 / 73-78 / 115-119 实际读写的 `name` /
   -- `type` / `size` 不一致；改回业务运行时真正使用的列。
@@ -135,6 +152,7 @@ CREATE TABLE documents (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX documents_workspace_kb_idx ON documents(workspace_id, knowledge_base_id);
+CREATE INDEX documents_source_idx ON documents(source_id) WHERE source_id IS NOT NULL;
 CREATE INDEX documents_storage_status_idx ON documents(workspace_id, storage_status)
   WHERE deleted_at IS NULL;
 -- PR-4.1 §8.1：去重粒度 (workspace_id, knowledge_base_id, sha256) 部分

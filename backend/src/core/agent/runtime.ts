@@ -1,6 +1,7 @@
 import type { Citation } from '../../modules/citations/types.js';
 import type { Message } from '../../modules/conversations/types.js';
 import { getKnowledgeBase } from '../../modules/knowledge/service.js';
+import { searchDaymindSources } from '../../modules/sources/retrieval.js';
 import { searchKnowledgeBase } from '../knowledge/search.js';
 import { resolveTools } from '../tool/registry.js';
 import {
@@ -490,15 +491,39 @@ export async function* streamAgent(
     let citations: Citation[] = [];
     const historyOrEmpty = history ?? [];
 
-    if (definition.capabilities.knowledgeBase) {
-      if (!knowledgeBaseId) {
+    const usesDaymindSources = definition.capabilities.daymindSources === true;
+    const usesKnowledgeBase = definition.capabilities.knowledgeBase;
+    const daymindRetrieval = usesDaymindSources
+      ? await searchDaymindSources(workspaceId, prompt, { topK: 5, signal: input.abortSignal })
+      : null;
+    const retrievalKnowledgeBaseId = daymindRetrieval?.knowledgeBaseId ?? knowledgeBaseId;
+
+    if (usesKnowledgeBase || usesDaymindSources) {
+      if (!retrievalKnowledgeBaseId && usesKnowledgeBase) {
         yield { type: 'error', error: '请先选择一个知识库。' };
         return;
       }
-      if (!(await getKnowledgeBase(workspaceId, knowledgeBaseId))) {
+      // Daymind 尚没有资料时只是正常对话，不能因不存在隐藏索引而报错。
+      if (!retrievalKnowledgeBaseId) {
+        resolvedPrompt = buildPrompt(historyOrEmpty, prompt);
+      } else if (!(await getKnowledgeBase(workspaceId, retrievalKnowledgeBaseId))) {
         yield { type: 'error', error: '绑定的知识库不存在，请重新选择。' };
         return;
-      }
+      } else if (usesDaymindSources) {
+        const retrieved = daymindRetrieval!.citations;
+        if (retrieved.length === 0) {
+          resolvedPrompt = buildPrompt(historyOrEmpty, prompt);
+        } else {
+          if (definition.capabilities.citations) citations = retrieved;
+          const context = retrieved
+            .map((c, i) => `[${i + 1}] ${c.title}｜${c.chapter}\n${c.content}`)
+            .join('\n\n');
+          resolvedPrompt = buildPrompt(
+            historyOrEmpty,
+            `请优先根据以下 Daymind 长期资料回答问题：「${prompt}」。\n\n${context}\n\n资料不足时请明确说明哪些内容来自已记录资料，避免把推测说成事实。引文由系统单独返回。`,
+          );
+        }
+      } else {
       // 必须通过 core/knowledge/search.ts wrapper 调用；retriever 本身已按
       // workspace_id 过滤（防御深度），但 wrapper 仍负责抛 CrossWorkspaceAccessError
       // 给上层，避免泄露 ID 存在性。禁止直连 retriever 绕过 workspaceId 校验。
@@ -506,12 +531,12 @@ export async function* streamAgent(
       // AbortSignal 透传：用户停止 / 超时立即中断 Embedding API 上游 fetch。
       const retrieved = await searchKnowledgeBase(
         workspaceId,
-        knowledgeBaseId,
+        retrievalKnowledgeBaseId,
         prompt,
         5,
         input.abortSignal,
       );
-      if (retrieved.length === 0) {
+      if (retrieved.length === 0 && usesKnowledgeBase) {
         // citations=false 的 Agent 也会发出同样的 done 事件，但 citations
         // 数组为空；下游消费者按 capabilities.citations 自己忽略即可。
         yield { type: 'done', content: '当前知识库中没有检索到可用于回答此问题的资料。', citations: [] };
@@ -529,6 +554,7 @@ export async function* streamAgent(
         historyOrEmpty,
         `请仅根据以下当前知识库资料回答问题：「${prompt}」。\n\n${context}\n\n不要使用资料以外的知识，也不要调用其他检索工具。引文由系统单独返回。`,
       );
+      }
     } else {
       resolvedPrompt = buildPrompt(historyOrEmpty, prompt);
     }

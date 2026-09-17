@@ -20,11 +20,13 @@
 import { registerAgent, getAgentDefinition } from '../core/agent/registry.js';
 import { generalChatAgent } from './general-chat/agent.js';
 import { knowledgeBaseAgent } from './knowledge-base/agent.js';
+import { daymindAgent } from './daymind/agent.js';
 import { stagingApprovalProbeAgentDefinition } from './staging-approval-probe/agent.js';
 
 export function registerBuiltinAgents(): void {
   if (!getAgentDefinition(generalChatAgent.id)) registerAgent(generalChatAgent);
   if (!getAgentDefinition(knowledgeBaseAgent.id)) registerAgent(knowledgeBaseAgent);
+  if (!getAgentDefinition(daymindAgent.id)) registerAgent(daymindAgent);
   if (process.env.ENABLE_STAGING_APPROVAL_PROBE === 'true') {
     if (process.env.DEPLOYMENT_PROFILE === 'production') {
       throw new Error('生产环境禁止启用审批探针 Agent。');
